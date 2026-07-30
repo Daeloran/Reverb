@@ -20,19 +20,22 @@
 
 - **Nature** : contrôle de l'éclairage RGB du poste SHYNAEL sous Linux. 10 ventilateurs NZXT, écran LCD du Kraken, 4 barrettes de RAM Corsair. Démon léger + fenêtre de pilotage.
 - **Utilisateurs** : Nico, sur sa machine. Outil personnel.
-- **Repo** : local, pas de remote pour l'instant
-- **Plateforme** : à décider (`gh` si GitHub, `glab` si GitLab)
-- **Statut** : expérimental, protocoles décodés, implémentation à faire
+- **Repo** : https://github.com/Daeloran/Reverb — **public**
+- **Plateforme** : GitHub → CLI à utiliser : **`gh`**
+- **Statut** : protocoles décodés ; couleur fixe livrée (#1), modes d'animation en cours (#3)
 - **Branche par défaut** : `main`
 
-> 📓 **LES TROIS SPÉCIFICATIONS DE PROTOCOLE FONT FOI.** Elles sont dans le vault Obsidian et sont le fruit d'une rétro-ingénierie validée sur le matériel réel (2026-07-30) :
-> - `~/Documents/Kirin Tor/02 - Projets/Reverb/SPEC-PROTOCOLE-NZXT.md`
-> - `~/Documents/Kirin Tor/02 - Projets/Reverb/SPEC-KRAKEN-LCD.md`
-> - `~/Documents/Kirin Tor/02 - Projets/Reverb/SPEC-CORSAIR-RAM.md`
+> 📓 **LES TROIS SPÉCIFICATIONS DE PROTOCOLE FONT FOI**, et la copie de ce dépôt est la référence :
+> - `docs/SPEC-PROTOCOLE-NZXT.md` — ventilateurs, modes, LED par LED, initialisation
+> - `docs/SPEC-KRAKEN-LCD.md` — écran 640×640, luminosité, mode firmware
+> - `docs/SPEC-CORSAIR-RAM.md` — SMBus, 11 LED par barrette, CRC-8
 >
-> **Les lire avant toute session touchant au matériel.** Ne jamais inventer une trame : si elle n'est pas dans une spec, elle est inconnue, et il faut le dire plutôt que la deviner.
+> **Les lire avant toute session touchant au matériel.** Chaque affirmation y porte un marqueur : ✅ confirmé par les données · 🔶 hypothèse non testée · ❓ inconnu. **Ne jamais implémenter depuis un ❓**, et ne jamais inventer une trame absente — dire qu'elle est inconnue.
 >
-> Voir aussi `Contrôle du matériel RGB.md` (environnement Linux, udev, pièges d'outillage) — ⚠️ deux de ses conclusions ont été corrigées, les avertissements sont en place dans la note.
+> Le vault Obsidian (`~/Documents/Kirin Tor/02 - Projets/Reverb/`) en garde une copie de lecture, plus des notes d'environnement Linux (udev, pièges d'outillage). **En cas de divergence, `docs/` fait foi.**
+
+> 🔍 **Avant d'organiser une nouvelle session de capture Windows, relire les `.pcap` déjà pris.**
+> Trois questions ouvertes ont été tranchées sans toucher au matériel, en réanalysant la capture existante avec `tools/extrait_modes.py`. Les captures sont dans `captures/` — hors git, 178 Mo.
 
 ## Stack
 

@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use reverb_cli::cli::{self, Cible, Command};
 use reverb_cli::hidraw::{self, Controller};
-use reverb_proto::{Brightness, Model, Position, Rgb, frame};
+use reverb_proto::{Brightness, Mode, Model, Position, Rgb, frame};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -23,12 +23,18 @@ fn main() -> ExitCode {
 
     let resultat = match commande {
         Command::List => lister(),
+        Command::Modes => {
+            lister_modes();
+            Ok(())
+        }
         Command::Set {
             cible,
-            color,
+            mode,
+            colors,
+            speed,
             brightness,
             skip_init,
-        } => appliquer(cible, color, brightness, skip_init),
+        } => appliquer(cible, mode, &colors, speed, brightness, skip_init),
     };
 
     match resultat {
@@ -68,10 +74,52 @@ fn lister() -> Result<(), String> {
     Ok(())
 }
 
-/// Applique une couleur à la cible demandée.
+/// Énumère les modes d'animation de la spec §4.1.
+fn lister_modes() {
+    println!(
+        "{:>4}  {:<17}  {:>8}  {:>7}",
+        "CODE", "NOM", "COULEURS", "VITESSE"
+    );
+    for mode in Mode::ALL {
+        let (min, max) = mode.colors();
+        let couleurs = if min == max {
+            min.to_string()
+        } else {
+            format!("{min} ou {max}")
+        };
+        let marque = if mode.confirmed() {
+            ""
+        } else {
+            "  🔶 nom à confirmer"
+        };
+        // La vitesse est affichée sur deux chiffres : c'est un octet du
+        // protocole, pas un nombre à lire comme une quantité.
+        let vitesse = format!("{:#04x}", mode.default_speed());
+        println!(
+            "{:>4}  {:<17}  {couleurs:>8}  {vitesse:>7}{marque}",
+            mode.code(),
+            mode.name(),
+        );
+    }
+    println!();
+    // La légende ne s'affiche que si elle a un objet : depuis la session §4.5,
+    // les huit modes sont confirmés. Elle resservira si un mode est ajouté à la
+    // table sans avoir été vu à l'œil — le `0x03`, par exemple.
+    if Mode::ALL.iter().any(|m| !m.confirmed()) {
+        println!(
+            "🔶 : le numéro du mode est certain, son nom reste une hypothèse — il n'a pas\n     \
+             encore été vérifié à l'œil sur le matériel (spec §4.1)."
+        );
+    }
+    println!("Vitesse : valeur brute du protocole, échelle non calibrée (spec §4.2).");
+}
+
+/// Applique un mode à la cible demandée.
 fn appliquer(
     cible: Cible,
-    color: Rgb,
+    mode: Mode,
+    colors: &[Rgb],
+    speed: u8,
     brightness: Brightness,
     skip_init: bool,
 ) -> Result<(), String> {
@@ -81,6 +129,23 @@ fn appliquer(
         Cible::Tous => Position::ALL.to_vec(),
         Cible::Une(position) => vec![position],
     };
+
+    // Toutes les trames sont construites **avant** la première écriture : une
+    // demande invalide ne doit jamais laisser l'éclairage à moitié appliqué.
+    let mut envois = Vec::with_capacity(positions.len());
+    for position in &positions {
+        let placement = position.placement();
+        let trame = frame::animation(
+            placement.mask,
+            mode,
+            colors,
+            speed,
+            brightness,
+            reverb_proto::LEDS_PER_FAN,
+        )
+        .map_err(|e| e.to_string())?;
+        envois.push((*position, placement.serial, trame));
+    }
 
     // Un contrôleur ne doit être initialisé qu'une fois, même si plusieurs de
     // ses canaux sont visés.
@@ -92,15 +157,8 @@ fn appliquer(
         }
     }
 
-    for position in positions {
-        let placement = position.placement();
-        let (controleur, _) = resoudre(&controleurs, placement.serial)?;
-        let trame = frame::fixed_color(
-            placement.mask,
-            color,
-            brightness,
-            reverb_proto::LEDS_PER_FAN,
-        );
+    for (position, serie, trame) in envois {
+        let (controleur, _) = resoudre(&controleurs, serie)?;
         hidraw::write_frame(&controleur.path, &trame).map_err(|e| {
             format!(
                 "écriture sur {} pour « {position} » : {e}",
