@@ -53,6 +53,7 @@ impl FanChannel {
         match brut.trim().parse::<u8>() {
             Ok(0) => Ok(Mode::FirmwareCurve),
             Ok(1) => Ok(Mode::Manual),
+            Ok(2) => Ok(Mode::HostCurve),
             Ok(autre) => Ok(Mode::Unknown(autre)),
             Err(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -67,9 +68,14 @@ impl FanChannel {
 pub enum Mode {
     /// `1` — la consigne écrite est appliquée telle quelle.
     Manual,
-    /// `0` — le firmware pilote le canal, typiquement selon une courbe de
-    /// température. Lui imposer une consigne fixe l'en sort.
+    /// `0` — le pilote ne pilote pas ; le firmware décide seul.
+    ///
+    /// ⚠️ Ce n'est **pas** un retour garanti au profil d'usine. Une fois une
+    /// courbe hôte chargée, le Kraken observé s'y rabat sur du refroidissement
+    /// maximal — voir `docs/VENTILATEURS.md`.
     FirmwareCurve,
+    /// `2` — le firmware exécute la courbe téléversée par l'hôte.
+    HostCurve,
     /// Une autre valeur, dont on ne sait rien. On la lit, on ne la réécrit pas.
     Unknown(u8),
     /// La source n'expose pas `pwmN_enable`.
@@ -80,7 +86,8 @@ impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Mode::Manual => write!(f, "manuel"),
-            Mode::FirmwareCurve => write!(f, "courbe firmware"),
+            Mode::FirmwareCurve => write!(f, "laissé au firmware"),
+            Mode::HostCurve => write!(f, "courbe de l'hôte"),
             Mode::Unknown(valeur) => write!(f, "inconnu ({valeur})"),
             Mode::Unsupported => write!(f, "non réglable"),
         }
@@ -285,6 +292,7 @@ pub fn set_mode(channel: &FanChannel, mode: Mode) -> io::Result<()> {
     let valeur = match mode {
         Mode::Manual => "1",
         Mode::FirmwareCurve => "0",
+        Mode::HostCurve => "2",
         Mode::Unknown(valeur) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

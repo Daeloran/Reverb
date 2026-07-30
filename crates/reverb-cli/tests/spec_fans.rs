@@ -960,19 +960,22 @@ mod modes {
     }
 
     #[test]
-    fn une_autre_valeur_d_enable_est_inconnue_et_conserve_la_valeur() {
-        // Contrat d'API — `Mode::Unknown(u8)`. Les pilotes hwmon n'emploient pas
-        // tous la même échelle au-delà de 0 et 1. Rendre `Unknown(2)` plutôt
-        // que de deviner suit la règle du CLAUDE.md : « ne jamais implémenter
-        // depuis un ❓ […] dire que c'est inconnu ». La valeur est conservée
-        // pour que la liste puisse l'afficher telle quelle.
-        let sysfs = arborescence_de_reference("mode_inconnu");
+    fn la_valeur_deux_designe_la_courbe_de_l_hote() {
+        // docs/VENTILATEURS.md, « ce que la sonde a établi » — `pwm_enable`
+        // accepte `0`, `1` et `2`, refuse `3`, et `2` est le mode dans lequel
+        // le firmware exécute la courbe téléversée par l'hôte. Mesuré le
+        // 2026-07-30 : la pompe suit le pic de la courbe écrite.
+        //
+        // Ce test attendait `Unknown(2)` avant cette mesure, et c'était juste :
+        // on ne devine pas ce qu'on n'a pas observé. La spec a bougé, le test
+        // la suit. L'ordre est tenu — spec, puis test, puis code.
+        let sysfs = arborescence_de_reference("mode_courbe_hote");
         let canaux = sysfs.canaux();
 
         let m = mode(canal(&canaux, "amdgpu:fan1"));
         assert!(
-            matches!(m, Mode::Unknown(2)),
-            "`pwm1_enable = 2` doit rester inconnu et porter sa valeur, lu : {m:?}"
+            matches!(m, Mode::HostCurve),
+            "`pwm1_enable = 2` est le mode courbe de l'hôte, lu : {m:?}"
         );
     }
 

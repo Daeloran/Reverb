@@ -183,6 +183,18 @@ fn regler_ventilateur(cible: &CibleCanal, action: ActionVentilateur) -> Result<(
         match action {
             ActionVentilateur::Auto => hwmon::set_mode(canal, hwmon::Mode::FirmwareCurve)
                 .map_err(|e| echec_ecriture(canal, &e))?,
+            ActionVentilateur::Curve => {
+                // Mettre en service une courbe qui n'existe pas laisserait le
+                // canal sur ce que le firmware a en mémoire — au mieux inconnu.
+                if canal.curve.is_empty() {
+                    return Err(format!(
+                        "« {} » n'a pas de courbe matérielle : rien à mettre en service.",
+                        canal.name
+                    ));
+                }
+                hwmon::set_mode(canal, hwmon::Mode::HostCurve)
+                    .map_err(|e| echec_ecriture(canal, &e))?;
+            }
             ActionVentilateur::Consigne {
                 percent,
                 force,

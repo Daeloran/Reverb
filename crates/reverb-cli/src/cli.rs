@@ -73,8 +73,10 @@ pub enum ActionVentilateur {
         /// Autorise à sortir un canal de sa courbe firmware.
         manual: bool,
     },
-    /// Rend le canal à sa courbe firmware.
+    /// Rend la main au firmware (`pwm_enable = 0`).
     Auto,
+    /// Met en service la courbe téléversée (`pwm_enable = 2`).
+    Curve,
 }
 
 pub const USAGE: &str = "\
@@ -96,7 +98,11 @@ OPTIONS de « fan » — vitesse de rotation (demande les droits root) :
     --force              autorise une consigne sous le plancher de 20 %
     --manual             autorise à sortir un canal de sa courbe firmware.
                          ⚠️ le canal cesse alors de réagir à la température
-    --auto               rend le canal à sa courbe firmware
+    --curve              met en service la courbe téléversée par « reverb curve »
+    --auto               rend la main au firmware.
+                         ⚠️ ce n'est PAS un retour garanti au profil d'usine :
+                         après une courbe hôte, le Kraken observé se rabat sur
+                         du refroidissement maximal (docs/VENTILATEURS.md)
 
 OPTIONS de « curve » — courbe exécutée par le firmware du Kraken :
     --point <P:C>        consigne C au point P. Répétable ; les points
@@ -228,6 +234,7 @@ fn parse_fan(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
     let mut canal: Option<String> = None;
     let mut pwm: Option<u8> = None;
     let mut auto = false;
+    let mut curve = false;
     let mut force = false;
     let mut manual = false;
 
@@ -235,6 +242,7 @@ fn parse_fan(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
         match argument.as_str() {
             "--all" => tous = true,
             "--auto" => auto = true,
+            "--curve" => curve = true,
             "--force" => force = true,
             "--manual" => manual = true,
             "--channel" => {
@@ -262,12 +270,19 @@ fn parse_fan(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
         (false, Some(nom)) => CibleCanal::Un(nom),
     };
 
-    let action = match (auto, pwm) {
+    if auto && curve {
+        return Err("« --auto » et « --curve » s'excluent.".to_owned());
+    }
+
+    let action = match (auto || curve, pwm) {
         (true, Some(_)) => {
-            return Err("« --auto » rend le canal à sa courbe : pas de consigne.".to_owned());
+            return Err("« --auto » et « --curve » changent le mode : pas de consigne.".to_owned());
         }
-        (true, None) => ActionVentilateur::Auto,
-        (false, None) => return Err("préciser « --pwm <0-100> » ou « --auto ».".to_owned()),
+        (true, None) if auto => ActionVentilateur::Auto,
+        (true, None) => ActionVentilateur::Curve,
+        (false, None) => {
+            return Err("préciser « --pwm <0-100> », « --curve » ou « --auto ».".to_owned());
+        }
         (false, Some(valeur)) => ActionVentilateur::Consigne {
             percent: Percent::new(valeur).map_err(|e| e.to_string())?,
             force,
