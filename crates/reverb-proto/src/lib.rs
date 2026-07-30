@@ -10,11 +10,13 @@
 
 pub mod color;
 pub mod frame;
+pub mod led;
 pub mod mode;
 pub mod position;
 
 pub use color::{Brightness, Rgb};
 pub use frame::{FRAME_LEN, Frame};
+pub use led::{Apply, LedCountError};
 pub use mode::{ColorCountError, Mode, UnknownMode};
 pub use position::{Placement, Position, UnknownPosition};
 

@@ -4,7 +4,7 @@
 //! binaire est un outil de validation interne, pas le produit final (le produit
 //! sera un démon et une fenêtre).
 
-use reverb_proto::{Brightness, Mode, Position, Rgb};
+use reverb_proto::{Apply, Brightness, Mode, Position, Rgb};
 
 /// Ce que l'utilisateur a demandé.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +19,14 @@ pub enum Command {
         mode: Mode,
         colors: Vec<Rgb>,
         speed: u8,
+        brightness: Brightness,
+        skip_init: bool,
+    },
+    /// Peint les LED une par une.
+    Paint {
+        cible: Cible,
+        colors: Vec<Rgb>,
+        apply: Apply,
         brightness: Brightness,
         skip_init: bool,
     },
@@ -37,25 +45,36 @@ reverb — pilotage des contrôleurs RGB NZXT
 USAGE :
     reverb list
     reverb modes
-    reverb set --all       [OPTIONS]
-    reverb set --fan <NOM> [OPTIONS]
+    reverb set   --all|--fan <NOM> [OPTIONS]
+    reverb paint --all|--fan <NOM> --colors <8 HEX> [OPTIONS]
 
-OPTIONS :
+OPTIONS de « set » — animation confiée au contrôleur :
     --mode <NOM|N>       mode d'animation, « fixed » par défaut (« reverb modes »)
     --color <HEX>        couleur, six chiffres hexadécimaux (ff00ff ou #ff00ff).
                          Répétable : certains modes attendent 2 ou 3 couleurs.
     --speed <0-255>      vitesse de l'animation, celle du mode par défaut.
-                         ⚠️ échelle non calibrée : valeur brute du protocole.
+
+OPTIONS de « paint » — une couleur par LED :
+    --colors <LISTE>     huit couleurs séparées par des virgules, une par LED
+    --animate            laisse le contrôleur animer le tampon
+                         ⚠️ effet non documenté : la capture montre ce que CAM
+                         envoie, pas ce que le contrôleur en fait
+    --speed <0-65535>    vitesse en mode animé, 106 par défaut
+
+OPTIONS communes :
     --brightness <N>     luminosité en pourcent, 100 par défaut
     --skip-init          n'envoie pas la séquence d'initialisation
     -h, --help           affiche cette aide
 
+⚠️ Les deux échelles de vitesse sont des valeurs brutes du protocole, non
+   calibrées, et n'ont rien à voir l'une avec l'autre.
+
 EXEMPLES :
     reverb set --all --color ff00ff
-    reverb set --fan \"radiateur bas\" --color 00ff00
     reverb set --all --mode spectrum-wave
-    reverb set --all --mode breathing --color ff0000 --speed 20
     reverb set --all --mode alternating --color ff0000 --color 0000ff
+    reverb paint --fan \"radiateur haut\" --colors ff0000,00ff00,0000ff,ffff00,ff00ff,00ffff,ffffff,000000
+    reverb paint --all --colors ff0000,ff0000,ff0000,ff0000,0000ff,0000ff,0000ff,0000ff
 ";
 
 /// Analyse les arguments, hors nom du programme.
@@ -76,10 +95,104 @@ where
         "list" => Ok(Command::List),
         "modes" => Ok(Command::Modes),
         "set" => parse_set(args),
+        "paint" => parse_paint(args),
         autre => Err(format!(
-            "sous-commande « {autre} » inconnue. Attendu : list, modes, set."
+            "sous-commande « {autre} » inconnue. Attendu : list, modes, set, paint."
         )),
     }
+}
+
+/// Résout `--all` / `--fan <NOM>`, communs à `set` et `paint`.
+fn cible_de(tous: bool, fan: Option<String>) -> Result<Cible, String> {
+    match (tous, fan) {
+        (true, Some(_)) => Err("« --all » et « --fan » s'excluent.".to_owned()),
+        (false, None) => Err("préciser « --all » ou « --fan <NOM> ».".to_owned()),
+        (true, None) => Ok(Cible::Tous),
+        (false, Some(nom)) => Position::from_name(&nom)
+            .map(Cible::Une)
+            .map_err(|e| e.to_string()),
+    }
+}
+
+fn parse_paint(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
+    let mut tous = false;
+    let mut fan: Option<String> = None;
+    let mut colors: Option<Vec<Rgb>> = None;
+    let mut animate = false;
+    let mut speed: Option<u16> = None;
+    let mut brightness = Brightness::FULL;
+    let mut skip_init = false;
+
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--all" => tous = true,
+            "--skip-init" => skip_init = true,
+            "--animate" => animate = true,
+            "--fan" => {
+                fan = Some(
+                    args.next()
+                        .ok_or_else(|| "« --fan » attend un nom de position.".to_owned())?,
+                );
+            }
+            "--colors" => {
+                let brut = args.next().ok_or_else(|| {
+                    "« --colors » attend des couleurs séparées par des virgules.".to_owned()
+                })?;
+                colors = Some(
+                    brut.split(',')
+                        .map(|c| Rgb::from_hex(c.trim()).map_err(|e| e.to_string()))
+                        .collect::<Result<Vec<Rgb>, String>>()?,
+                );
+            }
+            "--speed" => {
+                let brut = args
+                    .next()
+                    .ok_or_else(|| "« --speed » attend une valeur.".to_owned())?;
+                speed = Some(brut.parse().map_err(|_| {
+                    format!("vitesse « {brut} » invalide : attendu un entier de 0 à 65535.")
+                })?);
+            }
+            "--brightness" => brightness = parse_brightness(args.next())?,
+            autre => return Err(format!("option « {autre} » inconnue.")),
+        }
+    }
+
+    let cible = cible_de(tous, fan)?;
+    let colors = colors.ok_or_else(|| "« --colors » est obligatoire.".to_owned())?;
+
+    // La vitesse n'existe qu'en animé — la capture montre `00 00` en statique
+    // (spec §5.2). Refuser plutôt qu'ignorer : une option acceptée sans effet
+    // laisse croire qu'elle en a un.
+    let apply = match (animate, speed) {
+        (false, Some(_)) => {
+            return Err("« --speed » n'a de sens qu'avec « --animate ».".to_owned());
+        }
+        (false, None) => Apply::Static,
+        (true, valeur) => Apply::Animated {
+            speed: valeur.unwrap_or(Apply::OBSERVED_SPEED),
+        },
+    };
+
+    Ok(Command::Paint {
+        cible,
+        colors,
+        apply,
+        brightness,
+        skip_init,
+    })
+}
+
+fn parse_brightness(valeur: Option<String>) -> Result<Brightness, String> {
+    let brut = valeur.ok_or_else(|| "« --brightness » attend un pourcentage.".to_owned())?;
+    let pourcent: u8 = brut
+        .parse()
+        .map_err(|_| format!("luminosité « {brut} » invalide : attendu un entier de 0 à 100."))?;
+    if pourcent > 100 {
+        return Err(format!(
+            "luminosité {pourcent} hors bornes : attendu 0 à 100."
+        ));
+    }
+    Ok(Brightness::new(pourcent))
 }
 
 fn parse_set(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
@@ -121,34 +234,12 @@ fn parse_set(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
                     .ok_or_else(|| "« --color » attend une couleur.".to_owned())?;
                 colors.push(Rgb::from_hex(&brut).map_err(|e| e.to_string())?);
             }
-            "--brightness" => {
-                let brut = args
-                    .next()
-                    .ok_or_else(|| "« --brightness » attend un pourcentage.".to_owned())?;
-                let valeur: u8 = brut.parse().map_err(|_| {
-                    format!("luminosité « {brut} » invalide : attendu un entier de 0 à 100.")
-                })?;
-                if valeur > 100 {
-                    return Err(format!(
-                        "luminosité {valeur} hors bornes : attendu 0 à 100."
-                    ));
-                }
-                brightness = Brightness::new(valeur);
-            }
+            "--brightness" => brightness = parse_brightness(args.next())?,
             autre => return Err(format!("option « {autre} » inconnue.")),
         }
     }
 
-    let cible = match (tous, fan) {
-        (true, Some(_)) => {
-            return Err("« --all » et « --fan » s'excluent.".to_owned());
-        }
-        (false, None) => {
-            return Err("préciser « --all » ou « --fan <NOM> ».".to_owned());
-        }
-        (true, None) => Cible::Tous,
-        (false, Some(nom)) => Cible::Une(Position::from_name(&nom).map_err(|e| e.to_string())?),
-    };
+    let cible = cible_de(tous, fan)?;
 
     // Le nombre de couleurs attendu est une contrainte du protocole : la règle
     // vit dans `reverb-proto` et n'est pas réécrite ici. On l'interroge tôt
@@ -170,9 +261,130 @@ fn parse_set(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
 mod tests {
     use super::*;
 
+    /// Huit couleurs valides, forme la plus courte à écrire dans un test.
+    const HUIT: &str = "010203,040506,070809,0a0b0c,0d0e0f,101112,131415,161718";
+
     #[test]
     fn analyse_la_sous_commande_list() {
         assert_eq!(parse(["list"]), Ok(Command::List));
+    }
+
+    #[test]
+    fn analyse_une_peinture_led_par_led() {
+        let Ok(Command::Paint {
+            cible,
+            colors,
+            apply,
+            ..
+        }) = parse(["paint", "--fan", "radiateur haut", "--colors", HUIT])
+        else {
+            panic!("doit être une commande paint");
+        };
+        assert_eq!(cible, Cible::Une(Position::RadiateurHaut));
+        assert_eq!(colors.len(), 8);
+        assert_eq!(colors[0], Rgb::new(0x01, 0x02, 0x03));
+        assert_eq!(colors[7], Rgb::new(0x16, 0x17, 0x18));
+        assert_eq!(apply, Apply::Static);
+    }
+
+    #[test]
+    fn la_peinture_accepte_des_espaces_autour_des_virgules() {
+        let Ok(Command::Paint { colors, .. }) = parse([
+            "paint",
+            "--all",
+            "--colors",
+            "ff0000, 00ff00 ,0000ff,ffffff,000000,ff00ff,00ffff,ffff00",
+        ]) else {
+            panic!("doit être une commande paint");
+        };
+        assert_eq!(colors.len(), 8);
+    }
+
+    #[test]
+    fn animate_prend_la_vitesse_observee_par_defaut() {
+        let Ok(Command::Paint { apply, .. }) =
+            parse(["paint", "--all", "--colors", HUIT, "--animate"])
+        else {
+            panic!("doit être une commande paint");
+        };
+        assert_eq!(
+            apply,
+            Apply::Animated {
+                speed: Apply::OBSERVED_SPEED
+            }
+        );
+    }
+
+    #[test]
+    fn animate_accepte_une_vitesse_sur_seize_bits() {
+        let Ok(Command::Paint { apply, .. }) = parse([
+            "paint",
+            "--all",
+            "--colors",
+            HUIT,
+            "--animate",
+            "--speed",
+            "4660",
+        ]) else {
+            panic!("doit être une commande paint");
+        };
+        assert_eq!(apply, Apply::Animated { speed: 0x1234 });
+    }
+
+    #[test]
+    fn refuse_une_vitesse_sans_animate() {
+        // La capture montre `00 00` en statique (spec §5.2) : accepter l'option
+        // sans effet laisserait croire qu'elle en a un.
+        let erreur = parse(["paint", "--all", "--colors", HUIT, "--speed", "100"])
+            .expect_err("doit être refusé");
+        assert!(erreur.contains("--animate"), "message : {erreur}");
+    }
+
+    #[test]
+    fn refuse_une_peinture_sans_couleurs() {
+        let erreur = parse(["paint", "--all"]).expect_err("doit être refusé");
+        assert!(erreur.contains("--colors"), "message : {erreur}");
+    }
+
+    #[test]
+    fn refuse_une_couleur_invalide_dans_la_liste() {
+        let erreur = parse([
+            "paint",
+            "--all",
+            "--colors",
+            "ff0000,pasunecouleur,0000ff,ffffff,000000,ff00ff,00ffff,ffff00",
+        ])
+        .expect_err("doit être refusé");
+        assert!(erreur.contains("pasunecouleur"), "message : {erreur}");
+    }
+
+    #[test]
+    fn la_peinture_partage_les_options_communes_de_set() {
+        let Ok(Command::Paint {
+            brightness,
+            skip_init,
+            ..
+        }) = parse([
+            "paint",
+            "--all",
+            "--colors",
+            HUIT,
+            "--brightness",
+            "40",
+            "--skip-init",
+        ])
+        else {
+            panic!("doit être une commande paint");
+        };
+        assert_eq!(brightness.percent(), 40);
+        assert!(skip_init);
+    }
+
+    #[test]
+    fn la_peinture_refuse_all_et_fan_ensemble() {
+        let erreur = parse(["paint", "--all", "--fan", "gauche", "--colors", HUIT])
+            .expect_err("doit être refusé");
+        assert!(erreur.contains("s'excluent"), "message : {erreur}");
     }
 
     #[test]
