@@ -10,10 +10,12 @@
 
 pub mod color;
 pub mod frame;
+pub mod mode;
 pub mod position;
 
 pub use color::{Brightness, Rgb};
 pub use frame::{FRAME_LEN, Frame};
+pub use mode::{ColorCountError, Mode, UnknownMode};
 pub use position::{Placement, Position, UnknownPosition};
 
 /// Modèle de contrôleur, qui détermine la séquence d'initialisation (spec §8).

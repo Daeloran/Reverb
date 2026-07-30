@@ -4,7 +4,8 @@
 //! `OutputReportByteLength` vaut 64 et non 65 : il ne faut donc **pas**
 //! préfixer un octet `0x00` comme le veut la convention habituelle (spec §0).
 
-use crate::{Brightness, Model, Rgb};
+use crate::mode::ColorCountError;
+use crate::{Brightness, Mode, Model, Rgb};
 
 /// Longueur d'une trame HID, complétée par des zéros (spec §1).
 pub const FRAME_LEN: usize = 64;
@@ -12,14 +13,11 @@ pub const FRAME_LEN: usize = 64;
 /// Une trame prête à écrire sur `/dev/hidraw*`.
 pub type Frame = [u8; FRAME_LEN];
 
-/// Mode « couleur fixe » (spec §4.1).
-const MODE_FIXED: u8 = 0x00;
-
-/// Vitesse d'animation par défaut, sans effet en mode fixe (spec §4.2, §11).
-const DEFAULT_SPEED: u8 = 0x32;
-
 /// Type d'accessoire annoncé à l'offset 59 (spec §4).
 const ACCESSORY_TYPE: u8 = 0x03;
+
+/// Premier octet de couleur, offset 7 (spec §4).
+const COLORS_OFFSET: usize = 7;
 
 /// Construit un paquet de 64 octets à partir de ses octets significatifs.
 ///
@@ -30,21 +28,33 @@ fn packet(head: &[u8]) -> Frame {
     frame
 }
 
-/// Construit la trame `0x2a 0x04` en mode couleur fixe (spec §4).
+/// Construit la trame `0x2a 0x04` d'un mode d'animation (spec §4).
 ///
 /// ```text
-/// offset  0    1     2      3      4     5       6    7..     56
-///        0x2a 0x04 masque masque  mode vitesse  0x00 couleurs  nb couleurs
+/// offset  0    1     2      3      4     5       6      7..      56       57
+///        0x2a 0x04 masque masque  mode vitesse variante couleurs nb  constante
 /// ```
 ///
-/// Le mode fixe est `0x00` et n'attend qu'une seule couleur. L'octet 5 porte la
-/// vitesse d'animation, sans effet ici. Les octets 58 et 59 annoncent le nombre
-/// de LED de l'accessoire et son type.
+/// L'animation est ensuite exécutée **par le contrôleur** : l'hôte peut
+/// s'arrêter, l'éclairage continue (spec §0.3).
 ///
 /// La luminosité est appliquée **ici**, aux composantes, car le protocole n'a
 /// aucun octet dédié (spec §4.3).
-pub fn fixed_color(mask: u8, color: Rgb, brightness: Brightness, leds: u8) -> Frame {
-    let [g, r, b] = color.with_brightness(brightness).to_grb();
+///
+/// # Erreurs
+///
+/// Si le nombre de couleurs sort des bornes du mode (spec §4.1). C'est une
+/// contrainte du protocole, pas de l'interface : elle est donc validée ici, et
+/// jamais contournée par une trame de repli.
+pub fn animation(
+    mask: u8,
+    mode: Mode,
+    colors: &[Rgb],
+    speed: u8,
+    brightness: Brightness,
+    leds: u8,
+) -> Result<Frame, ColorCountError> {
+    mode.check_colors(colors.len())?;
 
     let mut frame = [0u8; FRAME_LEN];
     frame[0] = 0x2a;
@@ -53,19 +63,43 @@ pub fn fixed_color(mask: u8, color: Rgb, brightness: Brightness, leds: u8) -> Fr
     // L'offset 3 est resté égal à l'offset 2 sur toutes les trames observées.
     // Son rôle distinct est inconnu (spec §4, §3).
     frame[3] = mask;
-    frame[4] = MODE_FIXED;
-    frame[5] = DEFAULT_SPEED;
-    // L'offset 6 ne varie qu'en mode 0x05 (spec §4).
-    frame[6] = 0x00;
-    frame[7] = g;
-    frame[8] = r;
-    frame[9] = b;
-    // Offset 56 : nombre de couleurs fournies — une seule en mode fixe.
-    frame[56] = 0x01;
-    // L'offset 57 est marqué ❓ dans la spec ; il reste nul en mode fixe (§11).
+    frame[4] = mode.code();
+    frame[5] = speed;
+    frame[6] = mode.variant();
+
+    for (index, color) in colors.iter().enumerate() {
+        let [g, r, b] = color.with_brightness(brightness).to_grb();
+        let base = COLORS_OFFSET + index * 3;
+        frame[base] = g;
+        frame[base + 1] = r;
+        frame[base + 2] = b;
+    }
+
+    // Offset 56 : nombre de couleurs annoncé. Il ne descend **jamais** à zéro —
+    // Spectrum Wave, qui n'en attend aucune, porte tout de même 1 avec un
+    // triplet noir, exactement comme CAM (spec §4.4). Les octets de couleur
+    // sont déjà nuls.
+    frame[56] = colors.len().max(1) as u8;
+    frame[57] = mode.flag();
     frame[58] = leds;
     frame[59] = ACCESSORY_TYPE;
-    frame
+    Ok(frame)
+}
+
+/// Construit la trame `0x2a 0x04` en mode couleur fixe (spec §4).
+///
+/// Cas particulier d'[`animation`] : mode `0x00`, une seule couleur, vitesse
+/// `0x32` — sans effet ici, mais c'est ce que CAM émet (spec §4.2).
+pub fn fixed_color(mask: u8, color: Rgb, brightness: Brightness, leds: u8) -> Frame {
+    animation(
+        mask,
+        Mode::FIXED,
+        &[color],
+        Mode::FIXED.default_speed(),
+        brightness,
+        leds,
+    )
+    .expect("le mode fixe accepte exactement une couleur, fournie ici")
 }
 
 /// Séquence d'initialisation, à rejouer à chaque démarrage (spec §8).

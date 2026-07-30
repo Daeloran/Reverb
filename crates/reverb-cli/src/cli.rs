@@ -4,17 +4,21 @@
 //! binaire est un outil de validation interne, pas le produit final (le produit
 //! sera un démon et une fenêtre).
 
-use reverb_proto::{Brightness, Position, Rgb};
+use reverb_proto::{Brightness, Mode, Position, Rgb};
 
 /// Ce que l'utilisateur a demandé.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Énumère les contrôleurs trouvés et les positions qu'ils pilotent.
     List,
-    /// Applique une couleur.
+    /// Énumère les modes d'animation connus.
+    Modes,
+    /// Applique un mode à une cible.
     Set {
         cible: Cible,
-        color: Rgb,
+        mode: Mode,
+        colors: Vec<Rgb>,
+        speed: u8,
         brightness: Brightness,
         skip_init: bool,
     },
@@ -32,11 +36,16 @@ reverb — pilotage des contrôleurs RGB NZXT
 
 USAGE :
     reverb list
-    reverb set --all  --color <HEX> [--brightness <0-100>] [--skip-init]
-    reverb set --fan <NOM> --color <HEX> [--brightness <0-100>] [--skip-init]
+    reverb modes
+    reverb set --all       [OPTIONS]
+    reverb set --fan <NOM> [OPTIONS]
 
 OPTIONS :
-    --color <HEX>        couleur, six chiffres hexadécimaux (ff00ff ou #ff00ff)
+    --mode <NOM|N>       mode d'animation, « fixed » par défaut (« reverb modes »)
+    --color <HEX>        couleur, six chiffres hexadécimaux (ff00ff ou #ff00ff).
+                         Répétable : certains modes attendent 2 ou 3 couleurs.
+    --speed <0-255>      vitesse de l'animation, celle du mode par défaut.
+                         ⚠️ échelle non calibrée : valeur brute du protocole.
     --brightness <N>     luminosité en pourcent, 100 par défaut
     --skip-init          n'envoie pas la séquence d'initialisation
     -h, --help           affiche cette aide
@@ -44,7 +53,9 @@ OPTIONS :
 EXEMPLES :
     reverb set --all --color ff00ff
     reverb set --fan \"radiateur bas\" --color 00ff00
-    reverb set --all --color ffffff --brightness 30
+    reverb set --all --mode spectrum-wave
+    reverb set --all --mode breathing --color ff0000 --speed 20
+    reverb set --all --mode alternating --color ff0000 --color 0000ff
 ";
 
 /// Analyse les arguments, hors nom du programme.
@@ -63,9 +74,10 @@ where
     match sous_commande.as_str() {
         "-h" | "--help" => Err(USAGE.to_owned()),
         "list" => Ok(Command::List),
+        "modes" => Ok(Command::Modes),
         "set" => parse_set(args),
         autre => Err(format!(
-            "sous-commande « {autre} » inconnue. Attendu : list, set."
+            "sous-commande « {autre} » inconnue. Attendu : list, modes, set."
         )),
     }
 }
@@ -73,7 +85,9 @@ where
 fn parse_set(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
     let mut tous = false;
     let mut fan: Option<String> = None;
-    let mut color: Option<Rgb> = None;
+    let mut colors: Vec<Rgb> = Vec::new();
+    let mut mode = Mode::FIXED;
+    let mut speed: Option<u8> = None;
     let mut brightness = Brightness::FULL;
     let mut skip_init = false;
 
@@ -87,11 +101,25 @@ fn parse_set(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
                         .ok_or_else(|| "« --fan » attend un nom de position.".to_owned())?,
                 );
             }
+            "--mode" => {
+                let brut = args
+                    .next()
+                    .ok_or_else(|| "« --mode » attend un nom ou un numéro.".to_owned())?;
+                mode = Mode::from_name(&brut).map_err(|e| e.to_string())?;
+            }
+            "--speed" => {
+                let brut = args
+                    .next()
+                    .ok_or_else(|| "« --speed » attend une valeur.".to_owned())?;
+                speed = Some(brut.parse().map_err(|_| {
+                    format!("vitesse « {brut} » invalide : attendu un entier de 0 à 255.")
+                })?);
+            }
             "--color" => {
                 let brut = args
                     .next()
                     .ok_or_else(|| "« --color » attend une couleur.".to_owned())?;
-                color = Some(Rgb::from_hex(&brut).map_err(|e| e.to_string())?);
+                colors.push(Rgb::from_hex(&brut).map_err(|e| e.to_string())?);
             }
             "--brightness" => {
                 let brut = args
@@ -122,11 +150,17 @@ fn parse_set(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
         (false, Some(nom)) => Cible::Une(Position::from_name(&nom).map_err(|e| e.to_string())?),
     };
 
-    let color = color.ok_or_else(|| "« --color » est obligatoire.".to_owned())?;
+    // Le nombre de couleurs attendu est une contrainte du protocole : la règle
+    // vit dans `reverb-proto` et n'est pas réécrite ici. On l'interroge tôt
+    // pour refuser la demande avant d'ouvrir le moindre `/dev/hidraw*`.
+    mode.check_colors(colors.len())
+        .map_err(|e| format!("{e}. Chaque couleur se donne par « --color <HEX> »."))?;
 
     Ok(Command::Set {
         cible,
-        color,
+        mode,
+        colors,
+        speed: speed.unwrap_or(mode.default_speed()),
         brightness,
         skip_init,
     })
@@ -143,13 +177,120 @@ mod tests {
 
     #[test]
     fn analyse_une_couleur_sur_tous_les_ventilateurs() {
+        // Sans « --mode », la commande de l'issue #1 est inchangée : mode fixe,
+        // une couleur, la vitesse du mode.
         let attendu = Command::Set {
             cible: Cible::Tous,
-            color: Rgb::new(0xff, 0x00, 0xff),
+            mode: Mode::FIXED,
+            colors: vec![Rgb::new(0xff, 0x00, 0xff)],
+            speed: 0x32,
             brightness: Brightness::FULL,
             skip_init: false,
         };
         assert_eq!(parse(["set", "--all", "--color", "ff00ff"]), Ok(attendu));
+    }
+
+    #[test]
+    fn analyse_la_sous_commande_modes() {
+        assert_eq!(parse(["modes"]), Ok(Command::Modes));
+    }
+
+    #[test]
+    fn analyse_un_mode_par_son_nom() {
+        let Ok(Command::Set { mode, colors, .. }) =
+            parse(["set", "--all", "--mode", "spectrum-wave"])
+        else {
+            panic!("doit être une commande set");
+        };
+        assert_eq!(mode, Mode::SPECTRUM_WAVE);
+        assert!(colors.is_empty(), "ce mode n'attend aucune couleur");
+    }
+
+    #[test]
+    fn analyse_un_mode_par_son_numero() {
+        let Ok(Command::Set { mode, .. }) = parse([
+            "set", "--all", "--mode", "5", "--color", "ff0000", "--color", "0000ff",
+        ]) else {
+            panic!("doit être une commande set");
+        };
+        assert_eq!(mode, Mode::ALTERNATING);
+    }
+
+    #[test]
+    fn conserve_l_ordre_des_couleurs_repetees() {
+        let Ok(Command::Set { colors, .. }) = parse([
+            "set",
+            "--all",
+            "--mode",
+            "alternating",
+            "--color",
+            "ff0000",
+            "--color",
+            "0000ff",
+        ]) else {
+            panic!("doit être une commande set");
+        };
+        assert_eq!(colors, vec![Rgb::new(0xff, 0, 0), Rgb::new(0, 0, 0xff)]);
+    }
+
+    #[test]
+    fn la_vitesse_par_defaut_est_celle_du_mode() {
+        let Ok(Command::Set { speed, .. }) =
+            parse(["set", "--all", "--mode", "breathing", "--color", "ff0000"])
+        else {
+            panic!("doit être une commande set");
+        };
+        assert_eq!(speed, Mode::BREATHING.default_speed());
+    }
+
+    #[test]
+    fn la_vitesse_explicite_prime() {
+        let Ok(Command::Set { speed, .. }) = parse([
+            "set",
+            "--all",
+            "--mode",
+            "breathing",
+            "--color",
+            "ff0000",
+            "--speed",
+            "20",
+        ]) else {
+            panic!("doit être une commande set");
+        };
+        assert_eq!(speed, 20);
+    }
+
+    #[test]
+    fn refuse_une_vitesse_hors_bornes() {
+        let erreur = parse(["set", "--all", "--color", "ffffff", "--speed", "300"])
+            .expect_err("doit être refusé");
+        assert!(erreur.contains("0 à 255"), "message : {erreur}");
+    }
+
+    #[test]
+    fn refuse_un_mode_inconnu_en_listant_les_valides() {
+        let erreur =
+            parse(["set", "--all", "--mode", "arc-en-ciel"]).expect_err("doit être refusé");
+        assert!(erreur.contains("arc-en-ciel"), "message : {erreur}");
+        assert!(erreur.contains("breathing"), "doit lister : {erreur}");
+    }
+
+    #[test]
+    fn refuse_un_nombre_de_couleurs_incorrect_avant_tout_acces_materiel() {
+        let erreur = parse(["set", "--all", "--mode", "alternating", "--color", "ff0000"])
+            .expect_err("alternating exige exactement deux couleurs");
+        assert!(erreur.contains("alternating"), "message : {erreur}");
+
+        let erreur = parse([
+            "set",
+            "--all",
+            "--mode",
+            "spectrum-wave",
+            "--color",
+            "ff0000",
+        ])
+        .expect_err("spectrum-wave n'attend aucune couleur");
+        assert!(erreur.contains("spectrum-wave"), "message : {erreur}");
     }
 
     #[test]
