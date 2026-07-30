@@ -1,17 +1,15 @@
+/target/
+**/*.rs.bk
+
+# Outillage Python hérité de l'exploration Linux initiale
 __pycache__/
 *.py[cod]
 .venv/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-*.egg-info/
-dist/
-build/
 
 # Configuration personnelle (nommage des ventilateurs, ambiances)
 config.toml
 !config.example.toml
 
-# Captures de reverse engineering — 178 Mo, hors git.
-# Les specs qui en sont tirees vivent dans le vault Obsidian.
+# Captures de rétro-ingénierie — 178 Mo, hors git.
+# Les specs qui en sont tirées vivent dans docs/.
 captures/

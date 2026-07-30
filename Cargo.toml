@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/reverb-proto", "crates/reverb-cli"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Daeloran/Reverb"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
