@@ -16,6 +16,25 @@ Cinq canaux sont pilotables sous Linux, tous par **hwmon**, aucun par le protoco
 | `kraken2023elite` | `pwm1` | Pump speed | ~2380 tr/min | courbe firmware |
 | `kraken2023elite` | `pwm2` | Fan speed | ~714 tr/min | courbe firmware |
 
+## Vérification sur le matériel ✅
+
+Session du 2026-07-30. `reverb fan --channel nzxtsmart2:fan-1 --pwm 80`, régimes relevés par
+`reverb fans` avant et après :
+
+| Canal | Avant | Après |
+|---|---|---|
+| `nzxtsmart2:fan-1` | 728 tr/min · 25 % | **1570 tr/min · 80 %** |
+| `nzxtsmart2:fan-2` | 682 tr/min · 25 % | 665 tr/min · 25 % |
+| `nzxtsmart2:fan-3` | 717 tr/min · 25 % | 706 tr/min · 25 % |
+
+La consigne est appliquée, et **les canaux voisins ne bougent pas**. Le confinement de l'écriture,
+garanti par construction — `set_pwm` ne reçoit qu'un `&FanChannel` — est donc vérifié aussi sur le
+matériel, et pas seulement contre une fausse arborescence.
+
+Au passage, deux points de calibrage : 25 % donne ~700 tr/min et 80 % ~1570 tr/min sur ces
+ventilateurs. Trop peu pour établir une courbe, assez pour confirmer que l'échelle du noyau est
+bien prise dans le bon sens.
+
 ## Pourquoi pas `0x62 0x01`
 
 La spec §6 documente une commande HID de consigne PWM, émise chaque seconde par CAM. Elle est
@@ -44,7 +63,8 @@ tous les autres = 0
 Le seul tachymètre actif remonte ~2352 tr/min, quand le pilote `kraken2023elite` annonce
 ~2380 tr/min pour la pompe. **C'est le même appareil** : le tachymètre de la pompe est câblé sur
 `CPU_FAN`, pratique standard sur les AIO pour que le BIOS ne signale pas d'absence de ventilateur
-processeur au démarrage.
+processeur au démarrage. Les relevés successifs confirment le couplage — `nct6687:fan2` suit la
+pompe à quelques tours près (2352, 2357) d'une lecture à l'autre.
 
 Aucun ventilateur n'est donc branché sur la carte mère.
 
