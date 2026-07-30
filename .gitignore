@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Configuration personnelle (nommage des ventilateurs, ambiances)
+config.toml
+!config.example.toml
+
+# Captures de reverse engineering — 178 Mo, hors git.
+# Les specs qui en sont tirees vivent dans le vault Obsidian.
+captures/
