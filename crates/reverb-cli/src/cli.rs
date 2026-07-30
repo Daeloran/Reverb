@@ -4,6 +4,7 @@
 //! binaire est un outil de validation interne, pas le produit final (le produit
 //! sera un démon et une fenêtre).
 
+use crate::hwmon::Percent;
 use reverb_proto::{Apply, Brightness, Mode, Position, Rgb};
 
 /// Ce que l'utilisateur a demandé.
@@ -30,6 +31,13 @@ pub enum Command {
         brightness: Brightness,
         skip_init: bool,
     },
+    /// Énumère les canaux de vitesse pilotables.
+    Fans,
+    /// Règle la vitesse d'un canal, ou le rend à sa courbe firmware.
+    Fan {
+        canal: CibleCanal,
+        action: ActionVentilateur,
+    },
 }
 
 /// Quels ventilateurs sont visés.
@@ -37,6 +45,28 @@ pub enum Command {
 pub enum Cible {
     Tous,
     Une(Position),
+}
+
+/// Quel canal de vitesse est visé.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CibleCanal {
+    Tous,
+    Un(String),
+}
+
+/// Ce qu'on demande au canal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionVentilateur {
+    /// Applique une consigne.
+    Consigne {
+        percent: Percent,
+        /// Autorise à descendre sous le plancher.
+        force: bool,
+        /// Autorise à sortir un canal de sa courbe firmware.
+        manual: bool,
+    },
+    /// Rend le canal à sa courbe firmware.
+    Auto,
 }
 
 pub const USAGE: &str = "\
@@ -47,6 +77,17 @@ USAGE :
     reverb modes
     reverb set   --all|--fan <NOM> [OPTIONS]
     reverb paint --all|--fan <NOM> --colors <8 HEX> [OPTIONS]
+    reverb fans
+    reverb fan   --all|--channel <NOM> --pwm <0-100> [--force] [--manual]
+    reverb fan   --all|--channel <NOM> --auto
+
+OPTIONS de « fan » — vitesse de rotation (demande les droits root) :
+    --channel <NOM>      canal, tel que « reverb fans » le nomme
+    --pwm <0-100>        consigne en pourcent
+    --force              autorise une consigne sous le plancher de 20 %
+    --manual             autorise à sortir un canal de sa courbe firmware.
+                         ⚠️ le canal cesse alors de réagir à la température
+    --auto               rend le canal à sa courbe firmware
 
 OPTIONS de « set » — animation confiée au contrôleur :
     --mode <NOM|N>       mode d'animation, « fixed » par défaut (« reverb modes »)
@@ -75,6 +116,11 @@ EXEMPLES :
     reverb set --all --mode alternating --color ff0000 --color 0000ff
     reverb paint --fan \"radiateur haut\" --colors ff0000,00ff00,0000ff,ffff00,ff00ff,00ffff,ffffff,000000
     reverb paint --all --colors ff0000,ff0000,ff0000,ff0000,0000ff,0000ff,0000ff,0000ff
+    reverb fans
+    sudo reverb fan --channel nzxtsmart2:fan-1 --pwm 60
+    sudo reverb fan --all --pwm 40
+    sudo reverb fan --channel kraken2023elite:pump-speed --pwm 80 --manual
+    sudo reverb fan --channel kraken2023elite:pump-speed --auto
 ";
 
 /// Analyse les arguments, hors nom du programme.
@@ -96,10 +142,67 @@ where
         "modes" => Ok(Command::Modes),
         "set" => parse_set(args),
         "paint" => parse_paint(args),
+        "fans" => Ok(Command::Fans),
+        "fan" => parse_fan(args),
         autre => Err(format!(
-            "sous-commande « {autre} » inconnue. Attendu : list, modes, set, paint."
+            "sous-commande « {autre} » inconnue. Attendu : list, modes, set, paint, fans, fan."
         )),
     }
+}
+
+fn parse_fan(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
+    let mut tous = false;
+    let mut canal: Option<String> = None;
+    let mut pwm: Option<u8> = None;
+    let mut auto = false;
+    let mut force = false;
+    let mut manual = false;
+
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--all" => tous = true,
+            "--auto" => auto = true,
+            "--force" => force = true,
+            "--manual" => manual = true,
+            "--channel" => {
+                canal = Some(
+                    args.next()
+                        .ok_or_else(|| "« --channel » attend un nom de canal.".to_owned())?,
+                );
+            }
+            "--pwm" => {
+                let brut = args
+                    .next()
+                    .ok_or_else(|| "« --pwm » attend un pourcentage.".to_owned())?;
+                pwm = Some(brut.parse().map_err(|_| {
+                    format!("consigne « {brut} » invalide : attendu un entier de 0 à 100.")
+                })?);
+            }
+            autre => return Err(format!("option « {autre} » inconnue.")),
+        }
+    }
+
+    let canal = match (tous, canal) {
+        (true, Some(_)) => return Err("« --all » et « --channel » s'excluent.".to_owned()),
+        (false, None) => return Err("préciser « --all » ou « --channel <NOM> ».".to_owned()),
+        (true, None) => CibleCanal::Tous,
+        (false, Some(nom)) => CibleCanal::Un(nom),
+    };
+
+    let action = match (auto, pwm) {
+        (true, Some(_)) => {
+            return Err("« --auto » rend le canal à sa courbe : pas de consigne.".to_owned());
+        }
+        (true, None) => ActionVentilateur::Auto,
+        (false, None) => return Err("préciser « --pwm <0-100> » ou « --auto ».".to_owned()),
+        (false, Some(valeur)) => ActionVentilateur::Consigne {
+            percent: Percent::new(valeur).map_err(|e| e.to_string())?,
+            force,
+            manual,
+        },
+    };
+
+    Ok(Command::Fan { canal, action })
 }
 
 /// Résout `--all` / `--fan <NOM>`, communs à `set` et `paint`.
@@ -267,6 +370,83 @@ mod tests {
     #[test]
     fn analyse_la_sous_commande_list() {
         assert_eq!(parse(["list"]), Ok(Command::List));
+    }
+
+    #[test]
+    fn analyse_la_sous_commande_fans() {
+        assert_eq!(parse(["fans"]), Ok(Command::Fans));
+    }
+
+    #[test]
+    fn analyse_une_consigne_sur_un_canal() {
+        assert_eq!(
+            parse(["fan", "--channel", "nzxtsmart2:fan-1", "--pwm", "60"]),
+            Ok(Command::Fan {
+                canal: CibleCanal::Un("nzxtsmart2:fan-1".to_owned()),
+                action: ActionVentilateur::Consigne {
+                    percent: Percent::new(60).unwrap(),
+                    force: false,
+                    manual: false,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn analyse_le_retour_a_la_courbe_firmware() {
+        assert_eq!(
+            parse(["fan", "--all", "--auto"]),
+            Ok(Command::Fan {
+                canal: CibleCanal::Tous,
+                action: ActionVentilateur::Auto,
+            })
+        );
+    }
+
+    #[test]
+    fn transmet_force_et_manual() {
+        let Ok(Command::Fan { action, .. }) =
+            parse(["fan", "--all", "--pwm", "5", "--force", "--manual"])
+        else {
+            panic!("doit être une commande fan");
+        };
+        assert_eq!(
+            action,
+            ActionVentilateur::Consigne {
+                percent: Percent::new(5).unwrap(),
+                force: true,
+                manual: true,
+            }
+        );
+    }
+
+    #[test]
+    fn refuse_une_consigne_au_dessus_de_cent() {
+        let erreur = parse(["fan", "--all", "--pwm", "150"]).expect_err("doit être refusé");
+        assert!(erreur.contains("150"), "message : {erreur}");
+    }
+
+    #[test]
+    fn refuse_auto_et_pwm_ensemble() {
+        // « --auto » rend le canal à sa courbe : une consigne fixe le
+        // contredirait dans la même commande.
+        let erreur =
+            parse(["fan", "--all", "--auto", "--pwm", "50"]).expect_err("doit être refusé");
+        assert!(erreur.contains("--auto"), "message : {erreur}");
+    }
+
+    #[test]
+    fn refuse_une_commande_fan_sans_action() {
+        let erreur = parse(["fan", "--all"]).expect_err("doit être refusé");
+        assert!(erreur.contains("--pwm"), "message : {erreur}");
+        assert!(erreur.contains("--auto"), "message : {erreur}");
+    }
+
+    #[test]
+    fn refuse_all_et_channel_ensemble_pour_un_ventilateur() {
+        let erreur =
+            parse(["fan", "--all", "--channel", "x", "--pwm", "50"]).expect_err("doit être refusé");
+        assert!(erreur.contains("s'excluent"), "message : {erreur}");
     }
 
     #[test]
