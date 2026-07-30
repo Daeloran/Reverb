@@ -349,16 +349,13 @@ deux modes** : `00 00 80 00 32 00 00 01`. C'est acquis, pas déduit.
 |---|---|---|
 | 2 | `0x01` | masque de canal ✅ |
 | 3 | `0x00` | ❓ |
-| 4 | `0x01` statique, `0x02` animé | mode ✅ |
+| 4 | `0x01` statique, `0x02` **rotation** | mode ✅ — §5.4 |
 | 5–6 | `00 00` statique, `6a 00` animé | vitesse, uint16 little-endian ✅ |
 | 7 | `0x08` | nombre de LED ✅ |
 | 8–15 | `00 00 80 00 32 00 00 01` | ❓ — **valeurs certaines dans les deux modes**, sens inconnu |
 
 L'offset 12 vaut `0x32`, soit 50, comme la vitesse par défaut du mode fixe en `2a 04`. 🔶
 Coïncidence numérique, rien de plus : aucune observation ne relie les deux.
-
-⚠️ La capture montre ce que CAM **envoie** en mode `0x02`, pas ce que le contrôleur en **fait**.
-Le comportement visuel de la variante animée reste à observer.
 
 ### 5.3 Animations personnalisées — `0x22 0x20`
 
@@ -372,6 +369,32 @@ Le comportement visuel de la variante animée reste à observer.
 
 Huit images numérotées de `00` à `07`. Le mécanisme dépasse le besoin immédiat, mais il montre
 que le contrôleur sait stocker et rejouer une séquence sans l'hôte.
+
+### 5.4 Confirmation à l'œil du pilotage LED par LED ✅
+
+Session du **2026-07-30** sous Linux, via `tools/confirme_leds.sh`.
+
+**Les LED sont bien adressées individuellement.** Huit couleurs distinctes envoyées sur un même
+ventilateur donnent huit LED de couleurs différentes.
+
+**La famille `0x22` fonctionne sur les deux modèles de contrôleur.** Le motif envoyé avec `--all`
+a été pris par les dix ventilateurs, y compris celui de l'arrière et ceux du haut, qui dépendent
+de contrôleurs `1e71:2012` et non du `2019`. La capture Windows ne montrait que le `2019` : c'est
+donc une extension du domaine connu, obtenue sous Linux.
+
+**Le mode `0x02` fait tourner le motif** ✅ — c'est la réponse à la question qui restait ouverte.
+Le contrôleur décale le tampon d'un cran à intervalle régulier ; l'hôte n'envoie rien de plus. Une
+rotation à l'infini coûte donc trois trames, une seule fois.
+
+**Numérotation des LED.** Les LED forment un anneau fermé : la 8 est contiguë à la 1, un cran
+avant elle dans le sens antihoraire. Les indices progressent donc dans un sens de rotation
+constant, `1 → 8` puis retour à `1`.
+
+> ⚠️ **La position absolue de la LED 1 dépend du montage.** Elle est apparue « en bas à gauche »
+> sur le ventilateur testé, mais ce n'est pas une propriété du protocole : c'est l'orientation
+> physique du ventilateur dans le boîtier. Un motif qui suppose « la LED 1 est en haut » sera faux
+> sur un ventilateur monté autrement. Seul l'**ordre** est une donnée du protocole ; l'origine et
+> le sens apparent sont une donnée de montage, et devront être configurables par ventilateur.
 
 ---
 

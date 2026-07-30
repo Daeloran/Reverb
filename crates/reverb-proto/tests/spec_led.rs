@@ -383,8 +383,9 @@ mod application {
         //     22 a0 01 00 02 6a 00 08 00 00 80 00 32 00 00 01
         // « Les octets 8 à 15 sont identiques dans les deux modes […] c'est
         // acquis, pas déduit. » Seuls les offsets 4, 5 et 6 changent.
-        // ⚠️ Ce test fige ce que **CAM envoie**. Ce que le contrôleur en fait
-        // reste ❓ (issue #5 : « c'est une inconnue, pas un acquis »).
+        // spec §5.4 — le mode `0x02` fait **tourner** le motif, confirmé à
+        // l'œil le 2026-07-30. Ce test ne fige que les octets ; le
+        // comportement visuel n'est pas testable ici.
         // Canal `0x04` = « bas droite » (§3).
         let attendue = paquet(&[
             0x22, 0xa0, 0x04, 0x00, 0x02, 0x6a, 0x00, 0x08, //

@@ -18,11 +18,15 @@ use crate::LEDS_PER_FAN;
 pub enum Apply {
     /// `0x01` — les couleurs du tampon restent telles quelles.
     Static,
-    /// `0x02` — le contrôleur fait quelque chose du tampon.
+    /// `0x02` — le contrôleur **fait tourner** le tampon (spec §5.4).
     ///
-    /// ⚠️ **Ce qu'il en fait est inconnu.** La capture montre ce que CAM
-    /// envoie, pas le résultat visuel. La vitesse occupe les offsets 5–6 en
-    /// uint16 little-endian ; `0x006a` est la seule valeur observée.
+    /// Il décale le motif d'un cran à intervalle régulier, sans que l'hôte
+    /// envoie quoi que ce soit de plus : une rotation à l'infini coûte trois
+    /// trames, une seule fois.
+    ///
+    /// La vitesse occupe les offsets 5–6 en uint16 little-endian. 🔶 Son
+    /// échelle n'est pas calibrée ; `0x006a` est la seule valeur observée dans
+    /// la capture.
     Animated { speed: u16 },
 }
 

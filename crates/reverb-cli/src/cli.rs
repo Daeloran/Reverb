@@ -56,10 +56,10 @@ OPTIONS de « set » — animation confiée au contrôleur :
 
 OPTIONS de « paint » — une couleur par LED :
     --colors <LISTE>     huit couleurs séparées par des virgules, une par LED
-    --animate            laisse le contrôleur animer le tampon
-                         ⚠️ effet non documenté : la capture montre ce que CAM
-                         envoie, pas ce que le contrôleur en fait
-    --speed <0-65535>    vitesse en mode animé, 106 par défaut
+    --animate            fait tourner le motif autour du ventilateur.
+                         Le contrôleur s'en charge seul : une fois la commande
+                         passée, ça tourne sans qu'aucun logiciel ne tourne.
+    --speed <0-65535>    vitesse de rotation, 106 par défaut
 
 OPTIONS communes :
     --brightness <N>     luminosité en pourcent, 100 par défaut
