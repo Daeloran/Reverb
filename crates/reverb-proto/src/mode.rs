@@ -131,7 +131,7 @@ const SPECS: [Spec; 8] = [
         speed: 0x0f,
         variant: 0x00,
         flag: 0x00,
-        confirmed: false,
+        confirmed: true,
     },
 ];
 

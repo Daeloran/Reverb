@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Confirmation à l'œil des modes d'animation (issue #3, spec §4.1).
 #
-# Cinq des huit modes portent un nom qui n'est qu'une hypothèse, obtenue en
-# recoupant le nombre de couleurs accepté avec la table HUE 2 de liquidctl.
-# Seul un humain devant le boîtier peut les nommer. Ce script les déclenche un
-# par un, à ton rythme, et note ce que tu décris.
+# Un nom de mode ne peut être confirmé que par un humain devant le boîtier :
+# ce script les déclenche un par un, à ton rythme, et note ce que tu décris.
+#
+# Il a servi le 2026-07-30 à lever les cinq noms encore hypothétiques (§4.5).
+# Il resservira pour tout mode ajouté à la table sans observation — le `0x03`,
+# jamais déclenché pendant la capture, en premier.
 #
 # Usage : ./tools/confirme_modes.sh
 #         (depuis la racine du worktree, sans sudo)

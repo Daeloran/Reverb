@@ -196,13 +196,14 @@ offset  0    1     2     3     4     5      6     7..55        56..59
 | `0x05` | **exactement 2** | `0x01`, `0x03` | `0x00` | `0xf4`, `0xe8` | ✅ **Alternating** — voir ci-dessous |
 | `0x06` | 1 | `0x00` | `0x08` | `0x0f` | ✅ **Pulse** |
 | `0x07` | 1 | `0x00` | `0x08` | `0x14` | ✅ **Breathing** |
-| `0x09` | 1 | `0x00` | `0x00` | `0x0f` | 🔶 **Starry Night** — observation non concluante, §4.5 |
+| `0x09` | 1 | `0x00` | `0x00` | `0x0f` | ✅ **Starry Night** |
 
 > Colonnes `off6`, `off57` et vitesses **extraites de la capture** `cible1-modes-nzxt` le
 > 2026-07-30 sous Linux, par `tools/extrait_modes.py`. Les numéros de mode sont certains ✅.
 
 Les noms venaient d'un recoupement avec la table HUE 2 de liquidctl, dont les numéros de mode
-coïncident. Ils ont été **vérifiés à l'œil** le 2026-07-30 — voir §4.5. Seul `0x09` reste 🔶.
+coïncident. **Les huit ont été vérifiés à l'œil** le 2026-07-30 — voir §4.5. Le seul mode encore
+inconnu est `0x03`, jamais déclenché.
 
 `0x05` était le recoupement le plus solide : Alternating est le **seul** mode dont liquidctl fixe
 le minimum **et** le maximum à 2 couleurs, et c'est exactement ce qu'on observe — jamais 1,
@@ -238,17 +239,21 @@ lui soit montrée, pour ne pas la lui suggérer.
 | `0x04` Covering Marquee | « les couleurs recouvrent la surface LED par LED sur chaque ventilo » | ✅ |
 | `0x05` Alternating | « les LED changent de couleur en groupe » | ✅ |
 | `0x06` Pulse | « pulsation abrupte » | ✅ |
-| `0x09` Starry Night | « je crois voir un léger scintillement mais ce n'est pas très net » | 🔶 |
+| `0x09` Starry Night | « des LED isolées s'allument et s'éteignent au hasard » | ✅ (2ᵉ passe) |
 
-Les quatre premières descriptions sont **spécifiques** : elles nomment un mécanisme (fondu,
-recouvrement LED par LED, alternance par groupes, battement sec) qui distingue ce mode des
-autres, et pas seulement « ça bouge ». C'est ce qui autorise le passage à ✅.
+Chaque description est **spécifique** : elle nomme un mécanisme (fondu, recouvrement LED par
+LED, alternance par groupes, battement sec, LED isolées au hasard) qui distingue ce mode des
+autres, et pas seulement « ça bouge ». C'est le seuil retenu pour passer à ✅.
 
-`0x09` ne franchit pas ce seuil. « Je crois voir » ne distingue pas un scintillement aléatoire
-d'un battement lent et faible — l'observation est **compatible** avec Starry Night sans être
-**discriminante**. Le nom reste donc une hypothèse. Piste pour une prochaine tentative : blanc
-plutôt que rouge, et faire varier l'offset 5, la vitesse observée (`0x0f`) étant peut-être trop
-rapide pour que l'œil accroche.
+`0x09` a demandé deux passes. La première — rouge à la vitesse `0x0f` — n'avait donné qu'un
+« je crois voir un léger scintillement mais ce n'est pas très net », compatible avec Starry
+Night mais **pas discriminant** : un battement lent et faible aurait produit la même phrase. La
+seconde passe, en **blanc** à la vitesse `0x50`, a tranché : ce sont bien des LED **isolées**,
+allumées au hasard, et non le ventilateur entier qui monte et descend. L'observateur note que
+c'est « très rapide et peu intense » même à cette vitesse.
+
+> Leçon de méthode : une observation qui *concorde* avec l'hypothèse ne la *confirme* pas. Il
+> faut qu'elle exclue les autres candidats. Changer la couleur et la vitesse a suffi ici.
 
 Le fait que `0x05` alterne bien **par groupes de LED** conforte au passage la lecture de
 l'offset 6 comme sélecteur de taille de bloc (§4.4), sans le prouver : la taille n'a été testée

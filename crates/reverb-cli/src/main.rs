@@ -102,10 +102,15 @@ fn lister_modes() {
         );
     }
     println!();
-    println!(
-        "🔶 : le numéro du mode est certain, son nom reste une hypothèse — il n'a pas\n     \
-         encore été vérifié à l'œil sur le matériel (spec §4.1)."
-    );
+    // La légende ne s'affiche que si elle a un objet : depuis la session §4.5,
+    // les huit modes sont confirmés. Elle resservira si un mode est ajouté à la
+    // table sans avoir été vu à l'œil — le `0x03`, par exemple.
+    if Mode::ALL.iter().any(|m| !m.confirmed()) {
+        println!(
+            "🔶 : le numéro du mode est certain, son nom reste une hypothèse — il n'a pas\n     \
+             encore été vérifié à l'œil sur le matériel (spec §4.1)."
+        );
+    }
     println!("Vitesse : valeur brute du protocole, échelle non calibrée (spec §4.2).");
 }
 

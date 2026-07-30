@@ -15,9 +15,9 @@
 //! sont reprises telles quelles dans la table de vérité du contrat d'API de
 //! l'issue #3.
 //!
-//! ⚠️ Le nom du mode `0x09` reste 🔶 (spec §4.1, §4.5) : `confirmed()` doit
-//! continuer à dire qu'il n'a pas été vérifié à l'œil. Les quatre autres
-//! hypothèses ont été confirmées le 2026-07-30 (§4.5).
+//! Les huit modes de la table ont été confirmés à l'œil le 2026-07-30 (§4.5).
+//! `confirmed()` reste utile : le mode `0x03` n'a jamais été déclenché, et
+//! toute ligne ajoutée à la table sans observation devra le déclarer.
 //!
 //! Le jour où un mode est vu à l'œil, c'est la **spec §4.1** qui change, et les
 //! tests de `confirmed()` la suivent. Ce n'est pas une entorse au garde-fou
@@ -68,7 +68,7 @@ fn couleurs(n: u8) -> Vec<Rgb> {
 ///     | `ALTERNATING`      | `0x05` | `alternating`      | 2..=2    | `0xf4`  | `0x01` | `0x00` | ✅       |
 ///     | `PULSE`            | `0x06` | `pulse`            | 1..=1    | `0x0f`  | `0x00` | `0x08` | ✅       |
 ///     | `BREATHING`        | `0x07` | `breathing`        | 1..=1    | `0x14`  | `0x00` | `0x08` | ✅       |
-///     | `STARRY_NIGHT`     | `0x09` | `starry-night`     | 1..=1    | `0x0f`  | `0x00` | `0x00` | 🔶       |
+///     | `STARRY_NIGHT`     | `0x09` | `starry-night`     | 1..=1    | `0x0f`  | `0x00` | `0x00` | ✅       |
 mod table {
     use reverb_proto::Mode;
 
@@ -164,15 +164,9 @@ mod table {
     #[test]
     fn le_mode_starry_night_est_le_0x09() {
         // spec §4.1, ligne `0x09` — 1 couleur, vitesse vue `0x0f`,
-        // 🔶 « Starry Night » : le seul nom encore non confirmé (§4.5).
-        verifie(
-            Mode::STARRY_NIGHT,
-            0x09,
-            "starry-night",
-            (1, 1),
-            0x0f,
-            false,
-        );
+        // ✅ « Starry Night » confirmé en deuxième passe (§4.5 : « des LED
+        // isolées s'allument et s'éteignent au hasard »).
+        verifie(Mode::STARRY_NIGHT, 0x09, "starry-night", (1, 1), 0x0f, true);
     }
 
     #[test]
@@ -230,25 +224,21 @@ mod table {
     }
 
     #[test]
-    fn seul_starry_night_reste_a_confirmer() {
-        // spec §4.5, session du 2026-07-30 — quatre des cinq hypothèses ont été
-        // confirmées à l'œil par une description spécifique du mécanisme.
-        // `0x09` reste 🔶 : « je crois voir un léger scintillement mais ce n'est
-        // pas très net » est compatible avec Starry Night sans être
-        // discriminante.
+    fn les_huit_modes_de_la_table_ont_ete_vus_a_l_oeil() {
+        // spec §4.5, session du 2026-07-30 — chaque nom a été confirmé par une
+        // description qui nomme un mécanisme distinctif, pas seulement « ça
+        // bouge ». `0x09` a demandé une seconde passe, en blanc.
         //
-        // Ce test a bougé quand la spec a bougé, comme annoncé en tête de
-        // fichier. L'ordre est resté : spec, puis test, puis code.
+        // Ce test a bougé deux fois, chaque fois parce que la spec avait bougé
+        // d'abord. L'ordre est resté : spec, puis test, puis code.
         let a_confirmer: Vec<u8> = Mode::ALL
             .iter()
             .filter(|m| !m.confirmed())
             .map(|m| m.code())
             .collect();
-        assert_eq!(a_confirmer, vec![0x09]);
-
         assert!(
-            !Mode::STARRY_NIGHT.confirmed(),
-            "rien ne doit présenter « starry-night » comme certain (spec §4.5)"
+            a_confirmer.is_empty(),
+            "modes encore non vérifiés à l'œil : {a_confirmer:02x?}"
         );
     }
 
