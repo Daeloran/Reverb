@@ -8,6 +8,8 @@
 //! `0x01` du `2019` et le canal `0x01` du `2012` sont deux ventilateurs
 //! différents. C'est pourquoi un `Placement` porte toujours le numéro de série.
 
+use std::fmt;
+
 use crate::Model;
 
 /// Numéros de série des trois contrôleurs de cette machine.
@@ -50,6 +52,33 @@ pub struct UnknownPosition {
     pub valid: &'static [&'static str],
 }
 
+impl fmt::Display for UnknownPosition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "position « {} » inconnue. Positions valides : {}",
+            self.input,
+            self.valid.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for UnknownPosition {}
+
+/// Noms des positions, dans le même ordre que [`Position::ALL`] (spec §3).
+const NAMES: [&str; 10] = [
+    "bas gauche",
+    "bas milieu",
+    "bas droite",
+    "droit bas",
+    "droit milieu",
+    "droit haut",
+    "gauche",
+    "haut droite",
+    "haut milieu",
+    "haut gauche",
+];
+
 impl Position {
     /// Les dix positions, dans un ordre stable.
     pub const ALL: [Position; 10] = [
@@ -67,22 +96,67 @@ impl Position {
 
     /// Nom lisible, tel que saisi par l'utilisateur.
     pub const fn name(self) -> &'static str {
-        todo!()
+        NAMES[self.index()]
+    }
+
+    /// Rang de la position dans [`Position::ALL`] et [`NAMES`].
+    const fn index(self) -> usize {
+        match self {
+            Position::BasGauche => 0,
+            Position::BasMilieu => 1,
+            Position::BasDroite => 2,
+            Position::DroitBas => 3,
+            Position::DroitMilieu => 4,
+            Position::DroitHaut => 5,
+            Position::Gauche => 6,
+            Position::HautDroite => 7,
+            Position::HautMilieu => 8,
+            Position::HautGauche => 9,
+        }
     }
 
     /// Tous les noms acceptés, dans le même ordre que [`Position::ALL`].
     pub fn names() -> &'static [&'static str] {
-        todo!()
+        &NAMES
     }
 
     /// Résout un nom saisi par l'utilisateur.
     pub fn from_name(input: &str) -> Result<Self, UnknownPosition> {
-        let _ = input;
-        todo!()
+        Position::ALL
+            .into_iter()
+            .find(|position| position.name() == input)
+            .ok_or_else(|| UnknownPosition {
+                input: input.to_owned(),
+                valid: &NAMES,
+            })
     }
 
     /// Contrôleur et canal correspondants (spec §3).
     pub const fn placement(self) -> Placement {
-        todo!()
+        // Un bit par canal. Les masques se répètent d'un contrôleur à l'autre :
+        // seule la série lève l'ambiguïté.
+        let (serial, model, mask) = match self {
+            Position::BasGauche => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x01),
+            Position::BasMilieu => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x02),
+            Position::BasDroite => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x04),
+            Position::DroitBas => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x08),
+            Position::DroitMilieu => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x10),
+            Position::DroitHaut => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x20),
+            Position::Gauche => (SERIAL_RGB_SINGLE, Model::Rgb, 0x01),
+            Position::HautDroite => (SERIAL_RGB_TRIPLE, Model::Rgb, 0x01),
+            Position::HautMilieu => (SERIAL_RGB_TRIPLE, Model::Rgb, 0x02),
+            Position::HautGauche => (SERIAL_RGB_TRIPLE, Model::Rgb, 0x04),
+        };
+        Placement {
+            serial,
+            model,
+            mask,
+        }
+    }
+}
+
+impl fmt::Display for Position {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
     }
 }
