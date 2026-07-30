@@ -126,14 +126,32 @@ nulle part ailleurs. Le point 40 vaut donc 59 °C.
 **Le mode courbe fonctionne** : la pompe a suivi le pic. La fonctionnalité était démontrée avant
 d'être écrite.
 
-### `temp2` → ventilateur : ❓ non confirmé
+### `temp2` pilote le ventilateur, même cartographie ✅
 
-Le ventilateur est resté à 793 tr/min dans les quatre essais, y compris quand `temp2` portait son
-pic au bon endroit. Or 793 est cohérent avec son profil d'origine à 42 °C : il n'a probablement
-jamais basculé. Deux pistes — `pwm2_enable = 2` refusé sans que la sonde le vérifie (elle ne
-testait les valeurs que sur `pwm1`), ou une activation différente pour ce canal.
+Seconde sonde, `tools/sonde_courbe_ventilateur.sh`, liquide à 39 °C :
 
-À reprendre avec une sonde ciblée **et une ligne de base à 60 %**, voir ci-dessous.
+| Essai | Point | Ventilateur |
+|---|---|---|
+| pic au bon point | 20 | **1785 tr/min** |
+| pic à un point volontairement faux | 35 | 751 |
+| aucun pic, ligne de base à 30 % | — | 714 |
+
+39 − 19 = 20. Le ventilateur ne répond qu'au pic correctement placé ; le témoin et l'essai à plat
+restent à la ligne de base. **Les deux courbes partagent donc la même origine et le même pas** :
+point 1 = 20 °C, un degré par point, point 40 = 59 °C.
+
+**Pourquoi la première sonde avait échoué** : elle écrivait `pwm2_enable = 2` sans jamais relire
+la valeur. La seconde vérifie chaque écriture de mode. La cause exacte du refus initial reste
+inconnue — ce qui est établi, c'est qu'une écriture de mode non relue ne prouve rien.
+
+### Vérification croisée de la cartographie ✅
+
+À la sortie de la seconde sonde, les deux canaux ont été laissés sur des courbes connues. À 39 °C,
+elles prescrivent 76 % pour la pompe et 45 % pour le ventilateur. Mesuré : **2586 et 952 tr/min**,
+soit exactement les régimes attendus pour ces consignes.
+
+La cartographie n'est donc pas seulement confirmée par un pic isolé : elle prédit correctement le
+régime en régime établi, sur les deux canaux à la fois.
 
 ### ⚠️ `pwm_enable = 0` ne rend pas le Kraken à son profil d'usine
 
