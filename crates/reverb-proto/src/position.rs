@@ -17,22 +17,28 @@ use crate::Model;
 /// Les deux `1e71:2012` sont physiquement identiques : la série est le **seul**
 /// moyen de les distinguer.
 pub const SERIAL_FAN_CONTROLLER: &str = "1303F00AAAAD9529610494BE";
-pub const SERIAL_RGB_SINGLE: &str = "0E014044AB7664C25F063BD5";
-pub const SERIAL_RGB_TRIPLE: &str = "1101F021AA358489609AA5B2";
+/// Le contrôleur du ventilateur arrière, seul canal utilisé.
+pub const SERIAL_RGB_ARRIERE: &str = "0E014044AB7664C25F063BD5";
+/// Le contrôleur des trois ventilateurs du dessus.
+pub const SERIAL_RGB_HAUT: &str = "1101F021AA358489609AA5B2";
 
 /// Emplacement physique d'un ventilateur.
+///
+/// Disposition du boîtier : trois en bas, trois sur l'avant (le radiateur du
+/// Kraken, plaqué contre la face de la carte mère), trois sur le dessus, un à
+/// l'arrière.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Position {
     BasGauche,
     BasMilieu,
     BasDroite,
-    DroitBas,
-    DroitMilieu,
-    DroitHaut,
-    Gauche,
-    HautDroite,
-    HautMilieu,
+    RadiateurHaut,
+    RadiateurMilieu,
+    RadiateurBas,
+    Arriere,
     HautGauche,
+    HautMilieu,
+    HautDroite,
 }
 
 /// Où se trouve réellement un ventilateur : quel contrôleur, quel canal.
@@ -70,14 +76,21 @@ const NAMES: [&str; 10] = [
     "bas gauche",
     "bas milieu",
     "bas droite",
-    "droit bas",
-    "droit milieu",
-    "droit haut",
-    "gauche",
-    "haut droite",
-    "haut milieu",
+    "radiateur haut",
+    "radiateur milieu",
+    "radiateur bas",
+    "arrière",
     "haut gauche",
+    "haut milieu",
+    "haut droite",
 ];
+
+/// Variantes de saisie tolérées en plus de [`NAMES`].
+///
+/// « arrière » est le seul nom du jeu à porter un accent. L'imposer au clavier
+/// serait une friction gratuite ; on accepte donc la forme sans accent, sans
+/// pour autant introduire une normalisation générale des chaînes.
+const ALIASES: [(&str, Position); 1] = [("arriere", Position::Arriere)];
 
 impl Position {
     /// Les dix positions, dans un ordre stable.
@@ -85,13 +98,13 @@ impl Position {
         Position::BasGauche,
         Position::BasMilieu,
         Position::BasDroite,
-        Position::DroitBas,
-        Position::DroitMilieu,
-        Position::DroitHaut,
-        Position::Gauche,
-        Position::HautDroite,
-        Position::HautMilieu,
+        Position::RadiateurHaut,
+        Position::RadiateurMilieu,
+        Position::RadiateurBas,
+        Position::Arriere,
         Position::HautGauche,
+        Position::HautMilieu,
+        Position::HautDroite,
     ];
 
     /// Nom lisible, tel que saisi par l'utilisateur.
@@ -105,13 +118,13 @@ impl Position {
             Position::BasGauche => 0,
             Position::BasMilieu => 1,
             Position::BasDroite => 2,
-            Position::DroitBas => 3,
-            Position::DroitMilieu => 4,
-            Position::DroitHaut => 5,
-            Position::Gauche => 6,
-            Position::HautDroite => 7,
+            Position::RadiateurHaut => 3,
+            Position::RadiateurMilieu => 4,
+            Position::RadiateurBas => 5,
+            Position::Arriere => 6,
+            Position::HautGauche => 7,
             Position::HautMilieu => 8,
-            Position::HautGauche => 9,
+            Position::HautDroite => 9,
         }
     }
 
@@ -121,10 +134,18 @@ impl Position {
     }
 
     /// Résout un nom saisi par l'utilisateur.
+    ///
+    /// Accepte aussi les variantes de [`ALIASES`].
     pub fn from_name(input: &str) -> Result<Self, UnknownPosition> {
         Position::ALL
             .into_iter()
             .find(|position| position.name() == input)
+            .or_else(|| {
+                ALIASES
+                    .iter()
+                    .find(|(alias, _)| *alias == input)
+                    .map(|(_, position)| *position)
+            })
             .ok_or_else(|| UnknownPosition {
                 input: input.to_owned(),
                 valid: &NAMES,
@@ -139,13 +160,13 @@ impl Position {
             Position::BasGauche => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x01),
             Position::BasMilieu => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x02),
             Position::BasDroite => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x04),
-            Position::DroitBas => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x08),
-            Position::DroitMilieu => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x10),
-            Position::DroitHaut => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x20),
-            Position::Gauche => (SERIAL_RGB_SINGLE, Model::Rgb, 0x01),
-            Position::HautDroite => (SERIAL_RGB_TRIPLE, Model::Rgb, 0x01),
-            Position::HautMilieu => (SERIAL_RGB_TRIPLE, Model::Rgb, 0x02),
-            Position::HautGauche => (SERIAL_RGB_TRIPLE, Model::Rgb, 0x04),
+            Position::RadiateurHaut => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x08),
+            Position::RadiateurMilieu => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x10),
+            Position::RadiateurBas => (SERIAL_FAN_CONTROLLER, Model::RgbAndFan, 0x20),
+            Position::Arriere => (SERIAL_RGB_ARRIERE, Model::Rgb, 0x01),
+            Position::HautGauche => (SERIAL_RGB_HAUT, Model::Rgb, 0x01),
+            Position::HautMilieu => (SERIAL_RGB_HAUT, Model::Rgb, 0x02),
+            Position::HautDroite => (SERIAL_RGB_HAUT, Model::Rgb, 0x04),
         };
         Placement {
             serial,

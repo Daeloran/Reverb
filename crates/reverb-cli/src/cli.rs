@@ -43,7 +43,7 @@ OPTIONS :
 
 EXEMPLES :
     reverb set --all --color ff00ff
-    reverb set --fan \"droit bas\" --color 00ff00
+    reverb set --fan \"radiateur bas\" --color 00ff00
     reverb set --all --color ffffff --brightness 30
 ";
 
@@ -155,11 +155,11 @@ mod tests {
     #[test]
     fn analyse_une_position_nommee() {
         let Ok(Command::Set { cible, .. }) =
-            parse(["set", "--fan", "droit bas", "--color", "0f0f0f"])
+            parse(["set", "--fan", "radiateur bas", "--color", "0f0f0f"])
         else {
             panic!("doit être une commande set");
         };
-        assert_eq!(cible, Cible::Une(Position::DroitBas));
+        assert_eq!(cible, Cible::Une(Position::RadiateurBas));
     }
 
     #[test]
@@ -209,7 +209,7 @@ mod tests {
             parse(["set", "--fan", "plafond", "--color", "ffffff"]).expect_err("doit être refusé");
         assert!(erreur.contains("plafond"), "message : {erreur}");
         assert!(
-            erreur.contains("droit bas"),
+            erreur.contains("radiateur bas"),
             "doit lister les valides : {erreur}"
         );
     }

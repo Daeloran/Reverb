@@ -71,27 +71,33 @@ Les deux `1e71:2012` sont physiquement identiques et ne se distinguent **que** p
 
 | Série | Ventilateurs | Positions |
 |---|---|---|
-| `0E014044AB7664C25F063BD5` | 1 | gauche |
-| `1101F021AA358489609AA5B2` | 3 | haut droite / haut milieu / haut gauche |
+| `0E014044AB7664C25F063BD5` | 1 | arrière |
+| `1101F021AA358489609AA5B2` | 3 | haut gauche / haut milieu / haut droite |
 
 Le Kraken expose **deux interfaces** : `MI_01` en HID (commandes) et `MI_00` en bulk (image). Sous Linux, `libusb`/`nusb` accède aux deux, mais l'accès brut exige la règle udev.
 
 ## Cartographie physique des canaux
 
-Établie pendant la rétro-ingénierie — **pas besoin de calibration**.
+Établie par **calibration directe sur le matériel** le 2026-07-30.
 
 | Périphérique | Masque | Position |
 |---|---|---|
 | `2019` | `0x01` | bas gauche |
 | `2019` | `0x02` | bas milieu |
 | `2019` | `0x04` | bas droite |
-| `2019` | `0x08` | droit bas |
-| `2019` | `0x10` | droit milieu |
-| `2019` | `0x20` | droit haut |
-| `2012` (0E01…) | `0x01` | gauche |
-| `2012` (1101…) | `0x01` | haut droite |
+| `2019` | `0x08` | radiateur haut |
+| `2019` | `0x10` | radiateur milieu |
+| `2019` | `0x20` | radiateur bas |
+| `2012` (0E01…) | `0x01` | arrière |
+| `2012` (1101…) | `0x01` | haut gauche |
 | `2012` (1101…) | `0x02` | haut milieu |
-| `2012` (1101…) | `0x04` | haut gauche |
+| `2012` (1101…) | `0x04` | haut droite |
+
+Disposition du boîtier : **3 en bas**, **3 sur l'avant** — le radiateur du Kraken, plaqué contre la face de la carte mère —, **3 sur le dessus**, **1 à l'arrière**.
+
+> ⚠️ **La table issue de la session Windows était fausse sur deux groupes sur quatre**, les libellés y ayant été posés de mémoire. Correction documentée dans `docs/SPEC-PROTOCOLE-NZXT.md` §3.
+>
+> **Règle qui en découle** : l'appartenance d'un canal à un contrôleur vient des captures et se croit ; l'**étiquette physique** vient d'une observation humaine et se **vérifie canal par canal**. Ne jamais ajouter ni renommer une position sans rallumer le canal concerné.
 
 ## Structure du projet
 

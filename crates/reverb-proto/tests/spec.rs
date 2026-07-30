@@ -10,6 +10,14 @@
 //!
 //! Aucun accès matériel : ces tests sont purement calculatoires (issue #1,
 //! critère « Aucun accès matériel dans les tests automatisés »).
+//!
+//! ⚠️ **Module `position` re-dérivé le 2026-07-30.** La table du §3 de la spec a
+//! été corrigée par calibration directe sur le matériel : deux groupes de canaux
+//! sur quatre étaient inversés, et un libellé était faux. Les couples
+//! (position → série, masque) ci-dessous ont été relus **depuis la spec
+//! corrigée**, ligne par ligne, sans recopier `src/position.rs`. Les modules
+//! `couleur`, `trame` et `initialisation` sont inchangés au fond : seuls les
+//! noms de variantes y ont suivi.
 
 use reverb_proto::FRAME_LEN;
 
@@ -154,22 +162,44 @@ mod couleur {
 // ---------------------------------------------------------------------------
 
 mod position {
-    use reverb_proto::position::{SERIAL_FAN_CONTROLLER, SERIAL_RGB_SINGLE, SERIAL_RGB_TRIPLE};
+    use reverb_proto::position::{SERIAL_FAN_CONTROLLER, SERIAL_RGB_ARRIERE, SERIAL_RGB_HAUT};
     use reverb_proto::{Model, Position};
 
-    /// Les dix noms de position, tels qu'écrits dans la table de la spec §3.
-    /// L'issue #1 les reprend dans son exemple `reverb set --fan "droit bas"`.
+    // Table de la spec §3, recopiée telle quelle (version corrigée du
+    // 2026-07-30, établie par calibration directe) :
+    //
+    //     | Device | Masque | Position physique |
+    //     |---|---|---|
+    //     | 7 | `0x01` | bas gauche       |
+    //     | 7 | `0x02` | bas milieu       |
+    //     | 7 | `0x04` | bas droite       |
+    //     | 7 | `0x08` | radiateur haut   |
+    //     | 7 | `0x10` | radiateur milieu |
+    //     | 7 | `0x20` | radiateur bas    |
+    //     | 8 | `0x01` | arrière          |
+    //     | 9 | `0x01` | haut gauche      |
+    //     | 9 | `0x02` | haut milieu      |
+    //     | 9 | `0x04` | haut droite      |
+    //
+    // Les devices se traduisent en séries par le §1 : device 7 = `1e71:2019`
+    // (« 6 canaux LED, 3 canaux ventilateur »), device 8 = `1e71:2012` avec
+    // « 1 canal LED utilisé », device 9 = `1e71:2012` avec « 3 canaux LED
+    // utilisés ». Les deux `2012` ne se distinguent que par leur numéro de
+    // série (§11 : « les canaux ne sont pas interchangeables entre
+    // contrôleurs »).
+
+    /// Les dix noms de position, dans l'ordre des lignes de la table du §3.
     const NOMS: [&str; 10] = [
         "bas gauche",
         "bas milieu",
         "bas droite",
-        "droit bas",
-        "droit milieu",
-        "droit haut",
-        "gauche",
-        "haut droite",
-        "haut milieu",
+        "radiateur haut",
+        "radiateur milieu",
+        "radiateur bas",
+        "arrière",
         "haut gauche",
+        "haut milieu",
+        "haut droite",
     ];
 
     fn verifie(position: Position, serie: &str, modele: Model, masque: u8) {
@@ -215,10 +245,13 @@ mod position {
     }
 
     #[test]
-    fn droit_bas_est_le_canal_08_du_2019() {
-        // spec §3 — device 7, masque `0x08`.
+    fn radiateur_haut_est_le_canal_08_du_2019() {
+        // spec §3 — device 7, masque `0x08` : « radiateur haut ».
+        // Encart « ce qui était faux » : `0x08` portait le libellé « droit bas »,
+        // ❌ inversé — « la commande visant `0x08` a allumé celui du **haut** du
+        // radiateur ».
         verifie(
-            Position::DroitBas,
+            Position::RadiateurHaut,
             SERIAL_FAN_CONTROLLER,
             Model::RgbAndFan,
             0x08,
@@ -226,10 +259,10 @@ mod position {
     }
 
     #[test]
-    fn droit_milieu_est_le_canal_10_du_2019() {
-        // spec §3 — device 7, masque `0x10`.
+    fn radiateur_milieu_est_le_canal_10_du_2019() {
+        // spec §3 — device 7, masque `0x10` : « radiateur milieu ».
         verifie(
-            Position::DroitMilieu,
+            Position::RadiateurMilieu,
             SERIAL_FAN_CONTROLLER,
             Model::RgbAndFan,
             0x10,
@@ -237,44 +270,66 @@ mod position {
     }
 
     #[test]
-    fn droit_haut_est_le_canal_20_du_2019() {
-        // spec §3 — device 7, masque `0x20`.
+    fn radiateur_bas_est_le_canal_20_du_2019() {
+        // spec §3 — device 7, masque `0x20` : « radiateur bas ».
+        // Encart « ce qui était faux » : `0x20` portait « droit haut », ❌ inversé.
         verifie(
-            Position::DroitHaut,
+            Position::RadiateurBas,
             SERIAL_FAN_CONTROLLER,
             Model::RgbAndFan,
             0x20,
         );
     }
 
-    // --- Device 8, `1e71:2012` série `0E01…` (spec §3 + table de l'issue #1) ---
+    // --- Device 8, `1e71:2012` série `0E01…` (spec §3, ligne « 8 ») ---
 
     #[test]
-    fn gauche_est_le_canal_01_du_2012_a_un_canal() {
-        // spec §3 — device 8, masque `0x01`.
-        // issue #1, table des positions — `2012` série `0E01…`, masque `0x01`.
-        verifie(Position::Gauche, SERIAL_RGB_SINGLE, Model::Rgb, 0x01);
+    fn arriere_est_le_canal_01_du_2012_a_un_canal() {
+        // spec §3 — device 8, masque `0x01` : « arrière ».
+        // Encart « ce qui était faux » : ce canal portait « gauche », ❌ faux.
+        // spec §1 — device 8 : « 1 canal LED utilisé » ; c'est donc le `2012`
+        // dont une seule sortie sert, série `0E01…`.
+        verifie(Position::Arriere, SERIAL_RGB_ARRIERE, Model::Rgb, 0x01);
     }
 
-    // --- Device 9, `1e71:2012` série `1101…` (spec §3 + table de l'issue #1) ---
+    // --- Device 9, `1e71:2012` série `1101…` (spec §3, lignes « 9 ») ---
 
     #[test]
-    fn haut_droite_est_le_canal_01_du_2012_a_trois_canaux() {
-        // spec §3 — device 9, masque `0x01`.
-        // issue #1, table des positions — `2012` série `1101…`.
-        verifie(Position::HautDroite, SERIAL_RGB_TRIPLE, Model::Rgb, 0x01);
+    fn haut_gauche_est_le_canal_01_du_2012_a_trois_canaux() {
+        // spec §3 — device 9, masque `0x01` : « haut gauche ».
+        // Encart « ce qui était faux » : `0x01` portait « haut droite », ❌ inversé.
+        // spec §1 — device 9 : « 3 canaux LED utilisés », série `1101…`.
+        verifie(Position::HautGauche, SERIAL_RGB_HAUT, Model::Rgb, 0x01);
     }
 
     #[test]
     fn haut_milieu_est_le_canal_02_du_2012_a_trois_canaux() {
-        // spec §3 — device 9, masque `0x02`.
-        verifie(Position::HautMilieu, SERIAL_RGB_TRIPLE, Model::Rgb, 0x02);
+        // spec §3 — device 9, masque `0x02` : « haut milieu ».
+        verifie(Position::HautMilieu, SERIAL_RGB_HAUT, Model::Rgb, 0x02);
     }
 
     #[test]
-    fn haut_gauche_est_le_canal_04_du_2012_a_trois_canaux() {
-        // spec §3 — device 9, masque `0x04`.
-        verifie(Position::HautGauche, SERIAL_RGB_TRIPLE, Model::Rgb, 0x04);
+    fn haut_droite_est_le_canal_04_du_2012_a_trois_canaux() {
+        // spec §3 — device 9, masque `0x04` : « haut droite ».
+        // Encart « ce qui était faux » : `0x04` portait « haut gauche », ❌ inversé.
+        verifie(Position::HautDroite, SERIAL_RGB_HAUT, Model::Rgb, 0x04);
+    }
+
+    // --- Les libellés d'avant la calibration ---
+
+    #[test]
+    fn les_anciens_libelles_errones_ne_sont_plus_acceptes() {
+        // spec §3, encart « Ce qui était faux, et comment ça a été tranché ».
+        // La table de la session Windows nommait `0x08`–`0x20` du device 7
+        // « droit bas / droit milieu / droit haut » et le device 8 « gauche ».
+        // Le vocabulaire du §3 est fermé : ces libellés ne désignent plus rien,
+        // et surtout pas un ventilateur au hasard.
+        for ancien in ["droit bas", "droit milieu", "droit haut", "gauche"] {
+            assert!(
+                Position::from_name(ancien).is_err(),
+                "« {ancien} » est un libellé d'avant la calibration du 2026-07-30"
+            );
+        }
     }
 
     // --- Couverture et unicité ---
@@ -305,7 +360,8 @@ mod position {
 
     #[test]
     fn chaque_position_porte_le_nom_de_la_spec() {
-        // spec §3, colonne « Position physique ».
+        // spec §3, colonne « Position physique », dans l'ordre des lignes de la
+        // table (bas ×3, radiateur ×3, arrière, haut ×3).
         for (position, nom) in Position::ALL.iter().zip(NOMS) {
             assert_eq!(position.name(), nom, "nom de {position:?}");
         }
@@ -315,7 +371,8 @@ mod position {
     #[test]
     fn chaque_nom_se_resout_vers_sa_position() {
         // issue #1 — « désignés par leur **position physique** », exemple
-        // `reverb set --fan "droit bas"`. Noms de la spec §3.
+        // `reverb set --fan "radiateur bas"` (l'issue écrivait « droit bas »,
+        // libellé d'avant la correction du §3). Noms de la spec §3.
         for (nom, attendue) in NOMS.iter().zip(Position::ALL) {
             assert_eq!(
                 Position::from_name(nom),
@@ -360,8 +417,10 @@ mod position {
         // physiquement identiques, sont distingués par leur série ».
         // spec §11 — « le canal 1 du device 7 et le canal 1 du device 9 sont
         // deux ventilateurs différents ».
-        let unique = Position::Gauche.placement();
-        let triple = Position::HautDroite.placement();
+        // spec §3 — le masque `0x01` désigne « arrière » sur le device 8 et
+        // « haut gauche » sur le device 9.
+        let unique = Position::Arriere.placement();
+        let triple = Position::HautGauche.placement();
 
         assert_eq!(unique.mask, triple.mask, "même masque de canal `0x01`");
         assert_eq!(unique.model, Model::Rgb);
@@ -371,17 +430,17 @@ mod position {
             unique.serial, triple.serial,
             "la série est le seul moyen de les distinguer"
         );
-        assert_eq!(unique.serial, SERIAL_RGB_SINGLE);
-        assert_eq!(triple.serial, SERIAL_RGB_TRIPLE);
+        assert_eq!(unique.serial, SERIAL_RGB_ARRIERE);
+        assert_eq!(triple.serial, SERIAL_RGB_HAUT);
     }
 
     #[test]
     fn le_2019_et_les_2012_ne_partagent_aucune_serie() {
         // spec §1 — trois contrôleurs distincts sur le bus.
         // issue #1 — résolution par VID:PID + numéro de série.
-        assert_ne!(SERIAL_FAN_CONTROLLER, SERIAL_RGB_SINGLE);
-        assert_ne!(SERIAL_FAN_CONTROLLER, SERIAL_RGB_TRIPLE);
-        assert_ne!(SERIAL_RGB_SINGLE, SERIAL_RGB_TRIPLE);
+        assert_ne!(SERIAL_FAN_CONTROLLER, SERIAL_RGB_ARRIERE);
+        assert_ne!(SERIAL_FAN_CONTROLLER, SERIAL_RGB_HAUT);
+        assert_ne!(SERIAL_RGB_ARRIERE, SERIAL_RGB_HAUT);
         assert_eq!(Position::BasGauche.placement().model, Model::RgbAndFan);
     }
 
@@ -396,8 +455,8 @@ mod position {
                 .count()
         };
         assert_eq!(compte(SERIAL_FAN_CONTROLLER), 6);
-        assert_eq!(compte(SERIAL_RGB_SINGLE), 1);
-        assert_eq!(compte(SERIAL_RGB_TRIPLE), 3);
+        assert_eq!(compte(SERIAL_RGB_ARRIERE), 1);
+        assert_eq!(compte(SERIAL_RGB_HAUT), 3);
     }
 }
 
@@ -453,7 +512,7 @@ mod trame {
     fn la_trame_verte_du_dernier_canal_est_exacte_octet_pour_octet() {
         // spec §0 — « couleur fixe verte sur les 6+3+1 canaux : les dix
         // ventilateurs passent au vert ». Ici le canal `0x20` du `2019`,
-        // soit « droit haut » (spec §3), en vert pur → GRB `ff 00 00`
+        // soit « radiateur bas » (spec §3), en vert pur → GRB `ff 00 00`
         // (issue #1, tests d'intention).
         let attendue = trame_avec(&[
             (0, 0x2a),
@@ -470,7 +529,7 @@ mod trame {
         ]);
 
         let obtenue = fixed_color(
-            Position::DroitHaut.placement().mask,
+            Position::RadiateurBas.placement().mask,
             Rgb::new(0x00, 0xff, 0x00),
             Brightness::FULL,
             LEDS_PER_FAN,

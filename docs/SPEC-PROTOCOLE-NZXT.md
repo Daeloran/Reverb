@@ -82,23 +82,75 @@ Toujours capturer avec `--devices 7,8,9` pour isoler le RGB.
 **Les couleurs partent dans l'ordre G, R, B.** Prouvé par texte clair connu (dix ventilateurs
 réglés sur dix couleurs distinctes, puis huit LED d'un même ventilateur peintes séparément).
 
-Le rouge pur part en `00 ff 00`, le vert en `ff 28 00`. Une lecture RGB naïve intervertit
-rouge et vert sur toute l'installation.
+Le rouge pur part en `00 ff 00` et le **vert pur en `ff 00 00`**. Une lecture RGB naïve
+intervertit rouge et vert sur toute l'installation.
+
+> ⚠️ **Formulation corrigée le 2026-07-30.** Cette section affirmait « le vert en `ff 28 00` ».
+> C'est exact comme observation — mais `ff 28 00` relu en GRB donne `(40, 255, 0)`, qui est le
+> **vert du nuancier CAM** relevé au §5.1, pas le vert pur. Présenté comme illustration de
+> l'ordre GRB, c'était trompeur : quiconque implémentait depuis cette phrase pouvait croire à un
+> décalage supplémentaire. Le vert pur `#00ff00` part bien en `ff 00 00`.
 
 ## 3. Cartographie des canaux ✅
 
-| Device | Masque | Position physique |
-|---|---|---|
-| 7 | `0x01` | bas gauche |
-| 7 | `0x02` | bas milieu |
-| 7 | `0x04` | bas droite |
-| 7 | `0x08` | droit bas |
-| 7 | `0x10` | droit milieu |
-| 7 | `0x20` | droit haut |
-| 8 | `0x01` | gauche |
-| 9 | `0x01` | haut droite |
-| 9 | `0x02` | haut milieu |
-| 9 | `0x04` | haut gauche |
+> ⚠️ **Table corrigée le 2026-07-30 sous Linux.** La version issue de la session Windows était
+> fausse sur **deux groupes sur quatre** : les libellés y avaient été posés de mémoire, sans
+> vérification canal par canal.
+>
+> Celle-ci a été établie par **calibration directe** — les dix canaux allumés en rouge/vert/bleu
+> au sein de chaque groupe, puis relevés à l'œil. Détail des écarts en fin de section.
+
+| Device | Numéro de série | Masque | Position physique |
+|---|---|---|---|
+| 7 | `1303F00AAAAD9529610494BE` | `0x01` | bas gauche |
+| 7 | `1303F00AAAAD9529610494BE` | `0x02` | bas milieu |
+| 7 | `1303F00AAAAD9529610494BE` | `0x04` | bas droite |
+| 7 | `1303F00AAAAD9529610494BE` | `0x08` | **radiateur haut** |
+| 7 | `1303F00AAAAD9529610494BE` | `0x10` | **radiateur milieu** |
+| 7 | `1303F00AAAAD9529610494BE` | `0x20` | **radiateur bas** |
+| 8 | `0E014044AB7664C25F063BD5` | `0x01` | **arrière** |
+| 9 | `1101F021AA358489609AA5B2` | `0x01` | **haut gauche** |
+| 9 | `1101F021AA358489609AA5B2` | `0x02` | haut milieu |
+| 9 | `1101F021AA358489609AA5B2` | `0x04` | **haut droite** |
+
+> **Le numéro de série fait référence, pas l'adresse USB.** Celle-ci change d'un démarrage à
+> l'autre et ne s'observe pas de la même façon sous Linux ; la série est exposée par `HID_UNIQ`
+> dans `/sys/class/hidraw/*/device/uevent`.
+>
+> Colonne ajoutée le 2026-07-30 : sans elle, relier un device à sa série passait par un
+> raisonnement indirect — « celui qui n'a qu'un canal utilisé » — qui casserait silencieusement
+> si un ventilateur était ajouté.
+
+Disposition réelle : **3 en bas**, **3 sur l'avant** — le radiateur du Kraken, plaqué contre la
+face de la carte mère —, **3 sur le dessus**, **1 à l'arrière**.
+
+⚠️ Les trois ventilateurs du radiateur sont sur le device **7**, pas sur le Kraken. La pompe n'a
+aucune LED.
+
+<details>
+<summary>Ce qui était faux, et comment ça a été tranché</summary>
+
+| Masque | Ancien libellé | Réel | Verdict |
+|---|---|---|---|
+| `7 / 0x01`–`0x04` | bas gauche / milieu / droite | idem | ✅ |
+| `7 / 0x08` | droit bas | radiateur **haut** | ❌ inversé |
+| `7 / 0x10` | droit milieu | radiateur milieu | ✅ |
+| `7 / 0x20` | droit haut | radiateur **bas** | ❌ inversé |
+| `8 / 0x01` | gauche | **arrière** | ❌ faux |
+| `9 / 0x01` | haut droite | haut **gauche** | ❌ inversé |
+| `9 / 0x02` | haut milieu | haut milieu | ✅ |
+| `9 / 0x04` | haut gauche | haut **droite** | ❌ inversé |
+
+L'écart a été découvert en allumant un seul ventilateur : la commande visant `0x08` a allumé
+celui du **haut** du radiateur. Un groupe erroné rendant les autres suspects, les dix canaux ont
+été recalibrés d'un bloc plutôt que corrigés au cas par cas — et deux autres erreurs sont
+apparues.
+
+**Leçon** : l'appartenance d'un canal à un contrôleur est fiable, elle vient des captures.
+L'étiquette physique ne l'est pas — elle vient d'une observation humaine, et se vérifie
+canal par canal.
+
+</details>
 
 ✅ Un bit par canal. Confirmé en isolant un seul ventilateur (actions 3 et 4) : seule la trame
 au bit attendu est émise.
