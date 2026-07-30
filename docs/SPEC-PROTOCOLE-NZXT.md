@@ -177,28 +177,57 @@ offset  0    1     2     3     4     5      6     7..55        56..59
 | 3 | toujours égal à l'offset 2 | ✅ observé · ❓ rôle |
 | 4 | **mode** — voir §4.1 | ✅ |
 | 5 | **vitesse** de l'animation | ✅ voir §4.2 |
-| 6 | `0x00` sauf mode `0x05` où il vaut `0x01` ou `0x03` | 🔶 direction ou variante |
+| 6 | `0x00` sauf mode `0x05` où il vaut `0x01` ou `0x03` | 🔶 **variante**, pas direction — §4.4 |
 | 7…  | couleurs, triplets GRB consécutifs, autant que le trailer en annonce | ✅ |
-| 56 | **nombre de couleurs fournies** | ✅ vaut 1, 2 ou 3 et correspond exactement |
-| 57 | `0x00` ou `0x08` selon le mode | ❓ |
+| 56 | **nombre de couleurs fournies** | ✅ vaut **toujours au moins 1** — §4.4 |
+| 57 | `0x00` ou `0x08` — **constante propre au mode** | ✅ valeur connue pour les 8 modes, §4.4 |
 | 58 | `0x08` — **nombre de LED de l'accessoire** | 🔶 |
 | 59 | `0x03` — type d'accessoire | 🔶 |
 
 ### 4.1 Modes observés
 
-| Mode | Couleurs | Identification |
-|---|---|---|
-| `0x00` | 1 | ✅ **couleur fixe** |
-| `0x01` | 3 | 🔶 mode multicolore |
-| `0x02` | 0 | ✅ **Spectrum Wave** — le contrôleur génère les teintes |
-| `0x04` | 2–3 | 🔶 multicolore |
-| `0x05` | 2 | 🔶 seul mode où l'offset 6 varie |
-| `0x06` | 1 | ❓ |
-| `0x07` | 1 | ✅ **Breathing** |
-| `0x09` | 1 | ❓ |
+| Mode | Couleurs | off6 | off57 | Vitesses vues | Identification |
+|---|---|---|---|---|---|
+| `0x00` | 1 | `0x00` | `0x00` | `0x32` | ✅ **couleur fixe** |
+| `0x01` | 3 | `0x00` | `0x08` | `0x28` | 🔶 **Fading** |
+| `0x02` | 1 (noire) | `0x00` | `0x00` | `0xfa`, `0x50` | ✅ **Spectrum Wave** — le contrôleur génère les teintes |
+| `0x03` | — | — | — | — | ❓ jamais déclenché pendant la capture |
+| `0x04` | 2 ou 3 | `0x00` | `0x00` | `0xfa` | 🔶 **Covering Marquee** |
+| `0x05` | **exactement 2** | `0x01`, `0x03` | `0x00` | `0xf4`, `0xe8` | ✅ **Alternating** — voir ci-dessous |
+| `0x06` | 1 | `0x00` | `0x08` | `0x0f` | 🔶 **Pulse** |
+| `0x07` | 1 | `0x00` | `0x08` | `0x14` | ✅ **Breathing** |
+| `0x09` | 1 | `0x00` | `0x00` | `0x0f` | 🔶 **Starry Night** |
 
-Les modes `0x01`, `0x04`, `0x05`, `0x06`, `0x09` ont été balayés pendant l'action 11 sans
-noter quel nom CAM leur donnait — leur numéro est certain, leur nom non.
+> Colonnes `off6`, `off57` et vitesses **extraites de la capture** `cible1-modes-nzxt` le
+> 2026-07-30 sous Linux, par `tools/extrait_modes.py`. Les numéros de mode sont certains ✅.
+
+**Les noms des cinq modes non documentés sont des hypothèses**, obtenues en recoupant le nombre
+de couleurs accepté avec la table HUE 2 de liquidctl, dont les numéros de mode coïncident.
+
+`0x05` est le recoupement le plus solide : Alternating est le **seul** mode dont liquidctl fixe
+le minimum **et** le maximum à 2 couleurs, et c'est exactement ce qu'on observe — jamais 1,
+jamais 3. Ça éclaire aussi l'offset 6, qui sélectionne chez liquidctl la taille des blocs
+alternés (quatre variantes).
+
+⚠️ Ces noms restent à **confirmer à l'œil** en déclenchant chaque mode. Tant que ce n'est pas
+fait, ils portent 🔶 et ne doivent pas être présentés à l'utilisateur comme certains.
+
+### 4.4 Ce que la capture a tranché ✅
+
+Trois inconnues levées le 2026-07-30, sans toucher au matériel.
+
+**L'offset 56 ne descend jamais à zéro.** Le §4 affirmait « vaut 1, 2 ou 3 », le §4.1 attribuait
+« 0 couleur » à Spectrum Wave — contradiction apparente. La trame réelle porte `off56 = 0x01`
+avec une couleur **noire** `#000000`. Le mode ignore la couleur fournie mais le compteur reste à
+1. Une implémentation qui écrirait `0x00` s'écarterait de ce que fait CAM.
+
+**L'offset 57 est une constante propre au mode**, pas du bruit : `0x08` pour `0x01`, `0x06` et
+`0x07` ; `0x00` pour `0x00`, `0x02`, `0x04`, `0x05` et `0x09`. Sa signification reste ❓, mais sa
+valeur est désormais connue pour les huit modes observés — il suffit de la reproduire.
+
+**L'offset 6 est un sélecteur de variante, pas une direction.** En mode `0x05` il vaut `0x01`
+puis `0x03`, et la vitesse change en même temps (`0xf4` → `0xe8`). Une direction serait binaire ;
+quatre valeurs possibles correspondent aux quatre tailles de blocs d'Alternating.
 
 ### 4.2 L'octet 5 est la vitesse, pas la luminosité ✅
 
@@ -372,14 +401,23 @@ couleurs à chaque démarrage. Un `set` unique au boot ne suffira pas.
 | # | Question | Comment trancher |
 |---|---|---|
 | 1 | L'offset 3 de `22 10` permet-il de chaîner au-delà de 8 LED ? | brancher un accessoire plus long, ou tester `0x08` sous Linux |
-| ~~2~~ | ~~`22 11` et `22 a0` sont-ils obligatoires ?~~ | ✅ **tranché — voir §0.2** |
-| ~~3~~ | ~~Le `62 01` répété est-il un watchdog ?~~ | ✅ **tranché — voir §0.3** |
-| 4 | Rôle de l'offset 6 de `2a 04` (varie en mode `0x05`) | rejouer ce mode en changeant la direction |
-| 5 | Noms CAM des modes `0x01`, `0x04`, `0x05`, `0x06`, `0x09` | capture ciblée, un mode nommé à la fois |
+| ~~2~~ | ~~`22 11` et `22 a0` sont-ils obligatoires ?~~ | ✅ **tranché — §0.2** |
+| ~~3~~ | ~~Le `62 01` répété est-il un watchdog ?~~ | ✅ **tranché — §0.3** |
+| ~~4~~ | ~~Rôle de l'offset 6 de `2a 04`~~ | ✅ **tranché — §4.4** : sélecteur de variante, pas direction |
+| 5 | Noms CAM des modes `0x01`, `0x04`, `0x05`, `0x06`, `0x09` | 🔶 **candidats sérieux en §4.1** — reste à confirmer à l'œil sous Linux |
 | 6 | Différence entre offsets 2 et 3 de `2a 04` | jamais observée différente |
+| ~~7~~ | ~~Que porte l'offset 56 quand le mode n'attend aucune couleur ?~~ | ✅ **tranché — §4.4** : toujours ≥ 1, avec une couleur noire |
+| 8 | Signification de l'offset 57 | ✅ **valeur connue pour les 8 modes (§4.4)**, sens encore ❓ |
+| 9 | À quelle cadence correspond quelle valeur de vitesse ? | chronométrer une animation à deux vitesses connues |
+| 10 | La séquence d'initialisation du §8 est-elle obligatoire ? | ⚠️ exige une **coupure d'alimentation** — un redémarrage à chaud ne réinitialise rien (§9) |
+| 11 | Que fait le mode `0x03` ? | jamais déclenché pendant la capture ; le tester sous Linux |
 
-Les questions 2 et 3 se règlent mieux **sous Linux par expérimentation directe** que par
-capture supplémentaire sous Windows.
+Ces questions se règlent désormais mieux **sous Linux par expérimentation directe** — l'outil
+`reverb` sait écrire les trames — que par une capture supplémentaire sous Windows.
+
+> Les questions 4, 7 et 8 ont été tranchées **sans matériel**, en réanalysant la capture déjà
+> prise avec `tools/extrait_modes.py`. Avant d'organiser une nouvelle session Windows, vérifier
+> systématiquement si la réponse n'est pas déjà dans les `.pcap` conservés.
 
 ---
 
