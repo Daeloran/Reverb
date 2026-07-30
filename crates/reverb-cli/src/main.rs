@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use reverb_cli::cli::{self, Cible, Command};
 use reverb_cli::hidraw::{self, Controller};
-use reverb_proto::{Brightness, Mode, Model, Position, Rgb, frame};
+use reverb_proto::{Apply, Brightness, Mode, Model, Position, Rgb, frame};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -35,6 +35,13 @@ fn main() -> ExitCode {
             brightness,
             skip_init,
         } => appliquer(cible, mode, &colors, speed, brightness, skip_init),
+        Command::Paint {
+            cible,
+            colors,
+            apply,
+            brightness,
+            skip_init,
+        } => peindre(cible, &colors, apply, brightness, skip_init),
     };
 
     match resultat {
@@ -123,6 +130,45 @@ fn appliquer(
     brightness: Brightness,
     skip_init: bool,
 ) -> Result<(), String> {
+    emettre(cible, skip_init, |mask| {
+        frame::animation(
+            mask,
+            mode,
+            colors,
+            speed,
+            brightness,
+            reverb_proto::LEDS_PER_FAN,
+        )
+        .map(|trame| vec![trame])
+        .map_err(|e| e.to_string())
+    })
+}
+
+/// Peint les LED une par une sur la cible demandée (spec §5).
+fn peindre(
+    cible: Cible,
+    colors: &[Rgb],
+    apply: Apply,
+    brightness: Brightness,
+    skip_init: bool,
+) -> Result<(), String> {
+    emettre(cible, skip_init, |mask| {
+        frame::per_led(mask, colors, apply, brightness)
+            .map(|trames| trames.to_vec())
+            .map_err(|e| e.to_string())
+    })
+}
+
+/// Construit puis écrit les trames de chaque position visée.
+///
+/// `trames_de` reçoit le masque d'un canal et rend les trames à lui envoyer,
+/// dans l'ordre d'émission. `set` en produit une, `paint` trois — leur
+/// indissociabilité (spec §0.2) est préservée par le fait qu'elles voyagent
+/// ensemble jusqu'à l'écriture.
+fn emettre<F>(cible: Cible, skip_init: bool, trames_de: F) -> Result<(), String>
+where
+    F: Fn(u8) -> Result<Vec<frame::Frame>, String>,
+{
     let controleurs = decouvrir()?;
 
     let positions: Vec<Position> = match cible {
@@ -135,16 +181,7 @@ fn appliquer(
     let mut envois = Vec::with_capacity(positions.len());
     for position in &positions {
         let placement = position.placement();
-        let trame = frame::animation(
-            placement.mask,
-            mode,
-            colors,
-            speed,
-            brightness,
-            reverb_proto::LEDS_PER_FAN,
-        )
-        .map_err(|e| e.to_string())?;
-        envois.push((*position, placement.serial, trame));
+        envois.push((*position, placement.serial, trames_de(placement.mask)?));
     }
 
     // Un contrôleur ne doit être initialisé qu'une fois, même si plusieurs de
@@ -157,14 +194,16 @@ fn appliquer(
         }
     }
 
-    for (position, serie, trame) in envois {
+    for (position, serie, trames) in envois {
         let (controleur, _) = resoudre(&controleurs, serie)?;
-        hidraw::write_frame(&controleur.path, &trame).map_err(|e| {
-            format!(
-                "écriture sur {} pour « {position} » : {e}",
-                controleur.path.display()
-            )
-        })?;
+        for trame in &trames {
+            hidraw::write_frame(&controleur.path, trame).map_err(|e| {
+                format!(
+                    "écriture sur {} pour « {position} » : {e}",
+                    controleur.path.display()
+                )
+            })?;
+        }
     }
 
     Ok(())

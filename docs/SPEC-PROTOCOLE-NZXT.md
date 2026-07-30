@@ -303,6 +303,23 @@ modification réémettant le tampon complet.
 - offset 2 = masque de canal, même encodage qu'au §3 ✅
 - offset 3 = `0x00` — 🔶 index de départ, permettant de chaîner plusieurs paquets pour les
   accessoires de plus de 8 LED. **Non vérifiable ici** : tous les accessoires en font exactement 8.
+- offsets **4 à 27** = les 24 octets de couleur ✅ ; **28 à 63** restent nuls ✅
+
+La capture contient la peinture progressive elle-même : onze trames `22 10` successives, LED par
+LED, extraites par `tools/extrait_22.py`. Les LED pas encore peintes portent `ff ff ff` — le
+tampon part du blanc, il n'est jamais partiel.
+
+```
+22 10 01 00  ff ff ff ff ff ff ...                        <- tampon initial, tout blanc
+22 10 01 00  0000ff ffffff ffffff ...                     <- LED 1 peinte
+22 10 01 00  0000ff 00ff00 ffffff ...                     <- LED 2 peinte
+                                        …
+22 10 01 00  0000ff 00ff00 ff2800 e5ff00 00a9ff ff00b4 50ff00 9f3e2d
+```
+
+C'est la preuve directe qu'**il n'existe aucune écriture d'une seule LED** : chaque modification
+réémet les 24 octets. Une implémentation qui voudrait peindre une LED sans toucher aux autres
+devrait donc tenir l'état côté hôte — le protocole ne le lui rendra pas.
 
 ### 5.2 Séquence complète
 
@@ -314,15 +331,31 @@ modification réémettant le tampon complet.
 22 a0 01 00 01 00 00 08 00 00 80 00 32 00 00 01      <- application
 ```
 
-Détail de `22 a0` 🔶 :
+**Les deux variantes de `22 a0` sont attestées** ✅ — extraites de la capture le 2026-07-30 par
+`tools/extrait_22.py`, sans nouvelle session Windows :
+
+```
+22 a0 01 00 01 00 00 08 00 00 80 00 32 00 00 01      <- statique  (×10)
+22 a0 01 00 02 6a 00 08 00 00 80 00 32 00 00 01      <- animé     (×1)
+              ^^ ^^^^^
+              |  vitesse 0x006a, uint16 little-endian
+              mode
+```
+
+Seuls les offsets 4, 5 et 6 changent entre les deux. **Les octets 8 à 15 sont identiques dans les
+deux modes** : `00 00 80 00 32 00 00 01`. C'est acquis, pas déduit.
 
 | Offset | Valeur | Interprétation |
 |---|---|---|
-| 2 | `0x01` | masque de canal |
-| 4 | `0x01` statique, `0x02` animé | mode |
-| 5–6 | `00 00` statique, `6a 00` animé | vitesse, uint16 little-endian |
-| 7 | `0x08` | nombre de LED |
-| 12 | `0x32` | ❓ — vaut 50, comme la vitesse par défaut du mode fixe |
+| 2 | `0x01` | masque de canal ✅ |
+| 3 | `0x00` | ❓ |
+| 4 | `0x01` statique, `0x02` **rotation** | mode ✅ — §5.4 |
+| 5–6 | `00 00` statique, `6a 00` animé | vitesse, uint16 little-endian ✅ |
+| 7 | `0x08` | nombre de LED ✅ |
+| 8–15 | `00 00 80 00 32 00 00 01` | ❓ — **valeurs certaines dans les deux modes**, sens inconnu |
+
+L'offset 12 vaut `0x32`, soit 50, comme la vitesse par défaut du mode fixe en `2a 04`. 🔶
+Coïncidence numérique, rien de plus : aucune observation ne relie les deux.
 
 ### 5.3 Animations personnalisées — `0x22 0x20`
 
@@ -336,6 +369,32 @@ Détail de `22 a0` 🔶 :
 
 Huit images numérotées de `00` à `07`. Le mécanisme dépasse le besoin immédiat, mais il montre
 que le contrôleur sait stocker et rejouer une séquence sans l'hôte.
+
+### 5.4 Confirmation à l'œil du pilotage LED par LED ✅
+
+Session du **2026-07-30** sous Linux, via `tools/confirme_leds.sh`.
+
+**Les LED sont bien adressées individuellement.** Huit couleurs distinctes envoyées sur un même
+ventilateur donnent huit LED de couleurs différentes.
+
+**La famille `0x22` fonctionne sur les deux modèles de contrôleur.** Le motif envoyé avec `--all`
+a été pris par les dix ventilateurs, y compris celui de l'arrière et ceux du haut, qui dépendent
+de contrôleurs `1e71:2012` et non du `2019`. La capture Windows ne montrait que le `2019` : c'est
+donc une extension du domaine connu, obtenue sous Linux.
+
+**Le mode `0x02` fait tourner le motif** ✅ — c'est la réponse à la question qui restait ouverte.
+Le contrôleur décale le tampon d'un cran à intervalle régulier ; l'hôte n'envoie rien de plus. Une
+rotation à l'infini coûte donc trois trames, une seule fois.
+
+**Numérotation des LED.** Les LED forment un anneau fermé : la 8 est contiguë à la 1, un cran
+avant elle dans le sens antihoraire. Les indices progressent donc dans un sens de rotation
+constant, `1 → 8` puis retour à `1`.
+
+> ⚠️ **La position absolue de la LED 1 dépend du montage.** Elle est apparue « en bas à gauche »
+> sur le ventilateur testé, mais ce n'est pas une propriété du protocole : c'est l'orientation
+> physique du ventilateur dans le boîtier. Un motif qui suppose « la LED 1 est en haut » sera faux
+> sur un ventilateur monté autrement. Seul l'**ordre** est une donnée du protocole ; l'origine et
+> le sens apparent sont une donnée de montage, et devront être configurables par ventilateur.
 
 ---
 
@@ -434,7 +493,7 @@ couleurs à chaque démarrage. Un `set` unique au boot ne suffira pas.
 | ~~2~~ | ~~`22 11` et `22 a0` sont-ils obligatoires ?~~ | ✅ **tranché — §0.2** |
 | ~~3~~ | ~~Le `62 01` répété est-il un watchdog ?~~ | ✅ **tranché — §0.3** |
 | ~~4~~ | ~~Rôle de l'offset 6 de `2a 04`~~ | ✅ **tranché — §4.4** : sélecteur de variante, pas direction |
-| 5 | Noms CAM des modes `0x01`, `0x04`, `0x05`, `0x06`, `0x09` | 🔶 **candidats sérieux en §4.1** — reste à confirmer à l'œil sous Linux |
+| ~~5~~ | ~~Noms CAM des modes `0x01`, `0x04`, `0x05`, `0x06`, `0x09`~~ | ✅ **tranché — §4.5** : confirmés à l'œil le 2026-07-30 |
 | 6 | Différence entre offsets 2 et 3 de `2a 04` | jamais observée différente |
 | ~~7~~ | ~~Que porte l'offset 56 quand le mode n'attend aucune couleur ?~~ | ✅ **tranché — §4.4** : toujours ≥ 1, avec une couleur noire |
 | 8 | Signification de l'offset 57 | ✅ **valeur connue pour les 8 modes (§4.4)**, sens encore ❓ |
