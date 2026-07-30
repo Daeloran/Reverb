@@ -303,6 +303,23 @@ modification réémettant le tampon complet.
 - offset 2 = masque de canal, même encodage qu'au §3 ✅
 - offset 3 = `0x00` — 🔶 index de départ, permettant de chaîner plusieurs paquets pour les
   accessoires de plus de 8 LED. **Non vérifiable ici** : tous les accessoires en font exactement 8.
+- offsets **4 à 27** = les 24 octets de couleur ✅ ; **28 à 63** restent nuls ✅
+
+La capture contient la peinture progressive elle-même : onze trames `22 10` successives, LED par
+LED, extraites par `tools/extrait_22.py`. Les LED pas encore peintes portent `ff ff ff` — le
+tampon part du blanc, il n'est jamais partiel.
+
+```
+22 10 01 00  ff ff ff ff ff ff ...                        <- tampon initial, tout blanc
+22 10 01 00  0000ff ffffff ffffff ...                     <- LED 1 peinte
+22 10 01 00  0000ff 00ff00 ffffff ...                     <- LED 2 peinte
+                                        …
+22 10 01 00  0000ff 00ff00 ff2800 e5ff00 00a9ff ff00b4 50ff00 9f3e2d
+```
+
+C'est la preuve directe qu'**il n'existe aucune écriture d'une seule LED** : chaque modification
+réémet les 24 octets. Une implémentation qui voudrait peindre une LED sans toucher aux autres
+devrait donc tenir l'état côté hôte — le protocole ne le lui rendra pas.
 
 ### 5.2 Séquence complète
 
@@ -314,15 +331,34 @@ modification réémettant le tampon complet.
 22 a0 01 00 01 00 00 08 00 00 80 00 32 00 00 01      <- application
 ```
 
-Détail de `22 a0` 🔶 :
+**Les deux variantes de `22 a0` sont attestées** ✅ — extraites de la capture le 2026-07-30 par
+`tools/extrait_22.py`, sans nouvelle session Windows :
+
+```
+22 a0 01 00 01 00 00 08 00 00 80 00 32 00 00 01      <- statique  (×10)
+22 a0 01 00 02 6a 00 08 00 00 80 00 32 00 00 01      <- animé     (×1)
+              ^^ ^^^^^
+              |  vitesse 0x006a, uint16 little-endian
+              mode
+```
+
+Seuls les offsets 4, 5 et 6 changent entre les deux. **Les octets 8 à 15 sont identiques dans les
+deux modes** : `00 00 80 00 32 00 00 01`. C'est acquis, pas déduit.
 
 | Offset | Valeur | Interprétation |
 |---|---|---|
-| 2 | `0x01` | masque de canal |
-| 4 | `0x01` statique, `0x02` animé | mode |
-| 5–6 | `00 00` statique, `6a 00` animé | vitesse, uint16 little-endian |
-| 7 | `0x08` | nombre de LED |
-| 12 | `0x32` | ❓ — vaut 50, comme la vitesse par défaut du mode fixe |
+| 2 | `0x01` | masque de canal ✅ |
+| 3 | `0x00` | ❓ |
+| 4 | `0x01` statique, `0x02` animé | mode ✅ |
+| 5–6 | `00 00` statique, `6a 00` animé | vitesse, uint16 little-endian ✅ |
+| 7 | `0x08` | nombre de LED ✅ |
+| 8–15 | `00 00 80 00 32 00 00 01` | ❓ — **valeurs certaines dans les deux modes**, sens inconnu |
+
+L'offset 12 vaut `0x32`, soit 50, comme la vitesse par défaut du mode fixe en `2a 04`. 🔶
+Coïncidence numérique, rien de plus : aucune observation ne relie les deux.
+
+⚠️ La capture montre ce que CAM **envoie** en mode `0x02`, pas ce que le contrôleur en **fait**.
+Le comportement visuel de la variante animée reste à observer.
 
 ### 5.3 Animations personnalisées — `0x22 0x20`
 
