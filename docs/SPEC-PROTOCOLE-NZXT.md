@@ -434,7 +434,7 @@ couleurs à chaque démarrage. Un `set` unique au boot ne suffira pas.
 | ~~2~~ | ~~`22 11` et `22 a0` sont-ils obligatoires ?~~ | ✅ **tranché — §0.2** |
 | ~~3~~ | ~~Le `62 01` répété est-il un watchdog ?~~ | ✅ **tranché — §0.3** |
 | ~~4~~ | ~~Rôle de l'offset 6 de `2a 04`~~ | ✅ **tranché — §4.4** : sélecteur de variante, pas direction |
-| 5 | Noms CAM des modes `0x01`, `0x04`, `0x05`, `0x06`, `0x09` | 🔶 **candidats sérieux en §4.1** — reste à confirmer à l'œil sous Linux |
+| ~~5~~ | ~~Noms CAM des modes `0x01`, `0x04`, `0x05`, `0x06`, `0x09`~~ | ✅ **tranché — §4.5** : confirmés à l'œil le 2026-07-30 |
 | 6 | Différence entre offsets 2 et 3 de `2a 04` | jamais observée différente |
 | ~~7~~ | ~~Que porte l'offset 56 quand le mode n'attend aucune couleur ?~~ | ✅ **tranché — §4.4** : toujours ≥ 1, avec une couleur noire |
 | 8 | Signification de l'offset 57 | ✅ **valeur connue pour les 8 modes (§4.4)**, sens encore ❓ |
