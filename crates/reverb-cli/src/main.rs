@@ -45,6 +45,11 @@ fn main() -> ExitCode {
         } => peindre(cible, &colors, apply, brightness, skip_init),
         Command::Fans => lister_ventilateurs(),
         Command::Fan { canal, action } => regler_ventilateur(&canal, action),
+        Command::Curve {
+            canal,
+            points,
+            force,
+        } => poser_courbe(&canal, &points, force),
     };
 
     match resultat {
@@ -178,6 +183,18 @@ fn regler_ventilateur(cible: &CibleCanal, action: ActionVentilateur) -> Result<(
         match action {
             ActionVentilateur::Auto => hwmon::set_mode(canal, hwmon::Mode::FirmwareCurve)
                 .map_err(|e| echec_ecriture(canal, &e))?,
+            ActionVentilateur::Curve => {
+                // Mettre en service une courbe qui n'existe pas laisserait le
+                // canal sur ce que le firmware a en mémoire — au mieux inconnu.
+                if canal.curve.is_empty() {
+                    return Err(format!(
+                        "« {} » n'a pas de courbe matérielle : rien à mettre en service.",
+                        canal.name
+                    ));
+                }
+                hwmon::set_mode(canal, hwmon::Mode::HostCurve)
+                    .map_err(|e| echec_ecriture(canal, &e))?;
+            }
             ActionVentilateur::Consigne {
                 percent,
                 force,
@@ -185,6 +202,59 @@ fn regler_ventilateur(cible: &CibleCanal, action: ActionVentilateur) -> Result<(
             } => consigner(canal, percent, force, manual)?,
         }
     }
+
+    Ok(())
+}
+
+/// Écrit une courbe sur un canal qui en a une.
+fn poser_courbe(nom: &str, points: &[(usize, Percent)], force: bool) -> Result<(), String> {
+    let canaux = canaux_decouverts()?;
+    let canal = canaux
+        .iter()
+        .find(|c| c.name == nom)
+        .ok_or_else(|| canal_inconnu(nom, &canaux))?;
+
+    if canal.curve.is_empty() {
+        let avec_courbe: Vec<&str> = canaux
+            .iter()
+            .filter(|c| !c.curve.is_empty())
+            .map(|c| c.name.as_str())
+            .collect();
+        return Err(if avec_courbe.is_empty() {
+            format!("« {nom} » n'a pas de courbe matérielle, et aucun canal n'en expose.")
+        } else {
+            format!(
+                "« {nom} » n'a pas de courbe matérielle. Canaux qui en ont une : {}.",
+                avec_courbe.join(", ")
+            )
+        });
+    }
+
+    // Le plancher s'applique point par point, comme la consigne fixe de #7.
+    let sous_plancher = points
+        .iter()
+        .find(|(_, consigne)| consigne.percent() < Percent::FLOOR);
+    if let (false, Some((point, consigne))) = (force, sous_plancher) {
+        return Err(format!(
+            "consigne de {} % au point {point}, sous le plancher de {} %. \
+             Utilisez « --force » si c'est voulu.",
+            consigne.percent(),
+            Percent::FLOOR
+        ));
+    }
+
+    let courbe = hwmon::Curve::interpolate(points).map_err(|e| e.to_string())?;
+    hwmon::set_curve(canal, &courbe).map_err(|e| echec_ecriture(canal, &e))?;
+
+    // Écrire la courbe ne la met pas en service : le canal continue de suivre
+    // le mode qu'il avait. Le dire, plutôt que de laisser croire à un effet.
+    println!(
+        "Courbe écrite sur « {nom} ». Le canal reste en mode « {} ».",
+        canal
+            .mode()
+            .map(|m| m.to_string())
+            .unwrap_or_else(|_| "illisible".to_owned())
+    );
 
     Ok(())
 }

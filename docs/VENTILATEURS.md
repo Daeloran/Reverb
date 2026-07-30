@@ -92,15 +92,96 @@ une limite de Reverb.
 Si la répartition devient utile un jour — pour un profil par zone, par exemple — elle se lira en
 suivant les câbles dans le boîtier, bien plus sûrement qu'en écoutant.
 
-## Ce que le matériel sait faire sans nous
+## La courbe matérielle du Kraken
 
-`kraken2023elite` expose `temp1_auto_point1..40_pwm` : une **courbe température → PWM à 40 points**
-exécutée par le firmware de la pompe. Même philosophie que les modes d'animation `0x2a 0x04` —
+`kraken2023elite` expose `temp[1-2]_auto_point[1-40]_pwm` : une **courbe température → PWM à
+40 points** exécutée par le firmware. Même philosophie que les modes d'animation `0x2a 0x04` —
 on téléverse une intention, le matériel l'exécute sans hôte.
 
-Hors scope pour l'instant, mais c'est la bonne façon de piloter une pompe : une courbe qui survit
-à l'extinction de Reverb vaut mieux qu'un démon qui la surveille.
+⚠️ **Ces fichiers sont en écriture seule** (`--w-------`, `0200`). Une courbe se pose, elle ne se
+relit jamais. Conséquences directes : pas d'édition partielle, pas d'affichage de la courbe
+courante, et aucun état conservé côté hôte — il mentirait dès qu'un autre outil écrirait, sans le
+moindre moyen de le détecter. Même raisonnement que pour le tampon LED du §5 de la spec.
 
-⚠️ Corollaire : la pompe et le ventilateur du Kraken sont en `pwm_enable = 0`, donc **sur leur
-courbe firmware**. Leur imposer une consigne fixe les en sort, et ils cessent de réagir à la
-température du liquide. Ce basculement doit rester explicite.
+### Ce que la sonde a établi ✅
+
+Session du 2026-07-30, `tools/sonde_courbe_kraken.sh`. La mesure est le régime, pas l'œil.
+
+**Les valeurs de `pwm_enable`** : `0`, `1` et `2` sont acceptées, `3` refusée.
+
+**`temp1_*` pilote la pompe, et le point 1 vaut 20 °C, un degré par point.** Une courbe plate à
+30 % avec un seul point à 100 % a été écrite, ce point étant placé selon trois hypothèses
+concurrentes. Le liquide était à 42 °C :
+
+| Courbe | Origine supposée | Point | Pompe |
+|---|---|---|---|
+| `temp1` | 20 °C | 23 | **2857 tr/min** |
+| `temp1` | 25 °C | 18 | 1685 |
+| `temp2` | 20 °C | 23 | 1675 |
+| `temp2` | 25 °C | 18 | 1685 |
+
+42 − 19 = 23. La pompe s'emballe exactement là où l'hypothèse « point 1 = 20 °C » le prédit, et
+nulle part ailleurs. Le point 40 vaut donc 59 °C.
+
+**Le mode courbe fonctionne** : la pompe a suivi le pic. La fonctionnalité était démontrée avant
+d'être écrite.
+
+### `temp2` pilote le ventilateur, même cartographie ✅
+
+Seconde sonde, `tools/sonde_courbe_ventilateur.sh`, liquide à 39 °C :
+
+| Essai | Point | Ventilateur |
+|---|---|---|
+| pic au bon point | 20 | **1785 tr/min** |
+| pic à un point volontairement faux | 35 | 751 |
+| aucun pic, ligne de base à 30 % | — | 714 |
+
+39 − 19 = 20. Le ventilateur ne répond qu'au pic correctement placé ; le témoin et l'essai à plat
+restent à la ligne de base. **Les deux courbes partagent donc la même origine et le même pas** :
+point 1 = 20 °C, un degré par point, point 40 = 59 °C.
+
+**Pourquoi la première sonde avait échoué** : elle écrivait `pwm2_enable = 2` sans jamais relire
+la valeur. La seconde vérifie chaque écriture de mode. La cause exacte du refus initial reste
+inconnue — ce qui est établi, c'est qu'une écriture de mode non relue ne prouve rien.
+
+### Vérification croisée de la cartographie ✅
+
+À la sortie de la seconde sonde, les deux canaux ont été laissés sur des courbes connues. À 39 °C,
+elles prescrivent 76 % pour la pompe et 45 % pour le ventilateur. Mesuré : **2586 et 952 tr/min**,
+soit exactement les régimes attendus pour ces consignes.
+
+La cartographie n'est donc pas seulement confirmée par un pic isolé : elle prédit correctement le
+régime en régime établi, sur les deux canaux à la fois.
+
+### ⚠️ `pwm_enable = 0` ne rend pas le Kraken à son profil d'usine
+
+**Le piège de cette session, et il a coûté cher.**
+
+Avant la sonde, la pompe tournait à 67 % en `pwm_enable = 0`, sensible à la température. La sonde
+a écrit des courbes, basculé en `2`, puis restauré `0` — la valeur d'origine. Elle n'a pas
+restauré le comportement d'origine : pompe et ventilateur sont restés **à 100 %**, et y sont
+restés plus de deux minutes à température stable.
+
+L'interprétation la plus prudente est que `0` signifie « le pilote ne pilote plus », et qu'une
+fois une courbe hôte chargée, le firmware ne retrouve pas son profil d'usine — il se rabat sur du
+refroidissement maximal. Sûr, bruyant, et **irréversible sans coupure d'alimentation complète**.
+
+Deux leçons :
+
+1. **Restaurer une valeur n'est pas restaurer un comportement.** Un `trap` qui réécrit la valeur
+   d'origine donne une fausse impression de sécurité. Toute sonde future doit **mesurer** l'état
+   après restauration, pas le supposer. C'est la même erreur que d'avoir cru qu'un redémarrage
+   réinitialisait les contrôleurs RGB (spec §9).
+2. **Une ligne de base à 30 % était mal calibrée** : la pompe tourne normalement à 67 %, et le
+   liquide a pris 9 °C en une minute. Une sonde qui ralentit un organe de refroidissement doit
+   partir de son régime habituel, pas d'une valeur arbitraire.
+
+La sortie de secours est `tools/repose_kraken.sh`, qui écrit une vraie courbe et l'active — ou, à
+défaut, un **arrêt complet** de la machine, pas un redémarrage.
+
+### Conséquence sur `reverb fan --auto`
+
+L'option écrit `pwm_enable = 0` et son aide annonçait « rend le canal à sa courbe firmware ».
+C'est ce que le nom du mode laisse croire, et c'est faux sur le Kraken après usage d'une courbe
+hôte. L'aide a été corrigée : `--auto` rend la main au pilote par défaut, sans garantir le retour
+au profil d'usine.

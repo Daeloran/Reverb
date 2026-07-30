@@ -26,12 +26,18 @@ pub struct FanChannel {
     /// canal « FAN 1 », et un nom ambigu qui désigne le mauvais ventilateur est
     /// pire que verbeux.
     pub name: String,
+    /// Numéro du canal dans sa source : le N de `pwmN`.
+    pub index: u32,
     pub pwm: PathBuf,
     /// `fanN_input`, absent si le canal ne remonte aucun régime.
     pub tach: Option<PathBuf>,
     /// `pwmN_enable`, absent si la source n'expose pas de mode — c'est le cas
     /// de `nct6687`.
     pub enable: Option<PathBuf>,
+    /// Les `CURVE_POINTS` fichiers `tempN_auto_pointM_pwm`, dans l'ordre des
+    /// points. Vide si le canal n'a pas de courbe matérielle — seul le Kraken
+    /// en expose.
+    pub curve: Vec<PathBuf>,
 }
 
 impl FanChannel {
@@ -47,6 +53,7 @@ impl FanChannel {
         match brut.trim().parse::<u8>() {
             Ok(0) => Ok(Mode::FirmwareCurve),
             Ok(1) => Ok(Mode::Manual),
+            Ok(2) => Ok(Mode::HostCurve),
             Ok(autre) => Ok(Mode::Unknown(autre)),
             Err(_) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -61,9 +68,14 @@ impl FanChannel {
 pub enum Mode {
     /// `1` — la consigne écrite est appliquée telle quelle.
     Manual,
-    /// `0` — le firmware pilote le canal, typiquement selon une courbe de
-    /// température. Lui imposer une consigne fixe l'en sort.
+    /// `0` — le pilote ne pilote pas ; le firmware décide seul.
+    ///
+    /// ⚠️ Ce n'est **pas** un retour garanti au profil d'usine. Une fois une
+    /// courbe hôte chargée, le Kraken observé s'y rabat sur du refroidissement
+    /// maximal — voir `docs/VENTILATEURS.md`.
     FirmwareCurve,
+    /// `2` — le firmware exécute la courbe téléversée par l'hôte.
+    HostCurve,
     /// Une autre valeur, dont on ne sait rien. On la lit, on ne la réécrit pas.
     Unknown(u8),
     /// La source n'expose pas `pwmN_enable`.
@@ -74,7 +86,8 @@ impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Mode::Manual => write!(f, "manuel"),
-            Mode::FirmwareCurve => write!(f, "courbe firmware"),
+            Mode::FirmwareCurve => write!(f, "laissé au firmware"),
+            Mode::HostCurve => write!(f, "courbe de l'hôte"),
             Mode::Unknown(valeur) => write!(f, "inconnu ({valeur})"),
             Mode::Unsupported => write!(f, "non réglable"),
         }
@@ -228,9 +241,27 @@ fn canal(repertoire: &Path, source: &str, index: u32) -> FanChannel {
         name: format!("{source}:{}", slug(&label)),
         source: source.to_owned(),
         label,
+        index,
         pwm: repertoire.join(format!("pwm{index}")),
         tach,
         enable,
+        curve: courbe_de(repertoire, index),
+    }
+}
+
+/// Chemins des points de courbe du canal, dans l'ordre, ou rien.
+///
+/// Tout ou rien : une courbe partielle n'aurait aucun sens, puisque le firmware
+/// interpole entre les 40 points qu'il détient.
+fn courbe_de(repertoire: &Path, index: u32) -> Vec<PathBuf> {
+    let points: Vec<PathBuf> = (1..=CURVE_POINTS)
+        .map(|point| repertoire.join(format!("temp{index}_auto_point{point}_pwm")))
+        .collect();
+
+    if points.iter().all(|p| p.exists()) {
+        points
+    } else {
+        Vec::new()
     }
 }
 
@@ -261,6 +292,7 @@ pub fn set_mode(channel: &FanChannel, mode: Mode) -> io::Result<()> {
     let valeur = match mode {
         Mode::Manual => "1",
         Mode::FirmwareCurve => "0",
+        Mode::HostCurve => "2",
         Mode::Unknown(valeur) => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -288,6 +320,183 @@ pub fn set_mode(channel: &FanChannel, mode: Mode) -> io::Result<()> {
 /// Découvre les canaux sous la racine sysfs réelle.
 pub fn discover() -> io::Result<Vec<FanChannel>> {
     discover_in(Path::new("/sys/class/hwmon"))
+}
+
+/// Nombre de points d'une courbe matérielle du Kraken.
+pub const CURVE_POINTS: usize = 40;
+
+/// Une courbe validée, prête à écrire : une consigne par point.
+///
+/// ⚠️ Les fichiers de courbe sont en **écriture seule** (`0200`). Une courbe se
+/// pose, elle ne se relit jamais — d'où l'absence de toute fonction de lecture
+/// et de tout état conservé côté hôte : il mentirait dès qu'un autre outil
+/// écrirait, sans le moindre moyen de le détecter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Curve([Percent; CURVE_POINTS]);
+
+impl Curve {
+    /// Interpole linéairement une courbe depuis quelques couples
+    /// `(index de point, consigne)`, donnés dans n'importe quel ordre.
+    ///
+    /// Avant le premier point, la valeur du premier ; après le dernier, celle
+    /// du dernier. Les index sont ceux des fichiers sysfs : de 1 à
+    /// [`CURVE_POINTS`].
+    ///
+    /// # Erreurs
+    ///
+    /// Voir [`CurveError`]. En particulier, une courbe qui **descend** est
+    /// refusée : une consigne qui baisse quand la température monte est une
+    /// faute de frappe ou un décalage d'indice, et l'écriture seule rend
+    /// l'erreur invisible jusqu'à la surchauffe.
+    pub fn interpolate(points: &[(usize, Percent)]) -> Result<Self, CurveError> {
+        if points.is_empty() {
+            return Err(CurveError::Empty);
+        }
+
+        let mut tries: Vec<(usize, Percent)> = Vec::with_capacity(points.len());
+        for &(index, consigne) in points {
+            if !(1..=CURVE_POINTS).contains(&index) {
+                return Err(CurveError::OutOfRange { given: index });
+            }
+            match tries.iter().find(|(deja, _)| *deja == index) {
+                Some(&(_, precedente)) if precedente != consigne => {
+                    return Err(CurveError::Conflicting { at: index });
+                }
+                Some(_) => continue,
+                None => tries.push((index, consigne)),
+            }
+        }
+        tries.sort_by_key(|(index, _)| *index);
+
+        for paire in tries.windows(2) {
+            let (depuis, vers) = (paire[0], paire[1]);
+            if vers.1 < depuis.1 {
+                return Err(CurveError::Decreasing {
+                    from: depuis,
+                    to: vers,
+                });
+            }
+        }
+
+        let mut valeurs = [Percent(0); CURVE_POINTS];
+        for (rang, valeur) in valeurs.iter_mut().enumerate() {
+            let point = rang + 1;
+            *valeur = interpole(&tries, point);
+        }
+
+        Ok(Curve(valeurs))
+    }
+
+    /// Les consignes, dans l'ordre des points.
+    pub fn points(&self) -> &[Percent; CURVE_POINTS] {
+        &self.0
+    }
+}
+
+/// Consigne au point `point`, par interpolation entre les couples donnés.
+///
+/// `tries` est trié par index, non vide, et sans doublon d'index.
+fn interpole(tries: &[(usize, Percent)], point: usize) -> Percent {
+    let (premier_index, premiere) = tries[0];
+    if point <= premier_index {
+        return premiere;
+    }
+
+    let (dernier_index, derniere) = tries[tries.len() - 1];
+    if point >= dernier_index {
+        return derniere;
+    }
+
+    // Le segment qui encadre le point. Les bornes plates sont déjà écartées.
+    let segment = tries
+        .windows(2)
+        .find(|paire| paire[0].0 <= point && point <= paire[1].0)
+        .expect("un point strictement entre les bornes tombe dans un segment");
+
+    let ((gauche, basse), (droite, haute)) = (segment[0], segment[1]);
+    let largeur = droite - gauche;
+    let hauteur = u32::from(haute.percent() - basse.percent());
+    let avance = point - gauche;
+
+    // Arrondi au plus proche, pour ne pas introduire de palier descendant.
+    let pourcent = u32::from(basse.percent())
+        + (hauteur * avance as u32 + (largeur as u32) / 2) / largeur as u32;
+    Percent(pourcent as u8)
+}
+
+/// Ce qui peut clocher dans une demande de courbe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurveError {
+    /// Aucun point fourni.
+    Empty,
+    /// Un index hors de `1..=CURVE_POINTS`.
+    OutOfRange { given: usize },
+    /// La consigne baisse quand la température monte.
+    Decreasing {
+        from: (usize, Percent),
+        to: (usize, Percent),
+    },
+    /// Deux points portent le même index avec des consignes différentes.
+    Conflicting { at: usize },
+}
+
+impl fmt::Display for CurveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CurveError::Empty => write!(
+                f,
+                "aucun point fourni : une courbe demande au moins un couple point:consigne."
+            ),
+            CurveError::OutOfRange { given } => write!(
+                f,
+                "point {given} hors de la courbe : attendu 1 à {CURVE_POINTS}."
+            ),
+            CurveError::Decreasing { from, to } => write!(
+                f,
+                "la consigne descend de {} % au point {} à {} % au point {} : \
+                 une courbe de refroidissement ne descend pas.",
+                from.1.percent(),
+                from.0,
+                to.1.percent(),
+                to.0
+            ),
+            CurveError::Conflicting { at } => write!(
+                f,
+                "deux consignes différentes au point {at} : laquelle faut-il retenir ?"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CurveError {}
+
+/// Écrit les points de la courbe du canal.
+///
+/// Ne touche **pas** `pwmN_enable` : basculer un canal en mode courbe est un
+/// geste distinct, qui change durablement son comportement thermique. Le faire
+/// au passage d'une écriture de courbe serait exactement l'effet de bord que le
+/// projet s'interdit.
+///
+/// # Erreurs
+///
+/// Si le canal n'a pas de courbe matérielle — rien n'est alors écrit.
+pub fn set_curve(channel: &FanChannel, curve: &Curve) -> io::Result<()> {
+    if channel.curve.len() != CURVE_POINTS {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "le canal « {} » n'a pas de courbe matérielle : \
+                 seul le Kraken en expose une.",
+                channel.name
+            ),
+        ));
+    }
+
+    for (chemin, consigne) in channel.curve.iter().zip(curve.points()) {
+        fs::write(chemin, consigne.raw().to_string())?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -328,9 +537,11 @@ mod tests {
             source: "test".to_owned(),
             label: "fan1".to_owned(),
             name: "test:fan1".to_owned(),
+            index: 1,
             pwm: PathBuf::from("/inexistant/pwm1"),
             tach: None,
             enable: Some(PathBuf::from("/inexistant/pwm1_enable")),
+            curve: Vec::new(),
         };
         let erreur = set_mode(&canal, Mode::Unknown(2)).expect_err("doit refuser");
         assert_eq!(erreur.kind(), io::ErrorKind::InvalidInput);
