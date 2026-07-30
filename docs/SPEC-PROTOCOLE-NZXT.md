@@ -189,28 +189,25 @@ offset  0    1     2     3     4     5      6     7..55        56..59
 | Mode | Couleurs | off6 | off57 | Vitesses vues | Identification |
 |---|---|---|---|---|---|
 | `0x00` | 1 | `0x00` | `0x00` | `0x32` | ✅ **couleur fixe** |
-| `0x01` | 3 | `0x00` | `0x08` | `0x28` | 🔶 **Fading** |
+| `0x01` | 3 | `0x00` | `0x08` | `0x28` | ✅ **Fading** |
 | `0x02` | 1 (noire) | `0x00` | `0x00` | `0xfa`, `0x50` | ✅ **Spectrum Wave** — le contrôleur génère les teintes |
 | `0x03` | — | — | — | — | ❓ jamais déclenché pendant la capture |
-| `0x04` | 2 ou 3 | `0x00` | `0x00` | `0xfa` | 🔶 **Covering Marquee** |
+| `0x04` | 2 ou 3 | `0x00` | `0x00` | `0xfa` | ✅ **Covering Marquee** |
 | `0x05` | **exactement 2** | `0x01`, `0x03` | `0x00` | `0xf4`, `0xe8` | ✅ **Alternating** — voir ci-dessous |
-| `0x06` | 1 | `0x00` | `0x08` | `0x0f` | 🔶 **Pulse** |
+| `0x06` | 1 | `0x00` | `0x08` | `0x0f` | ✅ **Pulse** |
 | `0x07` | 1 | `0x00` | `0x08` | `0x14` | ✅ **Breathing** |
-| `0x09` | 1 | `0x00` | `0x00` | `0x0f` | 🔶 **Starry Night** |
+| `0x09` | 1 | `0x00` | `0x00` | `0x0f` | 🔶 **Starry Night** — observation non concluante, §4.5 |
 
 > Colonnes `off6`, `off57` et vitesses **extraites de la capture** `cible1-modes-nzxt` le
 > 2026-07-30 sous Linux, par `tools/extrait_modes.py`. Les numéros de mode sont certains ✅.
 
-**Les noms des cinq modes non documentés sont des hypothèses**, obtenues en recoupant le nombre
-de couleurs accepté avec la table HUE 2 de liquidctl, dont les numéros de mode coïncident.
+Les noms venaient d'un recoupement avec la table HUE 2 de liquidctl, dont les numéros de mode
+coïncident. Ils ont été **vérifiés à l'œil** le 2026-07-30 — voir §4.5. Seul `0x09` reste 🔶.
 
-`0x05` est le recoupement le plus solide : Alternating est le **seul** mode dont liquidctl fixe
+`0x05` était le recoupement le plus solide : Alternating est le **seul** mode dont liquidctl fixe
 le minimum **et** le maximum à 2 couleurs, et c'est exactement ce qu'on observe — jamais 1,
 jamais 3. Ça éclaire aussi l'offset 6, qui sélectionne chez liquidctl la taille des blocs
 alternés (quatre variantes).
-
-⚠️ Ces noms restent à **confirmer à l'œil** en déclenchant chaque mode. Tant que ce n'est pas
-fait, ils portent 🔶 et ne doivent pas être présentés à l'utilisateur comme certains.
 
 ### 4.4 Ce que la capture a tranché ✅
 
@@ -228,6 +225,34 @@ valeur est désormais connue pour les huit modes observés — il suffit de la r
 **L'offset 6 est un sélecteur de variante, pas une direction.** En mode `0x05` il vaut `0x01`
 puis `0x03`, et la vitesse change en même temps (`0xf4` → `0xe8`). Une direction serait binaire ;
 quatre valeurs possibles correspondent aux quatre tailles de blocs d'Alternating.
+
+### 4.5 Confirmation à l'œil des noms de modes
+
+Session du **2026-07-30** sous Linux, via `tools/confirme_modes.sh`. Chaque mode a été déclenché
+sur les dix ventilateurs ; l'observateur décrivait ce qu'il voyait **avant** que l'hypothèse ne
+lui soit montrée, pour ne pas la lui suggérer.
+
+| Mode | Observé | Verdict |
+|---|---|---|
+| `0x01` Fading | « changement de couleurs unies douce du ventilateur complet » | ✅ |
+| `0x04` Covering Marquee | « les couleurs recouvrent la surface LED par LED sur chaque ventilo » | ✅ |
+| `0x05` Alternating | « les LED changent de couleur en groupe » | ✅ |
+| `0x06` Pulse | « pulsation abrupte » | ✅ |
+| `0x09` Starry Night | « je crois voir un léger scintillement mais ce n'est pas très net » | 🔶 |
+
+Les quatre premières descriptions sont **spécifiques** : elles nomment un mécanisme (fondu,
+recouvrement LED par LED, alternance par groupes, battement sec) qui distingue ce mode des
+autres, et pas seulement « ça bouge ». C'est ce qui autorise le passage à ✅.
+
+`0x09` ne franchit pas ce seuil. « Je crois voir » ne distingue pas un scintillement aléatoire
+d'un battement lent et faible — l'observation est **compatible** avec Starry Night sans être
+**discriminante**. Le nom reste donc une hypothèse. Piste pour une prochaine tentative : blanc
+plutôt que rouge, et faire varier l'offset 5, la vitesse observée (`0x0f`) étant peut-être trop
+rapide pour que l'œil accroche.
+
+Le fait que `0x05` alterne bien **par groupes de LED** conforte au passage la lecture de
+l'offset 6 comme sélecteur de taille de bloc (§4.4), sans le prouver : la taille n'a été testée
+qu'à la valeur `0x01`.
 
 ### 4.2 L'octet 5 est la vitesse, pas la luminosité ✅
 

@@ -15,17 +15,16 @@
 //! sont reprises telles quelles dans la table de vérité du contrat d'API de
 //! l'issue #3.
 //!
-//! ⚠️ Les noms des cinq modes `0x01`, `0x04`, `0x05`, `0x06` et `0x09` restent
-//! 🔶 (spec §4.1) : ils sont figés ici parce que le contrat d'API les fige,
-//! mais `confirmed()` doit continuer à dire qu'ils ne sont pas vérifiés à l'œil.
+//! ⚠️ Le nom du mode `0x09` reste 🔶 (spec §4.1, §4.5) : `confirmed()` doit
+//! continuer à dire qu'il n'a pas été vérifié à l'œil. Les quatre autres
+//! hypothèses ont été confirmées le 2026-07-30 (§4.5).
 //!
-//! Le jour où un mode est vu à l'œil, c'est la **spec §4.1** qui change, et
-//! `seuls_les_trois_modes_vus_a_l_oeil_sont_confirmes` la suit. Ce n'est pas
-//! une entorse au garde-fou « ne jamais modifier un test d'intention » : ce
-//! garde-fou interdit de plier un test pour faire passer du code, pas de
-//! réécrire un test quand la spécification dont il découle a bougé. La
-//! distinction tient à l'ordre — la spec d'abord, le test ensuite, le code en
-//! dernier.
+//! Le jour où un mode est vu à l'œil, c'est la **spec §4.1** qui change, et les
+//! tests de `confirmed()` la suivent. Ce n'est pas une entorse au garde-fou
+//! « ne jamais modifier un test d'intention » : ce garde-fou interdit de plier
+//! un test pour faire passer du code, pas de réécrire un test quand la
+//! spécification dont il découle a bougé. La distinction tient à l'ordre — la
+//! spec d'abord, le test ensuite, le code en dernier.
 //!
 //! Aucun accès matériel, aucune IO (issue #3, critère « Aucun accès matériel
 //! dans les tests automatisés »).
@@ -63,11 +62,11 @@ fn couleurs(n: u8) -> Vec<Rgb> {
 ///     | Constante          | code   | nom                | couleurs | vitesse | off6   | off57  | confirmé |
 ///     |--------------------|--------|--------------------|----------|---------|--------|--------|----------|
 ///     | `FIXED`            | `0x00` | `fixed`            | 1..=1    | `0x32`  | `0x00` | `0x00` | ✅       |
-///     | `FADING`           | `0x01` | `fading`           | 3..=3    | `0x28`  | `0x00` | `0x08` | 🔶       |
+///     | `FADING`           | `0x01` | `fading`           | 3..=3    | `0x28`  | `0x00` | `0x08` | ✅       |
 ///     | `SPECTRUM_WAVE`    | `0x02` | `spectrum-wave`    | 0..=0    | `0xfa`  | `0x00` | `0x00` | ✅       |
-///     | `COVERING_MARQUEE` | `0x04` | `covering-marquee` | 2..=3    | `0xfa`  | `0x00` | `0x00` | 🔶       |
-///     | `ALTERNATING`      | `0x05` | `alternating`      | 2..=2    | `0xf4`  | `0x01` | `0x00` | 🔶       |
-///     | `PULSE`            | `0x06` | `pulse`            | 1..=1    | `0x0f`  | `0x00` | `0x08` | 🔶       |
+///     | `COVERING_MARQUEE` | `0x04` | `covering-marquee` | 2..=3    | `0xfa`  | `0x00` | `0x00` | ✅       |
+///     | `ALTERNATING`      | `0x05` | `alternating`      | 2..=2    | `0xf4`  | `0x01` | `0x00` | ✅       |
+///     | `PULSE`            | `0x06` | `pulse`            | 1..=1    | `0x0f`  | `0x00` | `0x08` | ✅       |
 ///     | `BREATHING`        | `0x07` | `breathing`        | 1..=1    | `0x14`  | `0x00` | `0x08` | ✅       |
 ///     | `STARRY_NIGHT`     | `0x09` | `starry-night`     | 1..=1    | `0x0f`  | `0x00` | `0x00` | 🔶       |
 mod table {
@@ -99,10 +98,11 @@ mod table {
 
     #[test]
     fn le_mode_fading_est_le_0x01() {
-        // spec §4.1, ligne `0x01` — 3 couleurs, vitesse vue `0x28`, 🔶 « Fading ».
+        // spec §4.1, ligne `0x01` — 3 couleurs, vitesse vue `0x28`, ✅ « Fading »
+        // confirmé à l'œil (§4.5 : « changement de couleurs unies douce »).
         // Contrat d'API, arbitrage « bornes de couleurs » : `3..=3`, ce qui est
         // observé, et non le 1..8 de liquidctl.
-        verifie(Mode::FADING, 0x01, "fading", (3, 3), 0x28, false);
+        verifie(Mode::FADING, 0x01, "fading", (3, 3), 0x28, true);
     }
 
     #[test]
@@ -124,30 +124,34 @@ mod table {
     #[test]
     fn le_mode_covering_marquee_est_le_0x04() {
         // spec §4.1, ligne `0x04` — « 2 ou 3 » couleurs, vitesse vue `0xfa`,
-        // 🔶 « Covering Marquee ».
+        // ✅ « Covering Marquee » confirmé à l'œil (§4.5 : « les couleurs
+        // recouvrent la surface LED par LED »).
         verifie(
             Mode::COVERING_MARQUEE,
             0x04,
             "covering-marquee",
             (2, 3),
             0xfa,
-            false,
+            true,
         );
     }
 
     #[test]
     fn le_mode_alternating_est_le_0x05() {
         // spec §4.1, ligne `0x05` — « exactement 2 » couleurs, vitesses vues
-        // `0xf4` puis `0xe8`, ✅ sur le comptage / 🔶 sur le nom « Alternating ».
+        // `0xf4` puis `0xe8`, ✅ « Alternating » confirmé à l'œil (§4.5 : « les
+        // LED changent de couleur en groupe »).
         // Contrat d'API : la première variante observée fait référence, d'où
         // `0xf4`.
-        verifie(Mode::ALTERNATING, 0x05, "alternating", (2, 2), 0xf4, false);
+        verifie(Mode::ALTERNATING, 0x05, "alternating", (2, 2), 0xf4, true);
     }
 
     #[test]
     fn le_mode_pulse_est_le_0x06() {
-        // spec §4.1, ligne `0x06` — 1 couleur, vitesse vue `0x0f`, 🔶 « Pulse ».
-        verifie(Mode::PULSE, 0x06, "pulse", (1, 1), 0x0f, false);
+        // spec §4.1, ligne `0x06` — 1 couleur, vitesse vue `0x0f`, ✅ « Pulse »
+        // confirmé à l'œil (§4.5 : « pulsation abrupte », distincte du fondu
+        // lent de Breathing).
+        verifie(Mode::PULSE, 0x06, "pulse", (1, 1), 0x0f, true);
     }
 
     #[test]
@@ -160,7 +164,7 @@ mod table {
     #[test]
     fn le_mode_starry_night_est_le_0x09() {
         // spec §4.1, ligne `0x09` — 1 couleur, vitesse vue `0x0f`,
-        // 🔶 « Starry Night ».
+        // 🔶 « Starry Night » : le seul nom encore non confirmé (§4.5).
         verifie(
             Mode::STARRY_NIGHT,
             0x09,
@@ -226,26 +230,26 @@ mod table {
     }
 
     #[test]
-    fn seuls_les_trois_modes_vus_a_l_oeil_sont_confirmes() {
-        // spec §4.1 — ✅ sur `0x00` (couleur fixe), `0x02` (Spectrum Wave) et
-        // `0x07` (Breathing) ; 🔶 sur les cinq autres : « ces noms restent à
-        // confirmer à l'œil […] ne doivent pas être présentés à l'utilisateur
-        // comme certains ».
-        // Issue #3, critère d'acceptation — les cinq modes non nommés restent à
-        // identifier.
-        let confirmes: Vec<&str> = Mode::ALL
-            .iter()
-            .filter(|m| m.confirmed())
-            .map(|m| m.name())
-            .collect();
-        assert_eq!(confirmes, vec!["fixed", "spectrum-wave", "breathing"]);
-
+    fn seul_starry_night_reste_a_confirmer() {
+        // spec §4.5, session du 2026-07-30 — quatre des cinq hypothèses ont été
+        // confirmées à l'œil par une description spécifique du mécanisme.
+        // `0x09` reste 🔶 : « je crois voir un léger scintillement mais ce n'est
+        // pas très net » est compatible avec Starry Night sans être
+        // discriminante.
+        //
+        // Ce test a bougé quand la spec a bougé, comme annoncé en tête de
+        // fichier. L'ordre est resté : spec, puis test, puis code.
         let a_confirmer: Vec<u8> = Mode::ALL
             .iter()
             .filter(|m| !m.confirmed())
             .map(|m| m.code())
             .collect();
-        assert_eq!(a_confirmer, vec![0x01, 0x04, 0x05, 0x06, 0x09]);
+        assert_eq!(a_confirmer, vec![0x09]);
+
+        assert!(
+            !Mode::STARRY_NIGHT.confirmed(),
+            "rien ne doit présenter « starry-night » comme certain (spec §4.5)"
+        );
     }
 
     #[test]

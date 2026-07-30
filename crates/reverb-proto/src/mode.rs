@@ -71,7 +71,7 @@ const SPECS: [Spec; 8] = [
         speed: 0x28,
         variant: 0x00,
         flag: 0x08,
-        confirmed: false,
+        confirmed: true,
     },
     Spec {
         code: 0x02,
@@ -91,7 +91,7 @@ const SPECS: [Spec; 8] = [
         speed: 0xfa,
         variant: 0x00,
         flag: 0x00,
-        confirmed: false,
+        confirmed: true,
     },
     Spec {
         code: 0x05,
@@ -104,7 +104,7 @@ const SPECS: [Spec; 8] = [
         // On rejoue la première variante observée (spec §4.4).
         variant: 0x01,
         flag: 0x00,
-        confirmed: false,
+        confirmed: true,
     },
     Spec {
         code: 0x06,
@@ -113,7 +113,7 @@ const SPECS: [Spec; 8] = [
         speed: 0x0f,
         variant: 0x00,
         flag: 0x08,
-        confirmed: false,
+        confirmed: true,
     },
     Spec {
         code: 0x07,
