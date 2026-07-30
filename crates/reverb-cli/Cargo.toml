@@ -1,0 +1,22 @@
+[package]
+name = "reverb-cli"
+version = "0.1.0"
+description = "Pilotage en ligne de commande des contrôleurs RGB NZXT"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "reverb_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "reverb"
+path = "src/main.rs"
+
+[dependencies]
+reverb-proto = { path = "../reverb-proto" }
+
+[lints]
+workspace = true
