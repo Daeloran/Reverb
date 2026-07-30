@@ -38,6 +38,14 @@ pub enum Command {
         canal: CibleCanal,
         action: ActionVentilateur,
     },
+    /// Écrit une courbe température → consigne, exécutée par le firmware.
+    Curve {
+        canal: String,
+        /// Couples (point, consigne), tels que donnés — ni triés ni validés :
+        /// c'est `Curve::interpolate` qui s'en charge.
+        points: Vec<(usize, Percent)>,
+        force: bool,
+    },
 }
 
 /// Quels ventilateurs sont visés.
@@ -80,6 +88,7 @@ USAGE :
     reverb fans
     reverb fan   --all|--channel <NOM> --pwm <0-100> [--force] [--manual]
     reverb fan   --all|--channel <NOM> --auto
+    reverb curve --channel <NOM> --point <POINT:CONSIGNE>… [--force]
 
 OPTIONS de « fan » — vitesse de rotation (demande les droits root) :
     --channel <NOM>      canal, tel que « reverb fans » le nomme
@@ -88,6 +97,14 @@ OPTIONS de « fan » — vitesse de rotation (demande les droits root) :
     --manual             autorise à sortir un canal de sa courbe firmware.
                          ⚠️ le canal cesse alors de réagir à la température
     --auto               rend le canal à sa courbe firmware
+
+OPTIONS de « curve » — courbe exécutée par le firmware du Kraken :
+    --point <P:C>        consigne C au point P. Répétable ; les points
+                         intermédiaires sont interpolés linéairement.
+                         Le point 1 vaut 20 °C, un degré par point.
+    --force              autorise des consignes sous le plancher de 20 %
+                         ⚠️ écrire une courbe ne bascule PAS le canal en mode
+                         courbe : c'est un geste distinct, encore à exposer
 
 OPTIONS de « set » — animation confiée au contrôleur :
     --mode <NOM|N>       mode d'animation, « fixed » par défaut (« reverb modes »)
@@ -144,10 +161,66 @@ where
         "paint" => parse_paint(args),
         "fans" => Ok(Command::Fans),
         "fan" => parse_fan(args),
+        "curve" => parse_curve(args),
         autre => Err(format!(
-            "sous-commande « {autre} » inconnue. Attendu : list, modes, set, paint, fans, fan."
+            "sous-commande « {autre} » inconnue. \
+             Attendu : list, modes, set, paint, fans, fan, curve."
         )),
     }
+}
+
+fn parse_curve(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
+    let mut canal: Option<String> = None;
+    let mut points: Vec<(usize, Percent)> = Vec::new();
+    let mut force = false;
+
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--force" => force = true,
+            "--channel" => {
+                canal = Some(
+                    args.next()
+                        .ok_or_else(|| "« --channel » attend un nom de canal.".to_owned())?,
+                );
+            }
+            "--point" => {
+                let brut = args
+                    .next()
+                    .ok_or_else(|| "« --point » attend « POINT:CONSIGNE ».".to_owned())?;
+                points.push(parse_point(&brut)?);
+            }
+            autre => return Err(format!("option « {autre} » inconnue.")),
+        }
+    }
+
+    let canal = canal.ok_or_else(|| "« --channel » est obligatoire.".to_owned())?;
+    if points.is_empty() {
+        return Err("préciser au moins un « --point POINT:CONSIGNE ».".to_owned());
+    }
+
+    Ok(Command::Curve {
+        canal,
+        points,
+        force,
+    })
+}
+
+/// Analyse un couple « POINT:CONSIGNE ».
+fn parse_point(brut: &str) -> Result<(usize, Percent), String> {
+    let (point, consigne) = brut.split_once(':').ok_or_else(|| {
+        format!("« {brut} » : attendu « POINT:CONSIGNE », par exemple « 11:50 ».")
+    })?;
+
+    let point: usize = point
+        .trim()
+        .parse()
+        .map_err(|_| format!("point « {point} » invalide : attendu un entier."))?;
+    let consigne: u8 = consigne
+        .trim()
+        .parse()
+        .map_err(|_| format!("consigne « {consigne} » invalide : attendu un entier de 0 à 100."))?;
+
+    Ok((point, Percent::new(consigne).map_err(|e| e.to_string())?))
 }
 
 fn parse_fan(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
