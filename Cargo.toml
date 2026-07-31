@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/reverb-proto", "crates/reverb-cli"]
+members = ["crates/reverb-proto", "crates/reverb-cli", "crates/reverb-daemon"]
 
 [workspace.package]
 edition = "2024"

@@ -1,0 +1,22 @@
+[package]
+name = "reverb-daemon"
+version = "0.1.0"
+description = "Démon Reverb — détient les périphériques et fait tourner la boucle de rendu"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "reverb_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "reverbd"
+path = "src/main.rs"
+
+[dependencies]
+reverb-proto = { path = "../reverb-proto" }
+
+[lints]
+workspace = true

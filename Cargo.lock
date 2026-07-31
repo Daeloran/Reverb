@@ -10,5 +10,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "reverb-daemon"
+version = "0.1.0"
+dependencies = [
+ "reverb-proto",
+]
+
+[[package]]
 name = "reverb-proto"
 version = "0.1.0"
