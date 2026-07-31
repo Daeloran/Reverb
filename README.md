@@ -72,16 +72,34 @@ Rust, installé dans le `$HOME` — aucune surcouche `rpm-ostree` nécessaire :
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-Règle udev pour l'accès USB brut au Kraken (l'écran ne fonctionne pas sans) :
+La règle udev livrée par le dépôt, qui ouvre les contrôleurs NZXT à l'utilisateur connecté :
 
 ```bash
-echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", TAG+="uaccess"' \
-  | sudo tee /etc/udev/rules.d/71-nzxt-kraken.rules
+sudo cp packaging/60-reverb.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger
 ```
 
-Les `/dev/hidraw*` et `/dev/i2c-*` sont déjà accessibles sans root grâce aux règles udev
-d'OpenRGB déjà présentes sur le système.
+Elle couvre les deux contrôleurs d'éclairage et le Kraken, et n'emploie que `TAG+="uaccess"` :
+l'accès va à l'utilisateur physiquement connecté et lui est retiré à la déconnexion, là où un
+`MODE=` l'ouvrirait à tout process local. Lis-la avant de la poser, elle tient en trois lignes.
+
+`sudo ./tools/verifie_udev.sh` installe la règle et vérifie qu'elle déclenche vraiment.
+La nuance a son importance : sur une machine où OpenRGB est installé, `reverb list` marche
+de toute façon, et `udevadm test` ne journalise pas les `TAG+=`. D'où le tag `reverb`, que la
+règle pose et qu'aucune autre ne pose — il est présent sur le périphérique si et seulement si
+c'est bien elle qui a matché.
+
+Sans elle, `reverb` fonctionne quand même sur une machine où OpenRGB est installé — mais par
+ses règles à lui. **Un projet qui vise à remplacer OpenRGB n'a pas à dépendre de ses règles
+udev** : c'est ce que corrige `packaging/60-reverb.rules`.
+
+Deux accès restent hors de sa portée :
+
+- **les attributs hwmon** (`pwm*`, courbes du Kraken) appartiennent à `root` et `uaccess` ne
+  s'applique pas à sysfs. `reverb fan` et `reverb curve` demandent donc `sudo` ; les commandes
+  d'éclairage et `reverb fans` n'en ont pas besoin ;
+- **`/dev/i2c-*`**, nécessaire à la RAM Corsair, dépend encore de la règle d'OpenRGB. À traiter
+  avec le chantier RAM.
 
 ## Documentation
 
@@ -100,6 +118,7 @@ non testée · ❓ inconnu. **Ne rien implémenter à partir d'un ❓.**
 
 | Dossier | Contenu |
 |---|---|
+| `packaging/` | règle udev livrée par le dépôt, à installer soi-même |
 | `tools/windows/` | scripts PowerShell de capture et de décodage (rétro-ingénierie) |
 | `tools/*.py` | sondes Python héritées de l'exploration Linux initiale |
 | `captures/` | captures USB et SMBus brutes — **hors git**, 178 Mo |

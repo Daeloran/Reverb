@@ -30,6 +30,14 @@ pub enum Model {
 }
 
 impl Model {
+    /// Tous les modèles supportés.
+    ///
+    /// Sert à vérifier que la règle udev livrée par le dépôt les couvre tous :
+    /// ajouter une variante sans ajouter sa ligne dans
+    /// `packaging/60-reverb.rules` échouerait sinon en silence, à l'exécution,
+    /// sur la machine de quelqu'un d'autre.
+    pub const ALL: [Model; 2] = [Model::RgbAndFan, Model::Rgb];
+
     /// Identifiant produit USB correspondant.
     pub const fn product_id(self) -> u16 {
         match self {
