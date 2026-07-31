@@ -1,0 +1,25 @@
+# Règles udev de Reverb — accès sans root aux périphériques NZXT pilotés.
+#
+# Installation :
+#   sudo cp packaging/60-reverb.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+#
+# `TAG+="uaccess"` confie l'accès à systemd-logind, qui pose une ACL sur le nœud
+# pour l'utilisateur physiquement connecté, et la retire à la déconnexion.
+# Ni `MODE=`, ni `GROUP=` : le premier ouvre le périphérique à tout process
+# local, le second à tous les membres d'un groupe, connectés ou non.
+#
+# Une règle par ligne, sans structure de garde (`GOTO` / `LABEL`) : à trois
+# règles, le saut coûte plus en lisibilité qu'il ne fait gagner à udev.
+
+# Contrôleurs d'éclairage — commandes HID sur /dev/hidraw*.
+# `SUBSYSTEMS` au pluriel : le tag doit atteindre le nœud hidraw comme le nœud
+# USB parent, les attributs idVendor/idProduct ne vivant que sur le second.
+SUBSYSTEMS=="usb|hidraw", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2019", TAG+="uaccess"
+SUBSYSTEMS=="usb|hidraw", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2012", TAG+="uaccess"
+
+# Kraken Elite 2023 — l'écran ne passe pas par hidraw. Les commandes de contrôle
+# empruntent l'endpoint interrupt 0x01 et l'image l'endpoint bulk 0x02
+# (docs/SPEC-KRAKEN-LCD.md §1) : c'est le nœud /dev/bus/usb/… qu'il faut ouvrir,
+# d'où `SUBSYSTEM` au singulier.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", TAG+="uaccess"
