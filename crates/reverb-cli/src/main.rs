@@ -634,9 +634,9 @@ fn piloter_ram(action: ActionRam) -> Result<(), String> {
         ActionRam::Couleur { cible, color } => {
             let barrettes = barrettes_visees(cible)?;
             let couleurs = [color; ram::LEDS_PER_STICK];
-            let mut bus = ouvrir_bus()?;
+            let bus = ouvrir_bus()?;
             for barrette in &barrettes {
-                ecrire_barrette(&mut bus, *barrette, &couleurs)?;
+                ecrire_barrette(&bus, *barrette, &couleurs)?;
             }
             println!(
                 "{} barrette(s) en #{:02x}{:02x}{:02x}. \
@@ -653,8 +653,8 @@ fn piloter_ram(action: ActionRam) -> Result<(), String> {
             // Refusée AVANT d'ouvrir le moindre périphérique.
             ram::payload(&colors).map_err(|e| e.to_string())?;
 
-            let mut bus = ouvrir_bus()?;
-            ecrire_barrette(&mut bus, barrette, &colors)?;
+            let bus = ouvrir_bus()?;
+            ecrire_barrette(&bus, barrette, &colors)?;
             println!("{barrette} : {} LED peintes une à une.", colors.len());
             Ok(())
         }
@@ -715,11 +715,7 @@ fn ouvrir_bus() -> Result<i2c::Bus, String> {
 }
 
 /// Écrit les onze couleurs d'une barrette : deux blocs, vers la même adresse.
-fn ecrire_barrette(
-    bus: &mut i2c::Bus,
-    barrette: SlotAddress,
-    colors: &[Rgb],
-) -> Result<(), String> {
+fn ecrire_barrette(bus: &i2c::Bus, barrette: SlotAddress, colors: &[Rgb]) -> Result<(), String> {
     let (tete, queue) = ram::transfers(colors).map_err(|e| e.to_string())?;
 
     bus.target(barrette).map_err(|erreur| {
@@ -735,9 +731,9 @@ fn ecrire_barrette(
     // Les deux transferts se suivent immédiatement (spec §4.3). Rien entre eux :
     // une barrette qui reçoit le premier bloc sans le second affiche un état
     // dont le CRC n'est jamais arrivé.
-    bus.write(&tete)
+    bus.write_block(&tete)
         .map_err(|e| format!("{barrette}, bloc {:#04x} refusé : {e}", ram::REGISTER_HEAD))?;
-    bus.write(&queue)
+    bus.write_block(&queue)
         .map_err(|e| format!("{barrette}, bloc {:#04x} refusé : {e}", ram::REGISTER_TAIL))?;
     Ok(())
 }
@@ -753,7 +749,7 @@ fn ecrire_barrette(
 /// mort du processus laisse la dernière image affichée. C'est exactement le
 /// comportement attendu, et il ne coûte pas une ligne.
 fn animer() -> Result<(), String> {
-    let mut bus = ouvrir_bus()?;
+    let bus = ouvrir_bus()?;
     println!(
         "Vague sur les {} barrettes, une image toutes les {INTERVALLE_ANIMATION_MS} ms.\n\
          Ctrl-C pour arrêter — la dernière image reste affichée.",
@@ -763,7 +759,7 @@ fn animer() -> Result<(), String> {
     let mut pas: u32 = 0;
     loop {
         for barrette in SlotAddress::ALL {
-            ecrire_barrette(&mut bus, barrette, &vague(pas, barrette.slot()))?;
+            ecrire_barrette(&bus, barrette, &vague(pas, barrette.slot()))?;
         }
         pas = pas.wrapping_add(1);
         std::thread::sleep(std::time::Duration::from_millis(INTERVALLE_ANIMATION_MS));

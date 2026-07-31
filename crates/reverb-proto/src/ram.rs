@@ -179,12 +179,15 @@ pub fn payload(colors: &[Rgb]) -> Result<[u8; PAYLOAD_LEN], LedCountError> {
     Ok(charge)
 }
 
-/// Les deux transferts SMBus, prêts pour un `write()` sur `/dev/i2c-*`.
+/// Les deux transferts SMBus, décrits comme ils partent sur le fil :
+/// `[registre][compte][données]`, la forme du §4.4 où le registre alimente
+/// `SMBHSTCMD` et le compte `SMBHSTDAT0`. Les deux se suivent immédiatement,
+/// vers la même adresse.
 ///
-/// Une écriture SMBus par bloc est, sur le fil, un `write()` I2C de
-/// `[registre][compte][données]` — le noyau reprend ces deux premiers octets
-/// pour `SMBHSTCMD` et `SMBHSTDAT0` (spec §4.4). Les deux transferts se suivent
-/// immédiatement, vers la même adresse.
+/// ⚠️ Cette forme décrit le **fil**, pas l'appel système. Un `write()` sur
+/// `/dev/i2c-*` ne les émet pas : `i2c-piix4` est un contrôleur SMBus pur et
+/// n'expose aucun algorithme I2C brut. C'est `reverb_cli::i2c::Bus::write_block`
+/// qui les remet au noyau, par l'ioctl `I2C_SMBUS`.
 ///
 /// # Erreurs
 ///

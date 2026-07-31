@@ -2,9 +2,27 @@
 //!
 //! Corsair n'emploie aucun protocole propriétaire (spec §1) : les barrettes se
 //! joignent par des transferts SMBus par bloc standard, sur le contrôleur AMD
-//! FCH que `i2c-piix4` gère déjà. Un `write()` sur `/dev/i2c-N` de
-//! `[registre][compte][données]` **est** une écriture par bloc — le noyau
-//! reprend ces deux premiers octets pour `SMBHSTCMD` et `SMBHSTDAT0`.
+//! FCH que `i2c-piix4` gère déjà.
+//!
+//! ⚠️ **Un `write()` ordinaire ne marche pas sur cet adaptateur, et échoue sans
+//! rien émettre.** Sur le fil, une écriture par bloc *est* bien
+//! `[registre][compte][données]` — mais ce n'est pas par là que le noyau y
+//! arrive. `i2c-piix4` est un contrôleur SMBus pur : il n'expose que
+//! `smbus_xfer`, jamais `master_xfer`. Un `write()` sur `/dev/i2c-N` part donc
+//! dans `i2c_master_send`, ne trouve aucun algorithme I2C brut et revient en
+//! `EOPNOTSUPP`, sans qu'un seul bit atteigne le bus. C'est vérifiable sans
+//! rien émettre :
+//!
+//! ```text
+//! $ i2cdetect -F 8
+//! I2C                              no      ← pas de write() ordinaire
+//! SMBus Block Write                yes     ← l'ioctl I2C_SMBUS, et lui seul
+//! ```
+//!
+//! D'où [`Bus::write_block`], qui passe par l'ioctl `I2C_SMBUS` — le
+//! `write_block_data` de `smbus2` que la spec §6 emploie déjà dans son
+//! implémentation de référence. Les octets sur le fil sont identiques ; seule
+//! la façon de les remettre au noyau change.
 //!
 //! ⚠️ **Ce bus porte aussi les hubs SPD des barrettes, en `0x50`–`0x53`**
 //! (spec §3). Une écriture au mauvais endroit corrompt le SPD et rend un DIMM
@@ -25,19 +43,23 @@
 //! sysfs, sans qu'un octet parte sur le fil.
 
 // Seconde dérogation du dépôt à `unsafe_code`, que le workspace passe en `deny`
-// pour les rendre possibles (ADR-004). Elle couvre un unique appel à `ioctl`,
-// dans ce fichier, sur un descripteur ouvert par la bibliothèque standard.
+// pour les rendre possibles (ADR-004). Elle couvre deux appels à `ioctl`, dans
+// ce fichier, sur un descripteur ouvert par la bibliothèque standard.
 //
-// Ce que cet appel suppose, et qui n'est pas vérifiable par le compilateur :
-//   - `I2C_SLAVE` vaut bien `0x0703`, comme `linux/i2c-dev.h` le déclare ;
-//   - cet `ioctl` prend son argument **par valeur** et non par pointeur, ce qui
-//     est la seule différence de forme avec ceux de `usbfs.rs`.
+// Ce que ces appels supposent, et qui n'est pas vérifiable par le compilateur :
+//   - `I2C_SLAVE` et `I2C_SMBUS` valent bien ce que `linux/i2c-dev.h` déclare ;
+//   - la disposition de `SmbusIoctlData` correspond à
+//     `struct i2c_smbus_ioctl_data`, et son champ `data` pointe un tampon de la
+//     taille d'`union i2c_smbus_data` ;
+//   - `I2C_SLAVE` prend son argument **par valeur** là où `I2C_SMBUS` le prend
+//     par pointeur, seule différence de forme avec ceux de `usbfs.rs`.
 //
-// Rien n'est emprunté ni déréférencé : il n'y a pas de durée de vie à garantir.
+// Le tampon pointé est une variable locale qui survit à l'appel : il n'y a pas
+// de durée de vie à garantir au-delà.
 #![allow(unsafe_code)]
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
@@ -67,15 +89,38 @@ pub const ADAPTER_NAME: &str = "SMBus PIIX4 adapter port 0 at 0b00";
 /// recherché : voir l'en-tête du module.
 const I2C_SLAVE: u64 = 0x0703;
 
+/// `I2C_SMBUS` de `linux/i2c-dev.h` — émet une transaction SMBus.
+///
+/// La seule voie possible sur cet adaptateur : voir l'en-tête du module.
+const I2C_SMBUS: u64 = 0x0720;
+
+/// Sens de la transaction, champ `read_write`.
+const I2C_SMBUS_WRITE: u8 = 0;
+
+/// Protocole « block write » de `linux/i2c.h`, champ `size`.
+const I2C_SMBUS_BLOCK_DATA: u32 = 5;
+
+/// Taille maximale d'un bloc SMBus, `I2C_SMBUS_BLOCK_MAX`. C'est elle qui
+/// impose de scinder les 35 octets de la charge utile (spec §4.3).
+const I2C_SMBUS_BLOCK_MAX: usize = 32;
+
+/// `struct i2c_smbus_ioctl_data` de `linux/i2c-dev.h`.
+#[repr(C)]
+struct SmbusIoctlData {
+    read_write: u8,
+    command: u8,
+    size: u32,
+    data: *mut u8,
+}
+
 // Même signature que la déclaration de `usbfs.rs` — deux `extern` du même
 // symbole qui divergeraient déclencheraient `clashing_extern_declarations`.
 //
-// La forme est trompeuse : `I2C_SLAVE` prend son argument **par valeur** et non
-// par pointeur, contrairement aux `ioctl` d'usbfs. D'où le
-// `without_provenance_mut` de [`Bus::target`], qui place un entier dans
-// l'emplacement du pointeur sans prétendre qu'il en est un. Sur l'ABI x86-64,
-// les deux occupent le même registre ; le noyau lit la valeur, pas ce qu'elle
-// désignerait.
+// La forme est trompeuse pour `I2C_SLAVE`, qui prend son argument **par
+// valeur**. D'où le `without_provenance_mut` de [`Bus::target`], qui place un
+// entier dans l'emplacement du pointeur sans prétendre qu'il en est un. Sur
+// l'ABI x86-64, les deux occupent le même registre ; le noyau lit la valeur,
+// pas ce qu'elle désignerait. `I2C_SMBUS`, lui, attend bien un pointeur.
 unsafe extern "C" {
     fn ioctl(fd: i32, request: u64, arg: *mut std::ffi::c_void) -> i32;
 }
@@ -124,22 +169,78 @@ impl Bus {
         Ok(())
     }
 
-    /// Écrit un transfert, tel que `ram::transfers` l'a produit.
+    /// Émet une écriture SMBus par bloc, telle que `ram::transfers` l'a
+    /// produite.
     ///
-    /// Volontairement pas de `write_all` : une écriture partielle sur ce bus ne
-    /// se rattrape pas en poussant le reste, ça émettrait un second bloc
-    /// tronqué. Mieux vaut le signaler.
-    pub fn write(&mut self, transfert: &[u8]) -> io::Result<()> {
-        let ecrits = self.file.write(transfert)?;
-        if ecrits != transfert.len() {
-            return Err(io::Error::other(format!(
-                "transfert partiel sur {} : {ecrits} octets écrits sur {}",
-                self.path.display(),
-                transfert.len()
-            )));
+    /// Le transfert reste décrit comme il part sur le fil —
+    /// `[registre][compte][données]`, la forme du §4.4 — mais il est remis au
+    /// noyau par l'ioctl `I2C_SMBUS` : le registre devient `command`, le compte
+    /// et les données remplissent l'`union i2c_smbus_data`. Voir l'en-tête du
+    /// module pour la raison, qui a coûté une passe matérielle.
+    ///
+    /// Pas de transfert partiel possible ici, contrairement à un `write()` :
+    /// l'ioctl émet la transaction entière ou échoue.
+    pub fn write_block(&self, transfert: &[u8]) -> io::Result<()> {
+        let (registre, mut tampon) = bloc(transfert)?;
+
+        let mut requete = SmbusIoctlData {
+            read_write: I2C_SMBUS_WRITE,
+            command: registre,
+            size: I2C_SMBUS_BLOCK_DATA,
+            data: tampon.as_mut_ptr(),
+        };
+
+        let code = unsafe {
+            ioctl(
+                self.file.as_raw_fd(),
+                I2C_SMBUS,
+                (&raw mut requete).cast::<std::ffi::c_void>(),
+            )
+        };
+        if code < 0 {
+            return Err(io::Error::last_os_error());
         }
         Ok(())
     }
+}
+
+/// Décompose un transfert en son registre et le tampon qu'attend le noyau.
+///
+/// L'`union i2c_smbus_data` porte le compte en tête, puis les données — soit
+/// exactement les octets 1 et suivants du transfert. Fonction séparée pour être
+/// testable : c'est la seule mise en forme du module qui puisse être
+/// silencieusement fausse.
+fn bloc(transfert: &[u8]) -> io::Result<(u8, [u8; I2C_SMBUS_BLOCK_MAX + 2])> {
+    let [registre, compte, donnees @ ..] = transfert else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "un bloc SMBus commence par son registre et son compte",
+        ));
+    };
+
+    if usize::from(*compte) != donnees.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "bloc incohérent : {compte} octets annoncés, {} fournis",
+                donnees.len()
+            ),
+        ));
+    }
+    if donnees.len() > I2C_SMBUS_BLOCK_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "bloc de {} octets, maximum {I2C_SMBUS_BLOCK_MAX} en SMBus",
+                donnees.len()
+            ),
+        ));
+    }
+
+    let mut tampon = [0u8; I2C_SMBUS_BLOCK_MAX + 2];
+    tampon[0] = *compte;
+    tampon[1..=donnees.len()].copy_from_slice(donnees);
+    Ok((*registre, tampon))
 }
 
 /// Retrouve `/dev/i2c-N` pour l'adaptateur nommé [`ADAPTER_NAME`].
@@ -216,6 +317,52 @@ mod tests {
             fs::write(dossier.join("name"), format!("{nom}\n")).unwrap();
         }
         base
+    }
+
+    /// Le tampon remis au noyau, sur le vecteur relevé dans la capture iCUE
+    /// (`captures/smbus-blocs.csv`, ligne 3 : `"0x18","0x32","3","3","06 c9 8c"`).
+    ///
+    /// C'est la mise en forme qui a coûté la première passe matérielle : elle
+    /// ne produit aucune erreur quand elle est fausse, juste une transaction
+    /// qui n'allume rien.
+    #[test]
+    fn le_tampon_smbus_porte_le_compte_en_tete_puis_les_donnees() {
+        let (registre, tampon) = bloc(&[0x32, 0x03, 0x06, 0xc9, 0x8c]).unwrap();
+        assert_eq!(registre, 0x32, "le registre devient `command`, hors tampon");
+        assert_eq!(tampon[0], 0x03, "le compte ouvre l'union i2c_smbus_data");
+        assert_eq!(&tampon[1..4], &[0x06, 0xc9, 0x8c]);
+        assert!(
+            tampon[4..].iter().all(|&o| o == 0),
+            "rien au-delà des octets annoncés"
+        );
+
+        // Le bloc de 32 octets, qui occupe le tampon jusqu'à sa dernière place
+        // utile : `I2C_SMBUS_BLOCK_MAX` est exactement ce qui impose le
+        // découpage en deux transferts (spec §4.3).
+        let mut plein = vec![0x31, 0x20];
+        plein.extend(std::iter::repeat_n(0xab, I2C_SMBUS_BLOCK_MAX));
+        let (registre, tampon) = bloc(&plein).unwrap();
+        assert_eq!(registre, 0x31);
+        assert_eq!(usize::from(tampon[0]), I2C_SMBUS_BLOCK_MAX);
+        assert_eq!(tampon[I2C_SMBUS_BLOCK_MAX], 0xab, "dernier octet utile");
+        assert_eq!(tampon[I2C_SMBUS_BLOCK_MAX + 1], 0x00);
+    }
+
+    #[test]
+    fn un_bloc_dont_le_compte_ment_est_refuse() {
+        // Le compte annoncé au noyau et le nombre d'octets fournis sont deux
+        // sources distinctes : les laisser diverger émettrait une transaction
+        // tronquée ou débordante, sans erreur.
+        let erreur = bloc(&[0x31, 0x20, 0x01, 0x02]).unwrap_err();
+        assert_eq!(erreur.kind(), io::ErrorKind::InvalidInput);
+        assert!(erreur.to_string().contains("32"), "{erreur}");
+
+        assert!(bloc(&[0x31]).is_err(), "un transfert sans compte");
+        assert!(bloc(&[]).is_err(), "un transfert vide");
+
+        let trop = [vec![0x31, 33], vec![0xff; 33]].concat();
+        let erreur = bloc(&trop).unwrap_err();
+        assert!(erreur.to_string().contains("maximum 32"), "{erreur}");
     }
 
     /// Le nom de l'adaptateur est écrit à deux endroits — ici et dans la règle
