@@ -17,6 +17,7 @@
 | Régler la **luminosité** | une commande HID | ✅ |
 | Afficher une **image** | 1,2 Mo, à réémettre toutes les ~25 s | ✅ **affichée sous Linux le 2026-07-31** |
 | Afficher une **animation** | 1,2 Mo par image, ~2 images/s maximum | 🔶 |
+| Garder une image **stable** à l'envoi répété | le paquet de longueur nulle | ✅ §2.2.1 |
 | **Revenir** au mode firmware sur commande | aucune trame connue — cesser d'émettre | ❓ §2.3 |
 
 **Recette minimale pour afficher une image :**
@@ -143,22 +144,44 @@ Sous Linux, `libusb` suffit — aucun pilote à installer.
 
 **Débit mesuré : environ 470 ms par image**, soit ~2 images par seconde au maximum.
 
-⚠️ **Défaut connu de l'implémentation de référence : l'image dérive.** À l'envoi répété, le
-contenu se décale progressivement à l'écran, comme une grille qui défile.
+⚠️ **Défaut de l'implémentation Windows de référence : l'image dérive.** À l'envoi répété, le
+contenu se décalait progressivement à l'écran, comme une grille qui défile.
 
-🔶 Cause quasi certaine : **absence de paquet de longueur nulle** en fin de transfert.
-`1 228 800 = 2400 × 512`, un multiple exact de `wMaxPacketSize`. Dans ce cas la spécification USB
-exige un **ZLP** (*zero-length packet*) pour signaler la fin du transfert ; sans lui, le
-contrôleur ne sait pas où une image se termine et concatène la suivante — ce qui produit
-exactement ce décalage.
+✅ **Cause confirmée et corrigée le 2026-07-31 : le paquet de longueur nulle manquant.**
+`1 228 800 = 2400 × 512`, un multiple exact de `wMaxPacketSize` ; la spécification USB exige alors
+un **ZLP** pour signaler la fin du transfert, sans quoi le contrôleur ne sait pas où une image
+s'arrête et concatène la suivante.
 
-Sous Linux avec `libusb`, cela correspond au drapeau `LIBUSB_TRANSFER_ADD_ZERO_PACKET`, ou à
-l'envoi explicite d'un transfert de 0 octet après l'image. **À traiter en premier** si l'image
-n'est pas stable.
+L'hypothèse posée pendant la rétro-ingénierie était donc juste. Vérifiée sous Linux par vingt
+envois consécutifs : **l'image ne bouge pas d'un pixel**, frontières entre quadrants comprises.
 
-⚠️ C'est aussi pourquoi **l'ordre des composantes n'a pas pu être vérifié directement** : la mire
-défilant, les quadrants n'étaient jamais au même endroit. L'ordre **BGR** reste établi par le
-raisonnement du §2.1 (jauge olive), pas par une mire. À reconfirmer une fois la dérive corrigée.
+⚠️ Le ZLP est **conditionnel** — voir le §0, piège n° 3. L'ajouter après l'en-tête de 20 octets,
+qui n'est pas un multiple de 512, insère un transfert parasite qui empêche toute image de
+s'afficher.
+
+Sous Linux, un second `USBDEVFS_BULK` de longueur nulle suffit ; avec `libusb`, c'est le drapeau
+`LIBUSB_TRANSFER_ADD_ZERO_PACKET`.
+
+C'est cette dérive qui avait empêché de **vérifier l'ordre des composantes** — la mire défilant,
+les quadrants n'étaient jamais au même endroit. Une fois corrigée, la vérification a pu être faite :
+voir §2.1.
+
+### 2.2.3 L'affichage ne survit pas à la fermeture du périphérique ✅
+
+Observé le 2026-07-31 en enchaînant vingt envois **par vingt lancements successifs** du binaire.
+Entre chaque image, l'écran repasse brièvement au noir puis à l'affichage firmware, avant que
+l'image suivante ne s'affiche. Sur une boucle unique qui garde le périphérique ouvert, rien de tel :
+l'image reste affichée sans clignoter.
+
+🔶 Deux causes candidates, non départagées, chacune se produisant une fois par lancement :
+
+- l'interface bulk est **réclamée puis rendue** à chaque ouverture ;
+- la trame `38 01 02 00` est **réémise** à chaque lancement, et le §3.4 constate déjà qu'une
+  commande d'affichage réinitialise le pipeline.
+
+**Sans conséquence pratique** : un affichage durable impose de toute façon un processus qui réémet
+(§2.2.2), et celui-là garde le périphérique ouvert. À trancher seulement si un usage réclame des
+envois ponctuels rapprochés.
 
 ### 2.2.2 Délai de garde de 30 secondes ✅
 
@@ -391,7 +414,7 @@ fiche de préparation. Le décodage ci-dessus sert alors de vérification, pas d
 
 | # | Question | Comment trancher |
 |---|---|---|
-| 1 | **Corriger la dérive de l'image** — voir §2.2.1 | ajouter le paquet de longueur nulle en fin de transfert. **À faire en premier** |
+| ~~1~~ | ~~Corriger la dérive de l'image~~ | ✅ **tranché — §2.2.1, c'était bien le paquet de longueur nulle** |
 | ~~2~~ | ~~RGB ou BGR confirmé par une mire~~ | ✅ **tranché le 2026-07-31 — §2.1, c'est BGR** |
 | 3 | Rôle des octets `12 fa 01 e8` et `09 00 00 00` de l'en-tête | `09 00 00 00` occupe la place du sélecteur de contenu de `liquidctl` (`01` gif, `02` image fixe) ; CAM y met une troisième valeur. Envoyer une image de taille différente |
 | 4 | Écrire l'orientation | lue en `31 01` offset `0x1a` (§3.7), mais l'offset en **écriture** n'est pas établi : la trame de CAM et celle de `liquidctl` ne coïncident pas |
