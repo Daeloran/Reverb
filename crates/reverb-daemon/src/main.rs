@@ -235,7 +235,7 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
             vec![ResponseLine::End]
         }
 
-        Request::Animate { name } => match name {
+        Request::Animate { name, .. } => match name {
             None => {
                 etat.animation = None;
                 // L'éclairage fixe reprend la main là où l'animation l'a laissé.
@@ -253,6 +253,8 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
                 ),
             }],
         },
+
+        Request::Geometry { .. } => todo!("issue #19"),
 
         Request::Fan { channel, action } => {
             // `Percent::new` refait la vérification de bornes que `parse_request`

@@ -82,10 +82,26 @@ pub enum Request {
     Status,
     /// `light <cible> <hex>` — une couleur fixe.
     Light { target: LightTarget, color: Rgb },
-    /// `animate <nom>` — lance une animation ; `animate off` l'arrête.
-    Animate { name: Option<String> },
+    /// `animate <nom> [clé=valeur…]` — lance une animation ; `animate off` l'arrête.
+    ///
+    /// Les réglages sont **transportés bruts**, jamais interprétés ici : ce
+    /// crate ne peut pas dépendre de `reverb-anim`, et n'a pas à connaître les
+    /// paramètres qu'une animation accepte. Le refus d'une clé inconnue
+    /// appartient à l'animation, seule à savoir ce qu'elle accepte.
+    Animate {
+        name: Option<String>,
+        reglages: Vec<(String, String)>,
+    },
     /// `fan <canal> pwm <0-100>` ou `fan <canal> auto`.
     Fan { channel: String, action: FanAction },
+    /// `geometry` — lit la géométrie ; `geometry <position> clé=valeur…` la change.
+    ///
+    /// Même partage que pour `Animate` : le protocole transporte, le moteur
+    /// interprète.
+    Geometry {
+        cible: Option<String>,
+        reglages: Vec<(String, String)>,
+    },
 }
 
 /// Ce que vise une commande d'éclairage.
@@ -194,6 +210,7 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
             };
             Ok(Request::Animate {
                 name: (nom != ANIMATION_OFF).then(|| nom.to_owned()),
+                reglages: Vec::new(),
             })
         }
 
@@ -240,13 +257,14 @@ pub fn encode_request(request: &Request) -> String {
                 color.r, color.g, color.b
             )
         }
-        Request::Animate { name } => {
+        Request::Animate { name, .. } => {
             format!("animate {}", name.as_deref().unwrap_or(ANIMATION_OFF))
         }
         Request::Fan { channel, action } => match action {
             FanAction::Auto => format!("fan {channel} auto"),
             FanAction::Pwm(percent) => format!("fan {channel} pwm {percent}"),
         },
+        Request::Geometry { .. } => todo!("issue #19"),
     }
 }
 
@@ -332,6 +350,12 @@ pub enum ResponseLine {
     /// ⚠️ Ni omise, ni remplacée par zéro : un canal illisible affiché à
     /// 0 tr/min est un mensonge, et un canal omis fait croire qu'il n'existe pas.
     Unreadable { subject: String, reason: String },
+    /// `geom <position-slug> <angle> <sens>` — une ligne de géométrie.
+    Geom {
+        position: String,
+        angle: u16,
+        sens: String,
+    },
     /// `end` — succès, fin de réponse.
     End,
     /// `err <message>` — échec, fin de réponse.
@@ -396,6 +420,7 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
         ResponseLine::Unreadable { subject, reason } => {
             format!("unreadable {} {}", jeton(subject), reste(reason))
         }
+        ResponseLine::Geom { .. } => todo!("issue #19"),
         ResponseLine::End => "end".to_owned(),
         ResponseLine::Error { message } => format!("err {}", reste(message)),
     }

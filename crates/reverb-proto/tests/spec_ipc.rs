@@ -255,9 +255,16 @@ fn chaque_verbe_bien_forme_est_decode_en_sa_requete() {
             "animate vague".to_owned(),
             Request::Animate {
                 name: Some("vague".to_owned()),
+                reglages: Vec::new(),
             },
         ),
-        ("animate off".to_owned(), Request::Animate { name: None }),
+        (
+            "animate off".to_owned(),
+            Request::Animate {
+                name: None,
+                reglages: Vec::new(),
+            },
+        ),
         (
             format!("fan {CANAL} pwm 60"),
             ventilateur(FanAction::Pwm(60)),
@@ -548,11 +555,16 @@ fn toute_requete_encodee_se_relit_a_l_identique() {
         lumiere(LightTarget::Ram),
         Request::Animate {
             name: Some("vague".to_owned()),
+            reglages: Vec::new(),
         },
         Request::Animate {
             name: Some("arc-en-ciel".to_owned()),
+            reglages: Vec::new(),
         },
-        Request::Animate { name: None },
+        Request::Animate {
+            name: None,
+            reglages: Vec::new(),
+        },
         ventilateur(FanAction::Auto),
         ventilateur(FanAction::Pwm(0)),
         ventilateur(FanAction::Pwm(100)),
