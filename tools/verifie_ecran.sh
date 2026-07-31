@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
-# Vérification matérielle de l'écran du Kraken (issue #13), seconde passe.
+# Vérification matérielle de l'écran du Kraken (issue #13), troisième passe.
 #
-# ⚠️ REGARDE L'ÉCRAN DU KRAKEN. Seul l'œil répond à ces questions.
+# ⚠️ REGARDE L'ÉCRAN DU KRAKEN. Seul l'œil répond.
 #
-# La première passe avait échoué : aucune image, et l'affichage firmware
-# dégradé. Cause trouvée à la sonde — un paquet de longueur nulle était émis
-# APRÈS L'EN-TÊTE de 20 octets, qui n'en a pas besoin. Le contrôleur recevait
-# donc un transfert vide parasite entre l'en-tête et l'image.
+# Historique des deux passes précédentes :
 #
-# Ce script teste deux hypothèses en un passage :
-#   A. la correction du paquet vide suffit ;
-#   B. il faut en plus rejouer le préambule complet de CAM.
+#   1. aucune image, affichage firmware dégradé. Cause : un paquet de longueur
+#      nulle était émis après l'en-tête de 20 octets, qui n'en a pas besoin.
+#      Corrigé.
+#   2. toujours aucune image, affichage firmware propre. Deux défauts trouvés
+#      depuis, tous deux visibles dans la capture depuis le début :
+#        - CAM attend l'accusé 37 01 avant d'envoyer les données ; on
+#          enchaînait sans rien attendre. Corrigé ;
+#        - « 38 01 02 » est peut-être le mode LIQUIDE et non le mode image.
+#          liquidctl le nomme ainsi, et l'écran nous montre effectivement le
+#          liquide. C'est ce que cette passe teste.
+#
+# Six variantes, de la plus proche de la capture à la plus proche de liquidctl.
+# La première qui affiche la mire tranche.
 #
 # Aucun sudo. Usage : ./tools/verifie_ecran.sh
 
@@ -23,68 +30,43 @@ NOTES="/tmp/reverb-observations-ecran.txt"
 [ -x "$REVERB" ] || { echo "Compile d'abord : cargo build" >&2; exit 1; }
 : >"$NOTES"
 
-pause() { echo; read -r -p "   ↳ $1 " r; printf '%s\t%s\n' "$2" "$r" >>"$NOTES"; }
+echo "Mire attendue :   haut-gauche ROUGE    haut-droite VERT"
+echo "                  bas-gauche  BLEU     bas-droite  BLANC"
+echo
+echo "À chaque essai, réponds par ce que tu vois. « rien » si l'écran ne bouge"
+echo "pas de son affichage NZXT habituel."
+echo
 
-attendre_repli() {
-    echo "   (on laisse le firmware reprendre la main — 35 s)"
-    for i in $(seq 35 -1 1); do printf "\r      %2d s " "$i"; sleep 1; done
-    printf "\r              \r"
+essai() {
+    local libelle="$1"; shift
+    echo "─── $libelle"
+    echo "    $ reverb screen --mire --once $*"
+    # shellcheck disable=SC2086
+    if ! "$REVERB" screen --mire --once "$@" 2>&1 | sed 's/^/    /'; then
+        printf '%s\tCOMMANDE EN ECHEC\n' "$libelle" >>"$NOTES"
+        return
+    fi
+    sleep 4
+    read -r -p "    ↳ que montre l'écran ? " reponse
+    printf '%s\t%s\n' "$libelle" "$reponse" >>"$NOTES"
+    echo
 }
 
-echo "═══ A. Correction du paquet vide, seule ═══"
-echo "Quatre quadrants attendus :"
-echo "     haut-gauche ROUGE      haut-droite VERT"
-echo "     bas-gauche  BLEU       bas-droite  BLANC"
-"$REVERB" screen --mire --once || echo "  ❌ envoi refusé"
-sleep 4
-pause "Que montre l'écran ? (mire / température / autre — décris)" "A-paquet-vide-corrige"
+essai "1-capture-fidele"
+essai "2-mode-4-apres"            --after-mode 4
+essai "3-preambule"               --full-init
+essai "4-preambule-et-mode-4"     --full-init --after-mode 4
+essai "5-mode-1-apres"            --after-mode 1
+essai "6-mode-0-apres"            --after-mode 0
 
-attendre_repli
+echo "═══ Si une mire est apparue ═══"
+read -r -p "Quel numéro d'essai a affiché la mire ? (1-6, ou « aucun ») " GAGNANT
+printf 'essai-gagnant\t%s\n' "$GAGNANT" >>"$NOTES"
 
-echo "═══ B. Avec le préambule complet de CAM ═══"
-"$REVERB" screen --mire --once --full-init || echo "  ❌ envoi refusé"
-sleep 4
-pause "Et maintenant ? (mire / température / autre — décris)" "B-preambule-complet"
-
-# Les étapes suivantes n'ont de sens que si une mire est apparue.
-echo
-read -r -p "Une mire est-elle apparue à l'étape A ou B ? (A/B/aucune) " QUELLE
-printf 'mire-apparue\t%s\n' "$QUELLE" >>"$NOTES"
-
-case "$QUELLE" in
-    A|a) OPTS="--once" ;;
-    B|b) OPTS="--once --full-init" ;;
-    *)
-        echo
-        echo "Pas de mire : on s'arrête là, le reste n'aurait rien à mesurer."
-        echo "Relevé : $NOTES"; cat "$NOTES"; exit 0
-        ;;
-esac
-
-echo
-echo "═══ C. Ordre des composantes ═══"
-# shellcheck disable=SC2086
-"$REVERB" screen --mire $OPTS >/dev/null 2>&1
-sleep 3
-pause "Couleur du quadrant HAUT-GAUCHE ? (rouge/bleu/vert/blanc)" "ordre-composantes"
-
-echo
-echo "═══ D. Dérive — le test du paquet de longueur nulle ═══"
-echo "Dix envois d'affilée. Si l'image glisse ou défile comme une grille,"
-echo "le paquet vide ne suffit pas."
-for i in $(seq 1 10); do
-    printf "\r   envoi %2d/10" "$i"
-    # shellcheck disable=SC2086
-    "$REVERB" screen --mire $OPTS >/dev/null 2>&1 || { echo; echo "  ❌ envoi $i refusé"; break; }
-done
-echo
-sleep 2
-pause "L'image est-elle restée STABLE sur les dix envois ? (oui/non/décrire)" "derive"
-
-echo
-echo "═══ E. Repli du firmware ═══"
-attendre_repli
-pause "L'écran est-il revenu à « NZXT — xx° Liquid » ? (oui/non)" "repli-firmware"
+if [ "$GAGNANT" != "aucun" ] && [ -n "$GAGNANT" ]; then
+    read -r -p "Couleur du quadrant HAUT-GAUCHE ? (rouge/bleu/vert/blanc) " COIN
+    printf 'ordre-composantes\t%s\n' "$COIN" >>"$NOTES"
+fi
 
 echo
 echo "═══ Relevé ═══"

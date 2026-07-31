@@ -501,6 +501,7 @@ fn piloter_ecran(action: ActionEcran) -> Result<(), String> {
             chemin,
             once,
             full_init,
+            after_mode,
         } => {
             let donnees = std::fs::read(&chemin)
                 .map_err(|e| format!("« {} » illisible : {e}", chemin.display()))?;
@@ -513,9 +514,13 @@ fn piloter_ecran(action: ActionEcran) -> Result<(), String> {
                     screen::HEIGHT
                 )
             })?;
-            diffuser(&donnees, once, full_init)
+            diffuser(&donnees, once, full_init, after_mode)
         }
-        ActionEcran::Mire { once, full_init } => diffuser(&screen::test_pattern(), once, full_init),
+        ActionEcran::Mire {
+            once,
+            full_init,
+            after_mode,
+        } => diffuser(&screen::test_pattern(), once, full_init, after_mode),
     }
 }
 
@@ -549,7 +554,12 @@ fn regler_luminosite(percent: u8) -> Result<(), String> {
 /// au bout d'une trentaine de secondes sans nouvel envoi (spec §2.2.2). C'est
 /// aussi le seul moyen connu d'en revenir — aucune trame ne ramène au mode
 /// firmware, il suffit de cesser d'émettre (spec §2.3).
-fn diffuser(image: &[u8], once: bool, full_init: bool) -> Result<(), String> {
+fn diffuser(
+    image: &[u8],
+    once: bool,
+    full_init: bool,
+    after_mode: Option<u8>,
+) -> Result<(), String> {
     let chemin_hid = hidraw_du_kraken()?;
     let ecran = usbfs::Screen::open().map_err(|e| {
         format!(
@@ -582,17 +592,33 @@ fn diffuser(image: &[u8], once: bool, full_init: bool) -> Result<(), String> {
         u32::try_from(image.len()).map_err(|_| "image trop volumineuse".to_owned())?,
     );
 
+    // Le contrôleur ACQUITTE chaque étape, et CAM attend l'accusé avant de
+    // passer à la suivante (spec §3.2) : 36 01 → 37 01, puis les données, puis
+    // 36 02 → 37 02. Envoyer les 1,2 Mo sans attendre 37 01, c'est parler à un
+    // contrôleur qui n'écoute pas encore.
     let envoyer = || -> Result<(), String> {
-        hidraw::write_frame(&chemin_hid, &screen::begin_image())
-            .map_err(|e| format!("annonce refusée : {e}"))?;
+        let accuse = hidraw::ask(&chemin_hid, &screen::begin_image(), &[0x37, 0x01])
+            .map_err(|e| format!("annonce sans accusé : {e}"))?;
+        verifier_accuse(&accuse, "l'annonce")?;
+
         ecran
             .write_bulk(&entete)
             .map_err(|e| format!("en-tête refusé : {e}"))?;
         ecran
             .write_bulk(image)
             .map_err(|e| format!("image refusée : {e}"))?;
-        hidraw::write_frame(&chemin_hid, &screen::end_image())
-            .map_err(|e| format!("validation refusée : {e}"))
+
+        let accuse = hidraw::ask(&chemin_hid, &screen::end_image(), &[0x37, 0x02])
+            .map_err(|e| format!("validation sans accusé : {e}"))?;
+        verifier_accuse(&accuse, "la validation")?;
+
+        // ❓ Expérimental : liquidctl bascule sur l'emplacement qu'il vient
+        // d'écrire, avec un mode que la capture ne montre pas.
+        if let Some(mode) = after_mode {
+            hidraw::write_frame(&chemin_hid, &screen::display_mode(mode))
+                .map_err(|e| format!("bascule vers le mode {mode} refusée : {e}"))?;
+        }
+        Ok(())
     };
 
     envoyer()?;
@@ -615,4 +641,21 @@ fn diffuser(image: &[u8], once: bool, full_init: bool) -> Result<(), String> {
         ));
         envoyer()?;
     }
+}
+
+/// Offset du verdict dans un accusé du Kraken.
+///
+/// `liquidctl` lit `response[14] == 0x1` pour conclure au succès, et tous les
+/// accusés de la capture portent bien `01` à cet offset (spec §3.2). Une autre
+/// valeur signale donc un refus, qu'il vaut mieux voir que traverser.
+const OFFSET_VERDICT: usize = 14;
+
+fn verifier_accuse(accuse: &reverb_proto::Frame, etape: &str) -> Result<(), String> {
+    if accuse[OFFSET_VERDICT] == 0x01 {
+        return Ok(());
+    }
+    Err(format!(
+        "{etape} refusée par le contrôleur : accusé portant {:#04x} à l'offset {OFFSET_VERDICT}, attendu 0x01",
+        accuse[OFFSET_VERDICT]
+    ))
 }

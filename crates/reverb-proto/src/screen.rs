@@ -94,7 +94,21 @@ const BRIGHTNESS_TRAILER: u8 = 0x1e;
 /// [`FIRMWARE_FALLBACK_SECS`] — cesser d'émettre suffit, et c'est le seul
 /// mécanisme observé (spec §2.3).
 pub fn broadcast_mode() -> Frame {
-    packet(&[0x38, 0x01, BROADCAST, BUCKET])
+    display_mode(BROADCAST)
+}
+
+/// Sélectionne un mode d'affichage quelconque — `38 01 <mode> 00` (spec §3.5).
+///
+/// ❓ **Seul le mode 2 est observé dans la capture.** `liquidctl` emploie le
+/// mode 4 pour afficher un emplacement qu'il vient de remplir, et nomme le
+/// mode 2 « liquid » — ce que les premières vérifications matérielles semblent
+/// lui donner raison, contre la lecture qu'on avait faite de la capture.
+///
+/// Cette fonction existe pour **trancher par la mesure**, pas pour être
+/// employée à l'aveugle. Tant qu'un mode n'est pas établi, ne pas le câbler
+/// dans le chemin nominal.
+pub fn display_mode(mode: u8) -> Frame {
+    packet(&[0x38, 0x01, mode, BUCKET])
 }
 
 /// Nombre d'emplacements de stockage énumérés par CAM au démarrage (spec §3.1).
