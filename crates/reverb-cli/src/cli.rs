@@ -4,7 +4,7 @@
 //! binaire est un outil de validation interne, pas le produit final (le produit
 //! sera un démon et une fenêtre).
 
-use crate::hwmon::Percent;
+use reverb_hw::hwmon::Percent;
 use reverb_proto::{Apply, Brightness, Mode, Position, Rgb};
 
 /// Ce que l'utilisateur a demandé.

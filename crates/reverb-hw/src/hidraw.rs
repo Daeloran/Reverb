@@ -6,7 +6,7 @@
 //! l'octet de commande lui-même (`0x2a`, `0x10`, `0x60`). On écrit donc les
 //! 64 octets tels quels, sans préfixe (spec §0).
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -122,10 +122,55 @@ pub fn discover_in(sys_class: &Path, dev: &Path) -> io::Result<Vec<Controller>> 
 }
 
 /// Écrit une trame de 64 octets sur un périphérique.
+///
+/// ⚠️ **Rouvre le périphérique à chaque appel, et ouvrir coûte 51 ms.** C'est
+/// tenable pour la ligne de commande, qui écrit une fois puis rend la main ;
+/// c'est rédhibitoire pour une boucle d'animation, où ça plafonne à une image
+/// et demie par seconde. Un appelant qui écrit en boucle veut [`Controller::open`].
 pub fn write_frame(path: &Path, frame: &Frame) -> io::Result<()> {
     let mut fichier = OpenOptions::new().write(true).open(path)?;
     fichier.write_all(frame)?;
     fichier.flush()
+}
+
+/// Un contrôleur dont le descripteur reste ouvert.
+///
+/// Toute la raison d'être du démon tient dans ce type. Mesuré sur SHYNAEL le
+/// 2026-07-31 : ouvrir un `/dev/hidraw*` coûte **51 ms**, y écrire une trame de
+/// 64 octets **~1,3 ms**. Le coût est entièrement dans l'ouverture et linéaire
+/// en nombre d'ouvertures — repeindre les dix ventilateurs passe de 643 ms à
+/// quelques dizaines de millisecondes selon qu'on rouvre ou non.
+///
+/// ❓ La cause des 51 ms n'est pas établie. L'autosuspend USB est hors de cause
+/// (`power/control=on` sur les quatre périphériques). Le chiffre suffit à la
+/// décision ; l'explication reste une question ouverte.
+pub struct OpenController {
+    pub controller: Controller,
+    fichier: File,
+}
+
+impl Controller {
+    /// Ouvre le contrôleur et garde son descripteur.
+    ///
+    /// # Erreurs
+    ///
+    /// [`io::ErrorKind::PermissionDenied`] si la règle udev de `packaging/`
+    /// n'est pas installée.
+    pub fn open(self) -> io::Result<OpenController> {
+        let fichier = OpenOptions::new().write(true).open(&self.path)?;
+        Ok(OpenController {
+            controller: self,
+            fichier,
+        })
+    }
+}
+
+impl OpenController {
+    /// Écrit une trame sur le descripteur déjà ouvert.
+    pub fn write_frame(&mut self, frame: &Frame) -> io::Result<()> {
+        self.fichier.write_all(frame)?;
+        self.fichier.flush()
+    }
 }
 
 /// Nombre de trames lues avant d'abandonner l'attente d'une réponse.

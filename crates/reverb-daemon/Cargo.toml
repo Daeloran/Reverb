@@ -1,18 +1,18 @@
 [package]
-name = "reverb-cli"
+name = "reverb-daemon"
 version = "0.1.0"
-description = "Pilotage en ligne de commande des contrôleurs RGB NZXT"
+description = "Démon Reverb — détient les périphériques et fait tourner la boucle de rendu"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [lib]
-name = "reverb_cli"
+name = "reverb_daemon"
 path = "src/lib.rs"
 
 [[bin]]
-name = "reverb"
+name = "reverbd"
 path = "src/main.rs"
 
 [dependencies]

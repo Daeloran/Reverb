@@ -12,6 +12,7 @@
 
 pub mod color;
 pub mod frame;
+pub mod ipc;
 pub mod led;
 pub mod mode;
 pub mod position;

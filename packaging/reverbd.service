@@ -1,0 +1,50 @@
+# Service du démon Reverb.
+#
+# Installation :
+#   sudo groupadd -f reverb && sudo usermod -aG reverb "$USER"
+#   cargo build --release
+#   sudo install -m 0755 target/release/reverbd /usr/local/bin/
+#   sudo install -m 0644 packaging/reverbd.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now reverbd
+#
+# Il faut se déconnecter/reconnecter pour que l'appartenance au groupe prenne.
+
+[Unit]
+Description=Reverb — éclairage RGB et ventilateurs
+Documentation=https://github.com/Daeloran/Reverb
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/reverbd
+
+# `User=root` : les écritures hwmon des ventilateurs l'exigent, et rien
+# d'autre. L'alternative — une règle udev qui `chmod` les fichiers `pwm*` —
+# accorderait le contrôle des ventilateurs à un groupe en permanence, connecté
+# ou non : ce qu'on a refusé pour /dev en choisissant `uaccess`.
+User=root
+
+# `Group=reverb` avec `User=root` : le processus garde l'uid 0, donc le droit
+# d'écrire dans sysfs, mais crée ses fichiers avec le groupe `reverb`. C'est ce
+# qui donne au socket le bon groupe SANS `chown` après coup — et donc sans la
+# fenêtre pendant laquelle il serait ouvert à tous. Le mode obtenu est 0770 ;
+# le bit d'exécution n'a aucun sens sur un socket, seul compte le refus des
+# « autres ».
+Group=reverb
+
+# systemd crée et nettoie /run/reverb. Avec l'UMask, le socket naît en 0660
+# root:reverb, du premier instant.
+RuntimeDirectory=reverb
+RuntimeDirectoryMode=0750
+UMask=0007
+
+# ⚠️ Ne PAS ajouter `ProtectKernelTunables=yes` : il monte /sys en lecture
+# seule, ce qui coupe précisément le réglage des ventilateurs.
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

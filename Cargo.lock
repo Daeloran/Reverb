@@ -6,6 +6,22 @@ version = 4
 name = "reverb-cli"
 version = "0.1.0"
 dependencies = [
+ "reverb-hw",
+ "reverb-proto",
+]
+
+[[package]]
+name = "reverb-daemon"
+version = "0.1.0"
+dependencies = [
+ "reverb-hw",
+ "reverb-proto",
+]
+
+[[package]]
+name = "reverb-hw"
+version = "0.1.0"
+dependencies = [
  "reverb-proto",
 ]
 

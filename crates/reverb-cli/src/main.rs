@@ -9,10 +9,10 @@ use std::process::ExitCode;
 use reverb_cli::cli::{
     self, ActionEcran, ActionRam, ActionVentilateur, Cible, CibleCanal, CibleRam, Command,
 };
-use reverb_cli::hidraw::{self, Controller};
-use reverb_cli::hwmon::{self, FanChannel, Percent};
-use reverb_cli::i2c;
-use reverb_cli::usbfs;
+use reverb_hw::hidraw::{self, Controller};
+use reverb_hw::hwmon::{self, FanChannel, Percent};
+use reverb_hw::i2c;
+use reverb_hw::usbfs;
 use reverb_proto::ram::{self, SlotAddress};
 use reverb_proto::{Apply, Brightness, Mode, Model, Position, Rgb, frame, screen};
 
@@ -26,6 +26,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    if let Err(message) = ceder_le_pas(&commande) {
+        eprintln!("erreur : {message}");
+        return ExitCode::FAILURE;
+    }
 
     let resultat = match commande {
         Command::List => lister(),
@@ -66,6 +71,76 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Chemin du socket du démon.
+const SOCKET_DU_DEMON: &str = "/run/reverb/reverbd.sock";
+
+/// Refuse d'écrire sur le matériel quand le démon tourne.
+///
+/// L'ADR-002 pose qu'un seul processus doit détenir les bus. Rien dans le noyau
+/// ne l'impose — plusieurs processus peuvent ouvrir le même `/dev/hidraw*` ou
+/// le même `/dev/i2c-*` — et deux écritures SMBus qui se croisent corrompent
+/// une transaction (SPEC-CORSAIR-RAM §6).
+///
+/// Le refus ne porte que sur les commandes qui **écrivent**. Énumérer reste
+/// permis, et `screen` aussi : le démon ne tient pas l'écran, précisément pour
+/// que cet outil garde de quoi diagnostiquer quand la fenêtre ne suffit pas.
+///
+/// La présence du fichier ne suffit pas à conclure — un socket peut survivre à
+/// un arrêt brutal. On se connecte : c'est le seul test qui distingue un démon
+/// vivant d'un fichier mort.
+///
+/// ⚠️ **Un échec de connexion ne veut pas dire « pas de démon ».** Un
+/// utilisateur absent du groupe `reverb` se voit refuser la connexion par un
+/// démon parfaitement vivant. Traiter cet échec comme une absence laisserait
+/// précisément cet utilisateur écrire sur un bus déjà tenu — l'inverse de ce
+/// que cette fonction protège. On ne conclut donc à l'absence que sur les deux
+/// erreurs qui la signifient vraiment : pas de fichier, ou personne à l'écoute.
+fn ceder_le_pas(commande: &Command) -> Result<(), String> {
+    use std::io::ErrorKind;
+
+    let ecrit = matches!(
+        commande,
+        Command::Set { .. }
+            | Command::Paint { .. }
+            | Command::Fan { .. }
+            | Command::Curve { .. }
+            | Command::Ram { .. }
+    );
+    if !ecrit {
+        return Ok(());
+    }
+
+    match std::os::unix::net::UnixStream::connect(SOCKET_DU_DEMON) {
+        // Aucun socket, ou un fichier mort dont plus personne n'écoute.
+        Err(erreur)
+            if matches!(
+                erreur.kind(),
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(erreur) => {
+            return Err(format!(
+                "impossible de savoir si le démon tourne : {SOCKET_DU_DEMON} : {erreur}.\n  \
+                 Refus par précaution — écrire sur un bus peut-être déjà tenu corromprait une \
+                 transaction.\n  \
+                 Si c'est un refus de permission, il manque l'appartenance au groupe :\n    \
+                 sudo usermod -aG reverb \"$USER\"   (puis rouvrir la session)"
+            ));
+        }
+        Ok(_) => {}
+    }
+
+    Err(format!(
+        "le démon tourne et détient les bus — cet outil refuse d'écrire en même temps.\n  \
+         Passer par lui :\n    \
+         echo 'light all ff00ff' | socat - UNIX-CONNECT:{SOCKET_DU_DEMON}\n  \
+         ou l'arrêter le temps d'un diagnostic :\n    \
+         sudo systemctl stop reverbd"
+    ))
 }
 
 /// Énumère les contrôleurs et les positions que chacun pilote.

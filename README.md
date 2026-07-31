@@ -28,7 +28,8 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Protocole RAM Corsair | ✅ décodé, adresses `0x18`–`0x1b`, éclairage reproduit |
 | Cartographie physique des 10 canaux | ✅ établie |
 | Outil de validation en ligne de commande | ✅ les trois cibles pilotées |
-| Démon et interface Slint | ⏳ à faire |
+| Démon | ✅ 30 img/s tenus, éclairage sans fenêtre |
+| Interface Slint | ⏳ à faire |
 
 ## Ce que les protocoles permettent
 
@@ -56,14 +57,52 @@ reverb-gui  (fenêtre Slint)
    ▼
 reverb-daemon
    ├── write()      ──►  /dev/hidraw*        ventilateurs, GRB
-   ├── usbfs ioctl  ──►  1e71:300c bulk      écran Kraken, BGR
    └── I2C_SMBUS    ──►  /dev/i2c-8 0x18..1b RAM Corsair, RGB
-        │
-   reverb-proto  (encodage des trames, conversions, CRC-8 — pur, testable)
+
+reverb  (outil de validation, garde l'usbfs ──► 1e71:300c bulk, écran Kraken, BGR)
+   │
+   ├── reverb-hw     (les quatre chemins d'E/S — hidraw, usbfs, i2c, hwmon)
+   └── reverb-proto  (encodage des trames, conversions, CRC-8, protocole IPC — pur)
 ```
 
 ⚠️ **Trois ordres de composantes différents** : ventilateurs en **GRB**, écran en **BGR**,
 RAM en **RGB**. Une erreur ici ne produit aucun message, juste une mauvaise couleur.
+
+## Le démon
+
+```bash
+sudo groupadd -f reverb && sudo usermod -aG reverb "$USER"   # puis se reconnecter
+cargo build --release
+sudo install -m 0755 target/release/reverbd /usr/local/bin/
+sudo install -m 0644 packaging/reverbd.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now reverbd
+
+echo 'status'            | socat - UNIX-CONNECT:/run/reverb/reverbd.sock
+echo 'light all ff00ff'  | socat - UNIX-CONNECT:/run/reverb/reverbd.sock
+echo 'animate vague'     | socat - UNIX-CONNECT:/run/reverb/reverbd.sock
+```
+
+**Il existe parce qu'ouvrir coûte cher.** Mesuré sur SHYNAEL : ouvrir un `/dev/hidraw*` prend
+**51 ms**, y écrire une trame de 64 octets **~1 ms**. Le coût est entièrement dans l'ouverture.
+Un outil qui rouvre à chaque trame plafonne à une image et demie par seconde ; un processus qui
+garde ses descripteurs tient trente images.
+
+| | Coût d'une image complète | Cadence |
+|---|---|---|
+| `reverb paint --all` (rouvre douze fois) | 643 ms | 1,5 img/s |
+| démon, descripteurs tenus | 52 ms | 21 img/s |
+| démon, + les cibles inchangées sautées | **12 ms** | **31 img/s** |
+
+Le second saut vient de ce qu'aucune cible n'a de watchdog : réécrire une couleur identique ne
+fait que consommer du bus. Dans une comète, 24 LED sur 124 sont allumées.
+
+Le SMBus est le plancher : un bloc de 32 octets à 100 kHz prend ~3 ms **sur le fil**, et quatre
+barrettes coûtaient à elles seules 21,7 ms des 52.
+
+Tant que le démon tourne, `reverb set|paint|ram|fan|curve` **refuse d'écrire** — un seul processus
+détient les bus (ADR-002), et deux écritures SMBus qui se croisent corrompent une transaction.
+`reverb list|modes|fans|screen` continuent de marcher : le démon ne tient pas l'écran, justement
+pour garder de quoi diagnostiquer.
 
 ## Prérequis
 

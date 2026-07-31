@@ -1,0 +1,14 @@
+[package]
+name = "reverb-hw"
+version = "0.1.0"
+description = "Les quatre chemins d'entrée/sortie vers le matériel piloté par Reverb"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+reverb-proto = { path = "../reverb-proto" }
+
+[lints]
+workspace = true
