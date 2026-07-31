@@ -395,6 +395,11 @@ constant, `1 → 8` puis retour à `1`.
 > physique du ventilateur dans le boîtier. Un motif qui suppose « la LED 1 est en haut » sera faux
 > sur un ventilateur monté autrement. Seul l'**ordre** est une donnée du protocole ; l'origine et
 > le sens apparent sont une donnée de montage, et devront être configurables par ventilateur.
+>
+> ✅ **Mesuré le 2026-07-31 sur SHYNAEL** — voir [`GEOMETRIE.md`](GEOMETRIE.md). Le pas s'est
+> révélé régulier (45°), et deux ventilateurs voisins du même groupe montés à un quart de tour
+> l'un de l'autre. Ces valeurs appartiennent à **une machine** et non au protocole : elles vivent
+> donc hors de cette spec, et se changent par une commande.
 
 ---
 
