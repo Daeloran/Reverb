@@ -48,6 +48,28 @@ pub enum Command {
     },
     /// Pilote l'écran du Kraken.
     Screen { action: ActionEcran },
+    /// Pilote l'éclairage de la RAM Corsair.
+    Ram { action: ActionRam },
+}
+
+/// Ce qu'on demande à la RAM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionRam {
+    /// Énumère les emplacements et leurs adresses, sans ouvrir `/dev/i2c-*`.
+    Lister,
+    /// Une couleur, sur toutes les barrettes ou une seule.
+    Couleur { cible: CibleRam, color: Rgb },
+    /// Onze couleurs, une par LED, sur une barrette.
+    Couleurs { slot: usize, colors: Vec<Rgb> },
+    /// Vague animée sur les quatre barrettes, jusqu'à Ctrl-C.
+    Animer,
+}
+
+/// Quelles barrettes sont visées.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CibleRam {
+    Toutes,
+    Une(usize),
 }
 
 /// Ce qu'on demande à l'écran.
@@ -115,6 +137,26 @@ USAGE :
     reverb screen --brightness <0-100>
     reverb screen --image <FICHIER.raw> [--once]
     reverb screen --mire [--once]
+    reverb ram
+    reverb ram   --all|--slot <0-3> --color <HEX>
+    reverb ram   --slot <0-3> --colors <11 HEX>
+    reverb ram   --all --animate
+
+OPTIONS de « ram » — RAM Corsair sur SMBus (aucun droit root nécessaire) :
+    (sans option)         énumère les barrettes et leurs adresses.
+                          N'ouvre même pas /dev/i2c-*
+    --all                 les quatre barrettes
+    --slot <0-3>          une barrette, numérotée comme iCUE la journalise
+    --color <HEX>         une couleur pour les 11 LED visées
+    --colors <LISTE>      onze couleurs séparées par des virgules, une par LED.
+                          Exige « --slot » : onze couleurs décrivent une
+                          barrette précise
+    --animate             vague animée, jusqu'à Ctrl-C.
+                          ⚠️ contrairement aux ventilateurs et à l'écran, le
+                          contrôleur de la RAM ne sait PAS animer seul : c'est
+                          l'hôte qui recalcule et réécrit chaque image
+    ⚠️ Une couleur fixe tient sans hôte — ce contrôleur n'a pas de watchdog.
+       La commande rend la main et l'éclairage reste.
 
 OPTIONS de « screen » — écran du Kraken (aucun droit root nécessaire) :
     (sans option)         affiche résolution, luminosité et orientation,
@@ -188,6 +230,8 @@ EXEMPLES :
     sudo reverb fan --all --pwm 40
     sudo reverb fan --channel kraken2023elite:pump-speed --pwm 80 --manual
     sudo reverb fan --channel kraken2023elite:pump-speed --auto
+    reverb ram --all --color ff00ff
+    reverb ram --slot 2 --colors ff0000,ff4000,ff8000,ffc000,ffff00,c0ff00,80ff00,40ff00,00ff00,00ff40,00ff80
 ";
 
 /// Analyse les arguments, hors nom du programme.
@@ -213,11 +257,98 @@ where
         "fan" => parse_fan(args),
         "curve" => parse_curve(args),
         "screen" => parse_screen(args),
+        "ram" => parse_ram(args),
         autre => Err(format!(
             "sous-commande « {autre} » inconnue. \
-             Attendu : list, modes, set, paint, fans, fan, curve, screen."
+             Attendu : list, modes, set, paint, fans, fan, curve, screen, ram."
         )),
     }
+}
+
+fn parse_ram(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
+    let mut toutes = false;
+    let mut slot: Option<usize> = None;
+    let mut color: Option<Rgb> = None;
+    let mut colors: Option<Vec<Rgb>> = None;
+    let mut animate = false;
+
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--all" => toutes = true,
+            "--animate" => animate = true,
+            "--slot" => {
+                let brut = args
+                    .next()
+                    .ok_or_else(|| "« --slot » attend un numéro de barrette.".to_owned())?;
+                slot = Some(brut.trim().parse().map_err(|_| {
+                    format!("barrette « {brut} » invalide : attendu un entier de 0 à 3.")
+                })?);
+            }
+            "--color" => {
+                let brut = args
+                    .next()
+                    .ok_or_else(|| "« --color » attend une couleur hexadécimale.".to_owned())?;
+                color = Some(Rgb::from_hex(brut.trim()).map_err(|e| e.to_string())?);
+            }
+            "--colors" => {
+                let brut = args.next().ok_or_else(|| {
+                    "« --colors » attend des couleurs séparées par des virgules.".to_owned()
+                })?;
+                colors = Some(
+                    brut.split(',')
+                        .map(|c| Rgb::from_hex(c.trim()).map_err(|e| e.to_string()))
+                        .collect::<Result<Vec<Rgb>, String>>()?,
+                );
+            }
+            autre => return Err(format!("option « {autre} » inconnue.")),
+        }
+    }
+
+    // Les trois actions s'excluent. Même politique que « screen » : les
+    // enchaîner silencieusement masquerait une faute de frappe.
+    let demandes =
+        usize::from(color.is_some()) + usize::from(colors.is_some()) + usize::from(animate);
+    if demandes > 1 {
+        return Err("« --color », « --colors » et « --animate » s'excluent.".to_owned());
+    }
+    if toutes && slot.is_some() {
+        return Err("« --all » et « --slot » s'excluent.".to_owned());
+    }
+
+    let action = match (color, colors, animate) {
+        (Some(color), _, _) => ActionRam::Couleur {
+            cible: match (toutes, slot) {
+                (_, Some(slot)) => CibleRam::Une(slot),
+                (true, None) => CibleRam::Toutes,
+                (false, None) => {
+                    return Err("« --color » attend « --all » ou « --slot <0-3> ».".to_owned());
+                }
+            },
+            color,
+        },
+        // Onze couleurs décrivent une barrette précise : les appliquer aux
+        // quatre serait un choix qu'on ne peut pas deviner.
+        (_, Some(colors), _) => ActionRam::Couleurs {
+            slot: slot.ok_or_else(|| "« --colors » attend « --slot <0-3> ».".to_owned())?,
+            colors,
+        },
+        (_, _, true) => {
+            if slot.is_some() {
+                return Err("« --animate » porte sur les quatre barrettes : « --all ».".to_owned());
+            }
+            ActionRam::Animer
+        }
+        _ => {
+            if toutes || slot.is_some() {
+                return Err("il manque « --color », « --colors » ou « --animate ». \
+                     Sans option, « reverb ram » se contente d'énumérer les barrettes."
+                    .to_owned());
+            }
+            ActionRam::Lister
+        }
+    };
+
+    Ok(Command::Ram { action })
 }
 
 fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {

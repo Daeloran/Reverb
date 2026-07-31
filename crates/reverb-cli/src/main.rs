@@ -6,10 +6,14 @@
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 
-use reverb_cli::cli::{self, ActionEcran, ActionVentilateur, Cible, CibleCanal, Command};
+use reverb_cli::cli::{
+    self, ActionEcran, ActionRam, ActionVentilateur, Cible, CibleCanal, CibleRam, Command,
+};
 use reverb_cli::hidraw::{self, Controller};
 use reverb_cli::hwmon::{self, FanChannel, Percent};
+use reverb_cli::i2c;
 use reverb_cli::usbfs;
+use reverb_proto::ram::{self, SlotAddress};
 use reverb_proto::{Apply, Brightness, Mode, Model, Position, Rgb, frame, screen};
 
 fn main() -> ExitCode {
@@ -52,6 +56,7 @@ fn main() -> ExitCode {
             force,
         } => poser_courbe(&canal, &points, force),
         Command::Screen { action } => piloter_ecran(action),
+        Command::Ram { action } => piloter_ram(action),
     };
 
     match resultat {
@@ -607,6 +612,189 @@ fn diffuser(image: &[u8], once: bool) -> Result<(), String> {
         ));
         envoyer()?;
     }
+}
+
+/// Cadence de l'animation de la RAM.
+///
+/// **Un choix, pas une observation** : la spec §4.4 dit seulement qu'iCUE
+/// réémet « plusieurs fois par seconde ». Chaque image coûte huit transferts
+/// (deux blocs × quatre barrettes) ; 10 Hz suffit à une vague et limite la
+/// contention sur un bus que `spd5118` partage. À revoir si le rendu saccade.
+const INTERVALLE_ANIMATION_MS: u64 = 100;
+
+/// Longueur de la traînée de la comète, en LED.
+const TRAINEE: u32 = 12;
+
+fn piloter_ram(action: ActionRam) -> Result<(), String> {
+    match action {
+        ActionRam::Lister => {
+            lister_barrettes();
+            Ok(())
+        }
+        ActionRam::Couleur { cible, color } => {
+            let barrettes = barrettes_visees(cible)?;
+            let couleurs = [color; ram::LEDS_PER_STICK];
+            let mut bus = ouvrir_bus()?;
+            for barrette in &barrettes {
+                ecrire_barrette(&mut bus, *barrette, &couleurs)?;
+            }
+            println!(
+                "{} barrette(s) en #{:02x}{:02x}{:02x}. \
+                 La couleur tient sans hôte — ce contrôleur n'a pas de watchdog.",
+                barrettes.len(),
+                color.r,
+                color.g,
+                color.b
+            );
+            Ok(())
+        }
+        ActionRam::Couleurs { slot, colors } => {
+            let barrette = SlotAddress::new(slot).map_err(|e| e.to_string())?;
+            // Refusée AVANT d'ouvrir le moindre périphérique.
+            ram::payload(&colors).map_err(|e| e.to_string())?;
+
+            let mut bus = ouvrir_bus()?;
+            ecrire_barrette(&mut bus, barrette, &colors)?;
+            println!("{barrette} : {} LED peintes une à une.", colors.len());
+            Ok(())
+        }
+        ActionRam::Animer => animer(),
+    }
+}
+
+/// Énumère les barrettes sans ouvrir `/dev/i2c-*`.
+///
+/// L'adaptateur est cherché, mais seulement dans sysfs : lire un nom n'est pas
+/// parler sur le bus. Le §6 de la spec suggère de sonder `0x18`–`0x1b` pour
+/// identifier le bon adaptateur — **on ne le fait pas**, un scan en lecture
+/// seule ayant déjà altéré l'éclairage par défaut de cette RAM.
+fn lister_barrettes() {
+    println!(
+        "RAM Corsair — {} barrettes, {} LED chacune",
+        ram::SLOT_COUNT,
+        ram::LEDS_PER_STICK
+    );
+    for barrette in SlotAddress::ALL {
+        println!(
+            "  emplacement {}   adresse SMBus {:#04x}",
+            barrette.slot(),
+            barrette.address()
+        );
+    }
+
+    println!();
+    match i2c::find_adapter() {
+        Ok(chemin) => println!(
+            "Adaptateur : {} — « {} »",
+            chemin.display(),
+            i2c::ADAPTER_NAME
+        ),
+        Err(erreur) => println!("Adaptateur : introuvable.\n{erreur}"),
+    }
+}
+
+fn barrettes_visees(cible: CibleRam) -> Result<Vec<SlotAddress>, String> {
+    match cible {
+        CibleRam::Toutes => Ok(SlotAddress::ALL.to_vec()),
+        CibleRam::Une(slot) => Ok(vec![SlotAddress::new(slot).map_err(|e| e.to_string())?]),
+    }
+}
+
+fn ouvrir_bus() -> Result<i2c::Bus, String> {
+    let chemin =
+        i2c::find_adapter().map_err(|e| format!("adaptateur SMBus non identifié : {e}"))?;
+    i2c::Bus::open(&chemin).map_err(|e| {
+        format!(
+            "{} inaccessible : {e}.\n  \
+             Si c'est un refus de permission, installer la règle udev :\n    \
+             sudo cp packaging/60-reverb.rules /etc/udev/rules.d/ && \
+             sudo udevadm control --reload && sudo udevadm trigger",
+            chemin.display()
+        )
+    })
+}
+
+/// Écrit les onze couleurs d'une barrette : deux blocs, vers la même adresse.
+fn ecrire_barrette(
+    bus: &mut i2c::Bus,
+    barrette: SlotAddress,
+    colors: &[Rgb],
+) -> Result<(), String> {
+    let (tete, queue) = ram::transfers(colors).map_err(|e| e.to_string())?;
+
+    bus.target(barrette).map_err(|erreur| {
+        let indice = if erreur.kind() == std::io::ErrorKind::ResourceBusy {
+            "\n  Un pilote noyau détient cette adresse. C'est le garde-fou qui joue : \
+             Reverb emploie I2C_SLAVE, qui refuse, et non I2C_SLAVE_FORCE, qui passerait outre."
+        } else {
+            ""
+        };
+        format!("{barrette} injoignable : {erreur}{indice}")
+    })?;
+
+    // Les deux transferts se suivent immédiatement (spec §4.3). Rien entre eux :
+    // une barrette qui reçoit le premier bloc sans le second affiche un état
+    // dont le CRC n'est jamais arrivé.
+    bus.write(&tete)
+        .map_err(|e| format!("{barrette}, bloc {:#04x} refusé : {e}", ram::REGISTER_HEAD))?;
+    bus.write(&queue)
+        .map_err(|e| format!("{barrette}, bloc {:#04x} refusé : {e}", ram::REGISTER_TAIL))?;
+    Ok(())
+}
+
+/// Anime la RAM, jusqu'à ce qu'on arrête la commande.
+///
+/// ⚠️ **C'est la seule contrainte temps réel du projet.** Les ventilateurs NZXT
+/// animent seuls, l'écran du Kraken affiche la température seul, la RAM non :
+/// son contrôleur ne fait qu'afficher le dernier état reçu (spec §4.5, testé et
+/// négatif pour le mode `onDevice`).
+///
+/// Aucun gestionnaire de signal : le contrôleur n'ayant pas de watchdog, la
+/// mort du processus laisse la dernière image affichée. C'est exactement le
+/// comportement attendu, et il ne coûte pas une ligne.
+fn animer() -> Result<(), String> {
+    let mut bus = ouvrir_bus()?;
+    println!(
+        "Vague sur les {} barrettes, une image toutes les {INTERVALLE_ANIMATION_MS} ms.\n\
+         Ctrl-C pour arrêter — la dernière image reste affichée.",
+        ram::SLOT_COUNT
+    );
+
+    let mut pas: u32 = 0;
+    loop {
+        for barrette in SlotAddress::ALL {
+            ecrire_barrette(&mut bus, barrette, &vague(pas, barrette.slot()))?;
+        }
+        pas = pas.wrapping_add(1);
+        std::thread::sleep(std::time::Duration::from_millis(INTERVALLE_ANIMATION_MS));
+    }
+}
+
+/// Une image de la vague : une comète qui parcourt les 44 LED des quatre
+/// barrettes, tête en tête de la première.
+///
+/// **Cette animation est de nous, pas de la capture** — c'est pourquoi elle vit
+/// ici et non dans `reverb-proto`, dont la règle est de ne rien inventer. Seule
+/// sa *nécessité* est observée : le §4.1.1 montre bien une vague qui s'éteint
+/// LED par LED, ce qui prouve que les onze sont adressables séparément.
+fn vague(pas: u32, slot: usize) -> [Rgb; ram::LEDS_PER_STICK] {
+    const TOTAL: u32 = (ram::SLOT_COUNT * ram::LEDS_PER_STICK) as u32;
+
+    let tete = pas % TOTAL;
+    let mut couleurs = [Rgb::BLACK; ram::LEDS_PER_STICK];
+
+    for (led, couleur) in couleurs.iter_mut().enumerate() {
+        let position = (slot * ram::LEDS_PER_STICK + led) as u32;
+        // Recul derrière la tête, sur l'anneau des 44 LED.
+        let recul = (TOTAL + position - tete) % TOTAL;
+        if recul >= TRAINEE {
+            continue;
+        }
+        let intensite = (255 - recul * 255 / TRAINEE) as u8;
+        *couleur = Rgb::new(intensite, intensite / 3, intensite);
+    }
+
+    couleurs
 }
 
 /// Offset du verdict dans un accusé du Kraken.

@@ -1,4 +1,4 @@
-# Règles udev de Reverb — accès sans root aux périphériques NZXT pilotés.
+# Règles udev de Reverb — accès sans root aux périphériques pilotés.
 #
 # Installation :
 #   sudo cp packaging/60-reverb.rules /etc/udev/rules.d/
@@ -20,7 +20,7 @@
 # Pour le Kraken, interroger le nœud /dev/bus/usb/… : la règle porte sur le
 # périphérique USB, pas sur un nœud hidraw.
 #
-# Une règle par ligne, sans structure de garde (`GOTO` / `LABEL`) : à trois
+# Une règle par ligne, sans structure de garde (`GOTO` / `LABEL`) : à quatre
 # règles, le saut coûte plus en lisibilité qu'il ne fait gagner à udev.
 
 # Contrôleurs d'éclairage — commandes HID sur /dev/hidraw*.
@@ -34,3 +34,18 @@ SUBSYSTEMS=="usb|hidraw", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2012", TAG
 # (docs/SPEC-KRAKEN-LCD.md §1) : c'est le nœud /dev/bus/usb/… qu'il faut ouvrir,
 # d'où `SUBSYSTEM` au singulier.
 SUBSYSTEM=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c", TAG+="uaccess", TAG+="reverb"
+
+# RAM Corsair — l'éclairage passe par SMBus, pas par USB : il n'y a ni idVendor
+# ni idProduct à filtrer, seulement un adaptateur i2c à nommer
+# (docs/SPEC-CORSAIR-RAM.md §3).
+#
+# ⚠️ Un seul adaptateur, nommé. OpenRGB ouvre `KERNEL=="i2c-[0-99]*"`, c'est-à-dire
+# TOUS les bus de la machine — ceux du GPU compris. On ne reproduit pas : ce bus
+# porte les hubs SPD des barrettes en 0x50–0x53, et un accès de trop y corrompt
+# un DIMM.
+#
+# Le nom est celui du bus où le noyau a lié `spd5118` aux quatre hubs SPD
+# (8-0050…8-0053) : c'est donc bien celui des barrettes, établi sans un octet
+# émis. `i2c-piix4` en enregistre deux autres, dont un homonyme « port 2 at 0b00 »
+# que la seule base d'E/S ne distingue pas.
+SUBSYSTEM=="i2c-dev", ATTR{name}=="SMBus PIIX4 adapter port 0 at 0b00", TAG+="uaccess", TAG+="reverb"

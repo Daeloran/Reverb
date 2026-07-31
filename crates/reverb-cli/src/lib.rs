@@ -4,4 +4,5 @@
 pub mod cli;
 pub mod hidraw;
 pub mod hwmon;
+pub mod i2c;
 pub mod usbfs;
