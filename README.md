@@ -142,6 +142,17 @@ ramenée à sa position le long de la direction demandée, si bien qu'une onde q
 même temps deux LED à la même hauteur — quels que soient leur ventilateur, leur barrette et leur
 numéro d'ordre. C'est ce que la [géométrie mesurée](docs/GEOMETRIE.md) rend possible.
 
+⚠️ **Une onde purement plane aplatit ce qui n'a pas d'épaisseur dans sa direction.** Six
+ventilateurs sur dix sont couchés : leurs vingt-quatre LED sont exactement à la même hauteur, et
+`bas-haut` les allumerait d'un seul bloc. Les trois du radiateur subiraient le même sort en
+`avant-arriere`. Cinq familles ajoutent donc un **relief** — l'angle propre de chaque LED sur son
+anneau, qui fait tourner un ventilateur sur lui-même par-dessus le mouvement d'ensemble, et que
+l'orientation mesurée déphase d'un ventilateur à l'autre.
+
+`vague` s'en abstient, seule du catalogue : elle *est* l'onde plane, et la démonstration que le
+boîtier et la RAM sont synchronisés dans l'espace. La direction par défaut est `horaire`, la seule
+où les dix ventilateurs ont tous de l'épaisseur.
+
 ### La géométrie
 
 ```bash

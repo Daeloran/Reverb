@@ -4,7 +4,7 @@
 //! le boîtier reste noir alors que le démon écrit, la question est de savoir ce
 //! qu'il écrit, et ce programme y répond sans matériel.
 //!
-//! `cargo run --release --example apercu -p reverb-anim -- [animation] [pas]`
+//! `cargo run --release --example apercu -p reverb-anim -- [animation] [pas] [direction]`
 
 use reverb_anim::{Animation, Geometrie, Reglages};
 use reverb_proto::Position;
@@ -16,13 +16,22 @@ fn main() {
         .next()
         .and_then(|brut| brut.parse().ok())
         .unwrap_or_default();
+    let direction = args.next();
 
     let animation = Animation::par_nom(&nom).expect("animation du catalogue");
     let geometrie = Geometrie::mesuree();
-    let reglages = Reglages::default();
+    let reglages = match &direction {
+        Some(slug) => animation
+            .reglages(&[("direction".to_owned(), slug.clone())])
+            .expect("direction connue"),
+        None => Reglages::default(),
+    };
     let image = animation.image(&geometrie, &reglages, pas);
 
-    println!("« {nom} » au pas {pas}, réglages par défaut :\n");
+    println!(
+        "« {nom} » au pas {pas}, direction {} :\n",
+        direction.as_deref().unwrap_or("par défaut")
+    );
     for (position, couleurs) in &image.ventilateurs {
         let _ = position;
         print!("{:<18}", position.slug());

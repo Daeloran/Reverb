@@ -114,7 +114,13 @@ impl Default for Reglages {
         Reglages {
             couleur: Rgb::new(0xff, 0x40, 0xff),
             vitesse: 3,
-            direction: Direction::BasHaut,
+            // `horaire` et non `bas-haut` : c'est la seule direction où les dix
+            // ventilateurs ont tous de l'épaisseur. Six d'entre eux sont
+            // couchés — une onde verticale les traverse d'un bloc, et trois
+            // autres sont plaqués dans le plan du radiateur, qu'une onde
+            // avant-arrière aplatit de même. Le tour du boîtier n'aplatit
+            // personne.
+            direction: Direction::Horaire,
         }
     }
 }
@@ -283,11 +289,16 @@ impl Animation {
 
         let mut ventilateurs = [(Position::BasGauche, [Rgb::BLACK; LEDS_PER_FAN as usize]); 10];
         for (place, position) in ventilateurs.iter_mut().zip(Position::ALL) {
+            let orientation = geometrie.orientation(position);
             let mut couleurs = [Rgb::BLACK; LEDS_PER_FAN as usize];
             for (led, couleur) in couleurs.iter_mut().enumerate() {
                 if let Some(point) = geometrie.led_ventilateur(position, led) {
                     let projection = projection(reglages.direction, point, bornes);
-                    *couleur = self.peindre(reglages, projection, temps);
+                    // Le rang de la LED sur son propre anneau, d'après
+                    // l'orientation mesurée : c'est ce qui fait tourner un
+                    // ventilateur sur lui-même en plus du mouvement d'ensemble.
+                    let propre = f32::from(orientation.angle_led(led)) / 360.0;
+                    *couleur = self.peindre(reglages, projection, propre, temps);
                 }
             }
             *place = (position, couleurs);
@@ -295,10 +306,13 @@ impl Animation {
 
         let mut barrettes = [[Rgb::BLACK; LEDS_PER_STICK]; SLOT_COUNT];
         for (slot, couleurs) in barrettes.iter_mut().enumerate() {
+            // Une barrette n'a pas d'anneau : son rang propre est son emplacement,
+            // ce qui suffit à ce que les quatre ne battent pas à l'unisson.
+            let propre = slot as f32 / SLOT_COUNT as f32;
             for (led, couleur) in couleurs.iter_mut().enumerate() {
                 if let Some(point) = geometrie.led_barrette(slot, led) {
                     let projection = projection(reglages.direction, point, bornes);
-                    *couleur = self.peindre(reglages, projection, temps);
+                    *couleur = self.peindre(reglages, projection, propre, temps);
                 }
             }
         }
@@ -309,22 +323,47 @@ impl Animation {
         }
     }
 
-    /// La couleur d'une LED, connaissant sa projection et l'instant.
+    /// La couleur d'une LED, connaissant sa place dans le boîtier et l'instant.
     ///
-    /// Tout le catalogue passe par ici, et rien d'autre n'y entre : une LED ne
-    /// sait ni son numéro ni sur quel organe elle est montée. C'est ce qui
-    /// rend une onde synchronisée à travers le boîtier — et ce qui rend le
-    /// contraire impossible à écrire par inadvertance.
-    fn peindre(&self, reglages: &Reglages, projection: f32, temps: f32) -> Rgb {
+    /// `projection` est sa position le long de la direction demandée ; `propre`
+    /// est son rang sur son propre organe — l'angle de la LED sur son anneau,
+    /// l'emplacement d'une barrette.
+    ///
+    /// ## Pourquoi `propre` existe, et pourquoi `vague` ne s'en sert pas
+    ///
+    /// Une onde purement plane éclaire d'un seul bloc tout ce qui se trouve
+    /// dans un même plan d'égale phase. Or **six ventilateurs sur dix sont
+    /// couchés** : les vingt-quatre LED du plancher sont exactement à la même
+    /// hauteur, et une onde `bas-haut` les allume ensemble, d'une seule
+    /// couleur. En `avant-arriere`, ce sont les trois du radiateur, plaqués
+    /// dans un même plan vertical. Constaté à l'œil le 2026-07-31.
+    ///
+    /// Ce n'est pas un défaut de calcul, c'est la géométrie du boîtier : une
+    /// onde plane ne peut pas dégrader ce qui n'a aucune épaisseur dans sa
+    /// direction. Le `propre` fait tourner chaque anneau sur lui-même par
+    /// dessus le mouvement d'ensemble, ce qui rend son relief à un ventilateur
+    /// que la direction aplatit — et, l'orientation étant mesurée par
+    /// ventilateur, deux voisins montés différemment ne tournent pas en phase.
+    ///
+    /// **`vague` s'en abstient**, seule du catalogue : elle est l'onde plane, et
+    /// la démonstration que le boîtier et la RAM sont bien synchronisés dans
+    /// l'espace. Les cinq autres ont du relief.
+    fn peindre(&self, reglages: &Reglages, projection: f32, propre: f32, temps: f32) -> Rgb {
+        // Assez pour donner du relief, trop peu pour noyer la direction : au
+        // tiers d'un cycle, un anneau complet se lit encore comme un détail du
+        // motif d'ensemble et non comme un motif concurrent.
+        const RELIEF: f32 = 0.3;
+        let place = fraction(projection + RELIEF * propre);
+
         match self.famille {
-            // Une sinusoïde le long de la direction : le motif le plus lisible,
-            // et le seul du lot dont la couleur ne dépende que de la projection.
+            // Une sinusoïde le long de la direction, et rien d'autre : le seul
+            // motif du lot dont la couleur ne dépende que de la projection.
             Famille::Vague => teinter(reglages.couleur, (1.0 + cycle(projection - temps)) / 2.0),
 
             // Une tête vive suivie d'une traînée qui s'éteint. Le reste est
             // noir, ce que le cache de cibles inchangées du démon apprécie.
             Famille::Comete => {
-                let recul = fraction(projection - temps);
+                let recul = fraction(place - temps);
                 let traineee = 0.25;
                 if recul >= traineee {
                     Rgb::BLACK
@@ -336,18 +375,18 @@ impl Animation {
             // Le boîtier respire, et la respiration se propage : sans ce léger
             // retard, la direction n'aurait aucun effet et le réglage mentirait.
             Famille::Respiration => {
-                let onde = (1.0 + cycle(temps - 0.2 * projection)) / 2.0;
+                let onde = (1.0 + cycle(temps - 0.2 * place)) / 2.0;
                 teinter(reglages.couleur, 0.15 + 0.85 * onde)
             }
 
             // Le spectre déroulé le long de la direction. Seule famille à ne pas
             // accepter de couleur : elle les produit toutes.
-            Famille::ArcEnCiel => teinte_vers_rgb(fraction(projection + temps)),
+            Famille::ArcEnCiel => teinte_vers_rgb(fraction(place + temps)),
 
             // Une bande nette, pour qui préfère voir la limite bouger plutôt
             // qu'un dégradé.
             Famille::Balayage => {
-                let recul = fraction(projection - temps);
+                let recul = fraction(place - temps);
                 if recul < 0.15 {
                     reglages.couleur
                 } else {
@@ -359,8 +398,8 @@ impl Animation {
             // cycle, sans qu'aucun hasard n'entre dans un rendu qui doit rester
             // reproductible à l'identique dans la fenêtre et dans le démon.
             Famille::Braise => {
-                let lente = cycle(3.0 * temps - projection);
-                let vive = cycle(7.0 * temps + 3.0 * projection);
+                let lente = cycle(3.0 * temps - place);
+                let vive = cycle(7.0 * temps + 3.0 * place);
                 let intensite = 0.5 + 0.3 * lente + 0.2 * vive;
                 teinter(reglages.couleur, intensite.clamp(0.0, 1.0))
             }
