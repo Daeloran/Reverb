@@ -203,14 +203,31 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
         }
 
         "animate" => {
-            let [nom] = arguments[..] else {
+            let Some((nom, suite)) = arguments.split_first() else {
                 return Err(mauvais(
                     "attend un nom d'animation, ou « off » pour l'arrêter",
                 ));
             };
             Ok(Request::Animate {
-                name: (nom != ANIMATION_OFF).then(|| nom.to_owned()),
-                reglages: Vec::new(),
+                name: (*nom != ANIMATION_OFF).then(|| (*nom).to_owned()),
+                reglages: paires(suite).map_err(|raison| mauvais(&raison))?,
+            })
+        }
+
+        "geometry" => {
+            // Le premier argument est la cible **sauf** s'il porte un `=`, auquel
+            // cas c'est déjà un réglage. Sans cette règle, `geometry angle=90`
+            // ferait chercher un ventilateur nommé « angle=90 », et le message
+            // d'erreur enverrait sur une fausse piste.
+            let (cible, suite) = match arguments.split_first() {
+                Some((premier, suite)) if !premier.contains('=') => {
+                    (Some((*premier).to_owned()), suite)
+                }
+                _ => (None, &arguments[..]),
+            };
+            Ok(Request::Geometry {
+                cible,
+                reglages: paires(suite).map_err(|raison| mauvais(&raison))?,
             })
         }
 
@@ -257,15 +274,66 @@ pub fn encode_request(request: &Request) -> String {
                 color.r, color.g, color.b
             )
         }
-        Request::Animate { name, .. } => {
-            format!("animate {}", name.as_deref().unwrap_or(ANIMATION_OFF))
-        }
+        Request::Animate { name, reglages } => ecrire_paires(
+            format!(
+                "animate {}",
+                jeton(name.as_deref().unwrap_or(ANIMATION_OFF))
+            ),
+            reglages,
+        ),
         Request::Fan { channel, action } => match action {
             FanAction::Auto => format!("fan {channel} auto"),
             FanAction::Pwm(percent) => format!("fan {channel} pwm {percent}"),
         },
-        Request::Geometry { .. } => todo!("issue #19"),
+        Request::Geometry { cible, reglages } => ecrire_paires(
+            match cible {
+                Some(cible) => format!("geometry {}", jeton(cible)),
+                None => "geometry".to_owned(),
+            },
+            reglages,
+        ),
     }
+}
+
+/// Décode des arguments `clé=valeur`.
+///
+/// Le protocole **transporte** : il ne sait pas quelles clés une animation
+/// accepte, et n'a pas à le savoir. Ce qu'il vérifie est le seul contrôle
+/// possible sans cette connaissance, et il vaut la peine — une paire sans `=`
+/// est une faute de frappe (`couleur ff00ff`, l'espace au lieu du signe), une
+/// valeur vide vient d'une variable de shell non substituée. Avalées en
+/// silence, les deux donneraient une animation réglée par personne.
+fn paires(arguments: &[&str]) -> Result<Vec<(String, String)>, String> {
+    let mut paires = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        let Some((cle, valeur)) = argument.split_once('=') else {
+            return Err(format!(
+                "« {argument} » n'est pas un réglage : il faut la forme clé=valeur"
+            ));
+        };
+        if cle.is_empty() || valeur.is_empty() {
+            return Err(format!(
+                "« {argument} » n'est pas un réglage : ni la clé ni la valeur ne peuvent être vides"
+            ));
+        }
+        paires.push((cle.to_owned(), valeur.to_owned()));
+    }
+    Ok(paires)
+}
+
+/// Écrit des paires derrière un début de ligne, dans l'ordre reçu.
+///
+/// L'ordre est celui de la frappe et il ne bouge pas : c'est lui qui décide
+/// quelle clé un message d'erreur nommera en premier, et un encodeur qui
+/// trierait casserait l'aller-retour.
+fn ecrire_paires(mut ligne: String, reglages: &[(String, String)]) -> String {
+    for (cle, valeur) in reglages {
+        ligne.push(' ');
+        ligne.push_str(&jeton(cle));
+        ligne.push('=');
+        ligne.push_str(&jeton(valeur));
+    }
+    ligne
 }
 
 fn cible_eclairage(brut: &str) -> Result<LightTarget, String> {
@@ -420,7 +488,15 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
         ResponseLine::Unreadable { subject, reason } => {
             format!("unreadable {} {}", jeton(subject), reste(reason))
         }
-        ResponseLine::Geom { .. } => todo!("issue #19"),
+        // Quatre jetons, et le sens en est un : son vocabulaire est fermé
+        // (« horaire », « antihoraire »), pas du texte libre. Lui appliquer la
+        // règle du dernier champ ferait passer « geom radiateur-haut 90 horaire
+        // bidule » pour une orientation valide.
+        ResponseLine::Geom {
+            position,
+            angle,
+            sens,
+        } => format!("geom {} {angle} {}", jeton(position), jeton(sens)),
         ResponseLine::End => "end".to_owned(),
         ResponseLine::Error { message } => format!("err {}", reste(message)),
     }
@@ -483,7 +559,17 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
                 illisible("température illisible : attendu des millidegrés entiers")
             })?,
         }),
+        ["geom", position, angle, sens] => Ok(ResponseLine::Geom {
+            position: (*position).to_owned(),
+            angle: angle
+                .parse()
+                .map_err(|_| illisible("« geom » attend un angle entier en degrés"))?,
+            sens: (*sens).to_owned(),
+        }),
         ["chan", ..] => Err(illisible("« chan » attend cinq champs")),
+        ["geom", ..] => Err(illisible(
+            "« geom » attend une position, un angle et un sens",
+        )),
         ["temp", ..] => Err(illisible("« temp » attend deux champs")),
         [prefixe, ..] => Err(illisible(&format!("préfixe « {prefixe} » inconnu"))),
         [] => Err(illisible("ligne vide")),

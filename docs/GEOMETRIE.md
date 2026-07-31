@@ -44,8 +44,10 @@ Angle de la **LED 1**, en heures d'horloge relevées à l'œil, converties à ra
 | arrière | 10 h | 300° | horaire |
 
 **Deux ventilateurs au même endroit ne sont pas montés pareil.** « bas droite » diffère de ses
-deux voisins d'un quart de tour. Rien dans le protocole ne l'aurait laissé deviner — c'est
-exactement ce que la mesure était censée attraper.
+deux voisins d'un quart de tour, parce qu'il est **physiquement monté autrement**. Rien dans le
+protocole ne l'aurait laissé deviner — c'est exactement ce que la mesure était censée attraper, et
+la raison pour laquelle ces valeurs doivent rester modifiables depuis la fenêtre : un ventilateur
+démonté puis remis reprend une orientation quelconque.
 
 **Le haut tourne à l'envers, et c'est cohérent.** Un ventilateur du plancher se regarde par sa
 face supérieure, un ventilateur du plafond par sa face inférieure : deux faces opposées d'un
@@ -81,22 +83,19 @@ est estimé à 55 mm.
 Une échelle fausse d'un facteur constant ne changerait rien à ce qui s'affiche. Elles sont là pour
 que la maquette 2D de la fenêtre ait des proportions plausibles.
 
-## Ce qui reste incertain
+## L'origine des angles ✅
 
-**L'origine des angles pour les quatre ventilateurs horizontaux** (les trois du bas, les trois du
-dessus). Pour un ventilateur vertical — le radiateur, l'arrière — « midi » est sans ambiguïté :
-c'est le haut du boîtier. Pour un ventilateur couché, le plan est horizontal, et « midi » dépend
-de la direction depuis laquelle on l'a regardé : vers l'avant, vers l'arrière, ou vers un flanc.
+Pour un ventilateur **debout** — le radiateur, l'arrière — « midi » est sans ambiguïté : c'est le
+haut du boîtier.
 
-Conséquence concrète, et elle est bornée :
+Pour un ventilateur **couché** — les trois du plancher, les trois du plafond — le plan est
+horizontal, et « midi » n'a de sens que rapporté à la direction depuis laquelle on l'a regardé.
+Les six ont été relevés depuis le même point de vue, et **midi pointe vers le plateau de carte
+mère**, c'est-à-dire vers le flanc du boîtier — pas vers l'arrière.
 
-- une onde **verticale** est insensible au problème — toutes les LED d'un ventilateur couché sont
-  à la même hauteur ;
-- une onde **avant-arrière** ou une rotation seraient décalées d'un quart ou d'un demi-tour sur
-  ces six ventilateurs.
-
-C'est une donnée de configuration, donc **une commande la corrige** sans recompiler — précisément
-ce pour quoi `geometry` existe. Elle se tranchera d'un coup d'œil sur une onde avant-arrière.
+La distinction n'est pas anodine : une convention prise vers l'arrière décalerait ces six
+ventilateurs d'un quart de tour, sans effet sur une onde verticale mais bien visible sur toute
+rotation.
 
 ## Comment la changer
 

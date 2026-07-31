@@ -21,6 +21,7 @@ dependencies = [
 name = "reverb-daemon"
 version = "0.1.0"
 dependencies = [
+ "reverb-anim",
  "reverb-hw",
  "reverb-proto",
 ]

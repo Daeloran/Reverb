@@ -28,7 +28,9 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Protocole RAM Corsair | ✅ décodé, adresses `0x18`–`0x1b`, éclairage reproduit |
 | Cartographie physique des 10 canaux | ✅ établie |
 | Outil de validation en ligne de commande | ✅ les trois cibles pilotées |
-| Démon | ✅ 30 img/s tenus, éclairage sans fenêtre |
+| Démon | ✅ éclairage sans fenêtre, descripteurs tenus |
+| Géométrie du boîtier | ✅ mesurée le 2026-07-31 |
+| Catalogue d'animations | ✅ six familles paramétrables |
 | Interface Slint | ⏳ à faire |
 
 ## Ce que les protocoles permettent
@@ -62,8 +64,13 @@ reverb-daemon
 reverb  (outil de validation, garde l'usbfs ──► 1e71:300c bulk, écran Kraken, BGR)
    │
    ├── reverb-hw     (les quatre chemins d'E/S — hidraw, usbfs, i2c, hwmon)
+   ├── reverb-anim   (géométrie du boîtier + catalogue d'animations — pur)
    └── reverb-proto  (encodage des trames, conversions, CRC-8, protocole IPC — pur)
 ```
+
+`reverb-anim` est importé par le démon **et** par la future fenêtre : l'aperçu du boîtier
+affichera les images exactement calculées par le code qui écrit sur le bus, pas une
+réimplémentation qui divergerait à la première animation ajoutée d'un seul côté.
 
 ⚠️ **Trois ordres de composantes différents** : ventilateurs en **GRB**, écran en **BGR**,
 RAM en **RGB**. Une erreur ici ne produit aucun message, juste une mauvaise couleur.
@@ -87,7 +94,7 @@ echo 'animate vague'     | socat - UNIX-CONNECT:/run/reverb/reverbd.sock
 Un outil qui rouvre à chaque trame plafonne à une image et demie par seconde ; un processus qui
 garde ses descripteurs tient trente images.
 
-| | Coût d'une image complète | Cadence |
+| | Coût d'une image | Cadence |
 |---|---|---|
 | `reverb paint --all` (rouvre douze fois) | 643 ms | 1,5 img/s |
 | démon, descripteurs tenus | 52 ms | 21 img/s |
@@ -96,13 +103,57 @@ garde ses descripteurs tient trente images.
 Le second saut vient de ce qu'aucune cible n'a de watchdog : réécrire une couleur identique ne
 fait que consommer du bus. Dans une comète, 24 LED sur 124 sont allumées.
 
-Le SMBus est le plancher : un bloc de 32 octets à 100 kHz prend ~3 ms **sur le fil**, et quatre
-barrettes coûtaient à elles seules 21,7 ms des 52.
+⚠️ **Ce gain dépend de l'animation, et il disparaît quand toutes les LED changent.** Le cache ne
+saute que ce qui n'a pas bougé :
+
+| animation | cibles réécrites (sur 14) | cadence |
+|---|---|---|
+| `balayage`, `comete` | 3 à 5 | 50 à 100 img/s |
+| `vague`, `respiration`, `arc-en-ciel`, `braise` | **14** | **~20 img/s** |
+
+Vingt images par seconde n'est pas un décrochage : c'est le **plancher physique** de ce matériel
+— 29,5 ms de trames HID plus 21,6 ms de blocs SMBus, dont ~3 ms par bloc sur le fil à 100 kHz.
+Rien de logiciel n'en descend. Ces animations ont une période de quatre secondes, où vingt images
+par seconde restent continues à l'œil ; ce qui saccaderait à cette cadence, ce sont justement les
+motifs rapides — et eux tiennent 50 à 100.
+
+`cargo run --release --example densite -p reverb-anim` recalcule ce tableau sans matériel.
 
 Tant que le démon tourne, `reverb set|paint|ram|fan|curve` **refuse d'écrire** — un seul processus
 détient les bus (ADR-002), et deux écritures SMBus qui se croisent corrompent une transaction.
 `reverb list|modes|fans|screen` continuent de marcher : le démon ne tient pas l'écran, justement
 pour garder de quoi diagnostiquer.
+
+### Les animations
+
+```bash
+echo 'animate comete couleur=ff00ff vitesse=5 direction=horaire'
+echo 'animate arc-en-ciel direction=avant-arriere'
+echo 'animate off'
+```
+
+Six familles — `vague`, `comete`, `respiration`, `arc-en-ciel`, `balayage`, `braise` — chacune
+réglable par `couleur` (six chiffres hexadécimaux), `vitesse` (1 à 10) et `direction`
+(`bas-haut`, `haut-bas`, `avant-arriere`, `arriere-avant`, `horaire`, `antihoraire`).
+`arc-en-ciel` n'accepte pas de couleur : elle les produit toutes.
+
+**Un motif traverse le boîtier comme un volume, pas comme une file d'attente.** Chaque LED est
+ramenée à sa position le long de la direction demandée, si bien qu'une onde qui monte atteint en
+même temps deux LED à la même hauteur — quels que soient leur ventilateur, leur barrette et leur
+numéro d'ordre. C'est ce que la [géométrie mesurée](docs/GEOMETRIE.md) rend possible.
+
+### La géométrie
+
+```bash
+echo 'geometry'                                            # les dix orientations
+echo 'geometry bas-droite angle=210 sens=horaire'          # en corriger une
+```
+
+Le protocole ne dit **pas** où commence l'anneau de LED d'un ventilateur ni dans quel sens il
+tourne : c'est une donnée de montage (spec §5), relevée à l'œil et conservée dans
+`/etc/reverb/geometrie.conf`. Un ventilateur démonté puis remis reprend une orientation
+quelconque — d'où une commande plutôt qu'une recompilation. Le démon, qui est root, écrit le
+fichier ; **la fenêtre ne l'écrira jamais**, elle demandera par le socket.
 
 ## Prérequis
 
