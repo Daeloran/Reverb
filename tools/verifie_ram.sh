@@ -85,43 +85,43 @@ echo "   → vert"
 pause "Les QUATRE barrettes sont-elles vertes ? (oui / décrire ce qui diffère)" "couleur-toutes"
 
 echo
-echo "═══ 4. L'ordre des composantes ═══"
-echo "La spec §4.1 dit RGB, sans permutation. Si Reverb se trompait d'ordre,"
-echo "ces trois couleurs sortiraient permutées — et rien ne le signalerait."
-for c in ff0000:ROUGE 00ff00:VERT 0000ff:BLEU; do
-    echo "   → ${c#*:}"
-    "$REVERB" ram --all --color "${c%%:*}" || echo "   ❌ refusé"
-    sleep 3
+echo "═══ 4. L'ordre des composantes ET la carte des emplacements ═══"
+echo "Les quatre barrettes prennent quatre couleurs franches EN MÊME TEMPS."
+echo "Un seul coup d'œil suffit, sans rien mémoriser ni regarder le terminal."
+echo
+echo "   Attendu, en partant du CPU :  ROUGE  VERT  BLEU  BLANC"
+echo
+echo "Ce que ça départage d'un coup :"
+echo "  · l'ordre — en GRB la 1re serait verte, en BGR elle serait bleue ;"
+echo "  · la carte — l'emplacement N doit être la (N+1)ᵉ barrette depuis le CPU."
+echo
+for sc in 0:ff0000 1:00ff00 2:0000ff 3:ffffff; do
+    "$REVERB" ram --slot "${sc%%:*}" --color "${sc#*:}" >/dev/null \
+        || echo "   ❌ emplacement ${sc%%:*} refusé"
 done
-pause "Rouge, puis vert, puis bleu — dans cet ordre ? (oui / décrire)" "ordre-rgb"
+pause "Rouge, vert, bleu, blanc depuis le CPU ? (oui / décrire l'ordre vu)" "ordre-et-carte"
 
 echo
-echo "═══ 5. Une seule barrette ═══"
-"$REVERB" ram --all --color 202020 >/dev/null || true
-sleep 1
-echo "   → barrette 2 en rouge, les autres en gris sombre"
-"$REVERB" ram --slot 2 --color ff0000 || echo "   ❌ refusé"
-pause "QUELLE barrette physique s'est allumée en rouge ? (1re/2e/3e/4e depuis le CPU)" "slot-2-physique"
-
-echo
-echo "═══ 6. Les onze LED, séparément ═══"
+echo "═══ 5. Les onze LED, séparément ═══"
 echo "Un dégradé rouge → vert sur la seule barrette 2. C'est ce qui prouve que"
 echo "les onze LED sont adressables une par une (spec §4.1.1)."
+"$REVERB" ram --all --color 202020 >/dev/null || true
+sleep 1
 "$REVERB" ram --slot 2 --colors \
     ff0000,ff4000,ff8000,ffc000,ffff00,c0ff00,80ff00,40ff00,00ff00,00ff40,00ff80 \
     || echo "   ❌ refusé"
 pause "Un dégradé continu, ou onze zones identiques ? (dégradé / identiques / décrire)" "onze-led"
 
 echo
-echo "═══ 7. Pas de watchdog : la couleur survit à la commande ═══"
-echo "Aucun processus Reverb ne tourne depuis l'étape 6. La spec §4.5 (test 1)"
+echo "═══ 6. Pas de watchdog : la couleur survit à la commande ═══"
+echo "Aucun processus Reverb ne tourne depuis l'étape 5. La spec §4.5 (test 1)"
 echo "dit que l'état écrit tient indéfiniment. Vérification par l'attente."
 for i in $(seq 20 -1 1); do printf "\r   %2d s sans le moindre octet sur le bus " "$i"; sleep 1; done
 printf "\r                                              \r"
 pause "Le dégradé est-il toujours là, inchangé ? (oui/non)" "sans-watchdog"
 
 echo
-echo "═══ 8. L'animation, calculée par l'hôte ═══"
+echo "═══ 7. L'animation, calculée par l'hôte ═══"
 echo "Une comète parcourt les 44 LED des quatre barrettes. Elle tourne 15 s"
 echo "puis le script la tue — SANS lui laisser le temps de nettoyer."
 echo

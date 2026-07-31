@@ -25,9 +25,10 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 |---|---|
 | Protocole ventilateurs NZXT | ✅ décodé et validé |
 | Protocole écran Kraken | ✅ décodé, envoi d'image reproduit |
-| Protocole RAM Corsair | ✅ décodé, adresses `0x18`–`0x1b` |
+| Protocole RAM Corsair | ✅ décodé, adresses `0x18`–`0x1b`, éclairage reproduit |
 | Cartographie physique des 10 canaux | ✅ établie |
-| Implémentation Rust | ⏳ à faire |
+| Outil de validation en ligne de commande | ✅ les trois cibles pilotées |
+| Démon et interface Slint | ⏳ à faire |
 
 ## Ce que les protocoles permettent
 
@@ -54,9 +55,9 @@ reverb-gui  (fenêtre Slint)
    │  socket Unix
    ▼
 reverb-daemon
-   ├── write()  ──►  /dev/hidraw*        ventilateurs, GRB
-   ├── nusb     ──►  1e71:300c bulk      écran Kraken, BGR
-   └── i2cdev   ──►  /dev/i2c-8 0x18..1b RAM Corsair, RGB
+   ├── write()      ──►  /dev/hidraw*        ventilateurs, GRB
+   ├── usbfs ioctl  ──►  1e71:300c bulk      écran Kraken, BGR
+   └── I2C_SMBUS    ──►  /dev/i2c-8 0x18..1b RAM Corsair, RGB
         │
    reverb-proto  (encodage des trames, conversions, CRC-8 — pur, testable)
 ```
@@ -120,6 +121,35 @@ commande de retour au mode firmware — arrêter la commande est le seul moyen c
 
 `reverb screen --mire` affiche quatre quadrants de couleurs connues. C'est la mire qui a confirmé
 l'ordre BGR, que la rétro-ingénierie n'avait jamais pu vérifier.
+
+## La RAM Corsair
+
+```bash
+reverb ram                                  # emplacements et adresses, sans ouvrir le bus
+reverb ram --all --color ff00ff
+reverb ram --slot 2 --color 00ff00          # emplacement 2 = 3e barrette depuis le CPU
+reverb ram --slot 2 --colors <11 HEX>       # une couleur par LED, de bas en haut
+reverb ram --all --animate                  # boucle jusqu'a Ctrl-C
+```
+
+**Une couleur fixe tient sans hôte.** Ce contrôleur n'a pas de watchdog : la commande écrit, rend
+la main, et l'éclairage reste — y compris après la fermeture de la session.
+
+⚠️ **L'animation, elle, est calculée par l'hôte.** C'est la seule contrainte temps réel du projet :
+les ventilateurs NZXT animent seuls, l'écran affiche la température seul, la RAM non. Le mode
+« onDevice » d'iCUE a été testé pendant la rétro-ingénierie — négatif. Arrêter la commande fige
+l'éclairage sur la dernière image, ce qui est aussi la façon prévue de l'arrêter.
+
+⚠️ **C'est la seule cible du projet où une erreur serait irréversible.** Le même bus porte les hubs
+SPD des barrettes en `0x50`–`0x53`, et y écrire rend un DIMM non démarrable. Trois garde-fous :
+
+- `SlotAddress` ne se construit que depuis un index d'emplacement — viser une autre adresse n'est
+  pas refusé à l'exécution, c'est irreprésentable, et un test exhaustif sur les 256 entrées
+  possibles le vérifie ;
+- l'ioctl employé est `I2C_SLAVE`, qui **échoue** si un pilote noyau détient l'adresse, et non
+  `I2C_SLAVE_FORCE`, qui passerait outre. `spd5118` devient ainsi une protection ;
+- **le bus n'est jamais sondé.** L'adaptateur est reconnu à son nom dans sysfs. Un scan en lecture
+  seule avait déjà altéré l'éclairage par défaut de cette RAM.
 
 ## Documentation
 
