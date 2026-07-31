@@ -295,3 +295,32 @@ fn toute_ligne_active_delegue_l_acces_a_uaccess() {
         fautives
     );
 }
+
+#[test]
+fn toute_ligne_active_porte_le_tag_reverb() {
+    let contenu = charge_les_regles();
+    let actives = lignes_actives(&contenu);
+
+    let fautives: String = actives
+        .iter()
+        .filter(|(_, ligne)| !compacte(ligne).contains("TAG+=\"reverb\""))
+        .map(|(numero, ligne)| format!("    ligne {numero} : {ligne}\n"))
+        .collect();
+
+    assert!(
+        fautives.is_empty(),
+        "Des lignes actives de {} ne portent pas `TAG+=\"reverb\"` :\n{}  \
+         Ce tag n'accorde aucun droit — un tag udev est une étiquette, pas une permission — et ne \
+         remplace donc pas `TAG+=\"uaccess\"` : il sert à signer la règle. Sans lui, rien ne permet \
+         de dire si l'`uaccess` posé sur un périphérique vient de la règle de ce dépôt ou d'une \
+         autre : `udevadm test` ne journalise pas les `TAG+=` (seules les règles à effet de bord, \
+         `MODE=` ou `RUN{{builtin}}+=`, apparaissent avec leur fichier et leur ligne), et sur \
+         SHYNAEL `reverb list` fonctionne déjà grâce à `92-viia.rules`, qui ouvre tous les hidraw \
+         en `MODE=\"0666\"`. Le critère de vérification matérielle de l'issue #11 devient alors \
+         invérifiable. Avec le tag, il se contrôle sans root :\n    \
+         udevadm info -q all -n /dev/hidraw12 | grep TAGS   # « reverb » présent <=> notre règle a matché\n  \
+         C'est la pratique des règles constructeur : OpenRGB pose `NZXT_RGB__Fan_Controller`.",
+        chemin_des_regles().display(),
+        fautives
+    );
+}
