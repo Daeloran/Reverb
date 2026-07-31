@@ -87,7 +87,7 @@ echo "   (trois hidraw + un i2c attendus, et ils ne doivent JAMAIS changer)"
 echo
 echo "═══ 4. Le socket, ses droits, et la télémétrie ═══"
 ls -l "$SOCKET" | sed 's/^/   /'
-echo "   Attendu : srw-rw---- root reverb"
+echo "   Attendu : srwxrwx--- root reverb  (le bit x n'a aucun sens sur un socket)"
 echo
 echo "   status :"
 dis status || echo "   ❌ socket injoignable — as-tu rouvert ta session depuis le groupadd ?"

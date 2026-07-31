@@ -90,7 +90,16 @@ const SOCKET_DU_DEMON: &str = "/run/reverb/reverbd.sock";
 /// La présence du fichier ne suffit pas à conclure — un socket peut survivre à
 /// un arrêt brutal. On se connecte : c'est le seul test qui distingue un démon
 /// vivant d'un fichier mort.
+///
+/// ⚠️ **Un échec de connexion ne veut pas dire « pas de démon ».** Un
+/// utilisateur absent du groupe `reverb` se voit refuser la connexion par un
+/// démon parfaitement vivant. Traiter cet échec comme une absence laisserait
+/// précisément cet utilisateur écrire sur un bus déjà tenu — l'inverse de ce
+/// que cette fonction protège. On ne conclut donc à l'absence que sur les deux
+/// erreurs qui la signifient vraiment : pas de fichier, ou personne à l'écoute.
 fn ceder_le_pas(commande: &Command) -> Result<(), String> {
+    use std::io::ErrorKind;
+
     let ecrit = matches!(
         commande,
         Command::Set { .. }
@@ -99,8 +108,30 @@ fn ceder_le_pas(commande: &Command) -> Result<(), String> {
             | Command::Curve { .. }
             | Command::Ram { .. }
     );
-    if !ecrit || std::os::unix::net::UnixStream::connect(SOCKET_DU_DEMON).is_err() {
+    if !ecrit {
         return Ok(());
+    }
+
+    match std::os::unix::net::UnixStream::connect(SOCKET_DU_DEMON) {
+        // Aucun socket, ou un fichier mort dont plus personne n'écoute.
+        Err(erreur)
+            if matches!(
+                erreur.kind(),
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(erreur) => {
+            return Err(format!(
+                "impossible de savoir si le démon tourne : {SOCKET_DU_DEMON} : {erreur}.\n  \
+                 Refus par précaution — écrire sur un bus peut-être déjà tenu corromprait une \
+                 transaction.\n  \
+                 Si c'est un refus de permission, il manque l'appartenance au groupe :\n    \
+                 sudo usermod -aG reverb \"$USER\"   (puis rouvrir la session)"
+            ));
+        }
+        Ok(_) => {}
     }
 
     Err(format!(

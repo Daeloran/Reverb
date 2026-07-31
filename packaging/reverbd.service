@@ -26,7 +26,9 @@ User=root
 # `Group=reverb` avec `User=root` : le processus garde l'uid 0, donc le droit
 # d'écrire dans sysfs, mais crée ses fichiers avec le groupe `reverb`. C'est ce
 # qui donne au socket le bon groupe SANS `chown` après coup — et donc sans la
-# fenêtre pendant laquelle il serait ouvert à tous.
+# fenêtre pendant laquelle il serait ouvert à tous. Le mode obtenu est 0770 ;
+# le bit d'exécution n'a aucun sens sur un socket, seul compte le refus des
+# « autres ».
 Group=reverb
 
 # systemd crée et nettoie /run/reverb. Avec l'UMask, le socket naît en 0660
