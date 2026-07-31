@@ -26,6 +26,31 @@ dernière image reçue.
 **C'est la seule contrainte temps réel de tout le projet** : les ventilateurs NZXT animent seuls,
 l'écran du Kraken affiche la température seul, la RAM non.
 
+### 0.1 Le piège qui a coûté une passe matérielle ⚠️
+
+**Un `write()` sur `/dev/i2c-N` ne fonctionne pas sur cet adaptateur, et échoue sans rien
+émettre.** Sur le fil, une écriture par bloc *est* bien `[registre][compte][données]` — mais ce
+n'est pas par là que le noyau y arrive.
+
+`i2c-piix4` est un contrôleur **SMBus pur** : il n'expose que `smbus_xfer`, jamais `master_xfer`.
+Un `write()` part donc dans `i2c_master_send`, ne trouve aucun algorithme I2C brut, et revient en
+`EOPNOTSUPP`. Symptôme : aucune erreur visible si on ne regarde pas le code de retour, et
+**rigoureusement rien qui s'allume**.
+
+Vérifiable en une commande, sans rien émettre :
+
+```
+$ i2cdetect -F 8
+I2C                              no      ← pas de write() ordinaire
+SMBus Block Write                yes     ← l'ioctl I2C_SMBUS, et lui seul
+```
+
+Le §6 employait déjà le bon appel — `write_block_data` de `smbus2` **est** l'ioctl `I2C_SMBUS`.
+La commodité de la bibliothèque masquait qu'il s'agissait du seul chemin possible.
+
+Bonne nouvelle : l'échec est propre. `EOPNOTSUPP` est rendu par le cœur i2c avant toute
+transaction — aucun octet ne part sur un bus qui porte les hubs SPD.
+
 ---
 
 ## 1. Le résultat structurant
@@ -83,6 +108,13 @@ Base d'E/S : **`0x0B00`**, disposition compatible PIIX4.
 Recoupe le journal d'iCUE : `DIMM 0x1800`, `0x1901`, `0x1a02`, `0x1b03`
 (octet haut = adresse SMBus, octet bas = index de slot).
 
+> ✅ **Carte confirmée physiquement le 2026-07-31.** L'adresse `0x1a` (index 2) allume la
+> **troisième barrette en partant du CPU**. La numérotation d'iCUE suit donc l'ordre physique des
+> emplacements, et l'index N correspond à la (N+1)ᵉ barrette.
+>
+> ✅ **Les onze LED sont ordonnées de bas en haut** sur la barrette : la LED 0 de la charge utile
+> est la plus basse. Observé sur le même dégradé.
+
 ---
 
 ## 4. Protocole des couleurs ✅
@@ -96,6 +128,14 @@ Recoupe le journal d'iCUE : `DIMM 0x1800`, `0x1901`, `0x1a02`, `0x1b03`
 ```
 
 ✅ **Ordre des composantes : RGB.** Simple et direct.
+
+> ✅ **Confirmé sous Linux le 2026-07-31**, à l'œil et sans ambiguïté possible. Un dégradé de
+> onze couleurs allant de `ff0000` à `00ff80` a été envoyé sur une barrette : il apparaît
+> **rouge → jaune → vert**. Une permutation se serait vue immédiatement — en GRB la première LED
+> serait verte, en BGR elle serait bleue et le `ffff00` du milieu sortirait cyan.
+>
+> C'est le dégradé, et non trois couleurs franches successives, qui tranche : il ne demande pas
+> de mémoriser une séquence ni de corréler l'écran et la RAM.
 
 Établi par texte clair connu — quatre barrettes réglées sur quatre couleurs franches, état
 final de la capture :
@@ -223,12 +263,33 @@ configuration par fenêtre indirecte. Non nécessaire pour écrire les couleurs.
 
 ## 6. Implémentation Linux
 
+> ⚠️ **Deux corrections apportées par l'implémentation Linux** (issue #15) :
+>
+> 1. **Ne jamais sonder le bus pour trouver l'adaptateur.** Le code ci-dessous le suggère ; c'est
+>    à proscrire, un scan en lecture seule ayant déjà altéré l'éclairage par défaut de cette RAM.
+>    Le noyau donne la réponse gratuitement : l'adaptateur des barrettes est **celui où `spd5118`
+>    a lié les hubs SPD**.
+>
+>    ```
+>    $ ls -d /sys/bus/i2c/devices/*-005[0-3]
+>    8-0050  8-0051  8-0052  8-0053      → i2c-8
+>    $ cat /sys/class/i2c-dev/i2c-8/name
+>    SMBus PIIX4 adapter port 0 at 0b00
+>    ```
+>
+>    Un contrôleur RGB partage les broches du hub SPD de sa propre barrette. Ça lève une
+>    ambiguïté que le nom seul ne lève pas : `i2c-piix4` enregistre un homonyme
+>    « port 2 at 0b00 », et la base d'E/S `0x0B00` de la capture ne les distingue pas.
+>
+> 2. **`smbus2.write_block_data` n'est pas une commodité, c'est le seul chemin.** Voir le §0.1 :
+>    un `write()` brut échoue en `EOPNOTSUPP` sur cet adaptateur.
+
 ```python
 import smbus2
 
-# L'adaptateur PIIX4 : sur AMD, i2c-piix4 en enregistre PLUSIEURS.
-# Les barrettes ne repondent que sur l'un d'eux -> sonder 0x18..0x1b sur chacun.
-BUS = 0
+# ⚠️ NE PAS SONDER — voir l'encadré ci-dessus. L'adaptateur se trouve par le
+# pilote spd5118, sans qu'un octet parte sur le bus.
+BUS = 8
 ADRESSES = {0: 0x18, 1: 0x19, 2: 0x1a, 3: 0x1b}   # slot -> adresse SMBus
 NB_LED = 11
 
@@ -268,10 +329,19 @@ peut corrompre une transaction.
 |---|---|
 | ~~1~~ | ~~Le mode « onDevice » permet-il d'éviter la boucle ?~~ ❌ **tranché : non, testé et négatif — voir §4.5** |
 | 2 | Rôle exact des registres `0x24`, `0x40`, `0x42`, et du couple `0x61`/`0x21` |
-| 3 | Faut-il une séquence d'initialisation avant la première écriture, ou `0x31`/`0x32` suffisent-ils ? |
+| ~~3~~ | ~~Faut-il une séquence d'initialisation avant la première écriture ?~~ ✅ **tranché : non** |
 | 4 | Le CRC est-il vérifié par le contrôleur, ou toléré s'il est faux ? |
 
-Les questions 3 et 4 se tranchent en quelques minutes sous Linux, par essai direct.
+**Question 3, tranchée le 2026-07-31.** ✅ `0x31`/`0x32` suffisent. La toute première écriture de
+Reverb sur une machine fraîchement démarrée, sans qu'aucun logiciel Corsair n'ait jamais tourné
+sous Linux, allume les barrettes. Aucun des registres du §5 n'est touché.
+
+La question 4 reste ouverte, et le restera : la trancher demanderait d'émettre délibérément un
+CRC faux. Le gain — savoir si le contrôleur vérifie — ne vaut pas une transaction volontairement
+corrompue sur le bus des hubs SPD.
+
+La question 2 reste ouverte pour la même raison : ce sont des **lectures**, sur un bus où une
+lecture a déjà altéré l'éclairage.
 
 ---
 

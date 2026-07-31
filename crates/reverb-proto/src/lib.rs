@@ -1,18 +1,21 @@
-//! Encodage des trames des contrôleurs RGB NZXT.
+//! Encodage des trames des périphériques RGB pilotés par Reverb.
 //!
 //! Ce crate est **pur** : il ne fait aucune entrée/sortie et ne connaît aucun
 //! périphérique. Il transforme une intention (« ce ventilateur en magenta »)
 //! en octets. C'est ici que vivent les tests.
 //!
-//! Toutes les valeurs proviennent de `docs/SPEC-PROTOCOLE-NZXT.md`, issue d'une
-//! rétro-ingénierie validée sur le matériel. **Ne rien inventer** : une trame
-//! absente de la spec est inconnue.
+//! Toutes les valeurs proviennent des specs de `docs/` — `SPEC-PROTOCOLE-NZXT.md`
+//! pour les contrôleurs et l'éclairage, `SPEC-KRAKEN-LCD.md` pour l'écran,
+//! `SPEC-CORSAIR-RAM.md` pour la RAM — chacune issue d'une rétro-ingénierie
+//! validée sur le matériel. **Ne rien inventer** : une trame absente des specs
+//! est inconnue.
 
 pub mod color;
 pub mod frame;
 pub mod led;
 pub mod mode;
 pub mod position;
+pub mod ram;
 pub mod screen;
 
 pub use color::{Brightness, Rgb};
@@ -21,6 +24,10 @@ pub use led::{Apply, LedCountError};
 pub use mode::{ColorCountError, Mode, UnknownMode};
 pub use position::{Placement, Position, UnknownPosition};
 pub use screen::{BrightnessError, ImageError, ScreenState, StateError};
+
+// `ram` n'est volontairement pas ré-exporté ici : son `LedCountError` entrerait
+// en collision avec celui de `led`, et un alias de ré-export coûterait plus
+// cher en lisibilité qu'un chemin de module. On écrit `ram::payload(…)`.
 
 /// Modèle de contrôleur, qui détermine la séquence d'initialisation (spec §8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
