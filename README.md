@@ -83,6 +83,12 @@ Elle couvre les deux contrôleurs d'éclairage et le Kraken, et n'emploie que `T
 l'accès va à l'utilisateur physiquement connecté et lui est retiré à la déconnexion, là où un
 `MODE=` l'ouvrirait à tout process local. Lis-la avant de la poser, elle tient en trois lignes.
 
+`sudo ./tools/verifie_udev.sh` installe la règle et vérifie qu'elle déclenche vraiment.
+La nuance a son importance : sur une machine où OpenRGB est installé, `reverb list` marche
+de toute façon, et `udevadm test` ne journalise pas les `TAG+=`. D'où le tag `reverb`, que la
+règle pose et qu'aucune autre ne pose — il est présent sur le périphérique si et seulement si
+c'est bien elle qui a matché.
+
 Sans elle, `reverb` fonctionne quand même sur une machine où OpenRGB est installé — mais par
 ses règles à lui. **Un projet qui vise à remplacer OpenRGB n'a pas à dépendre de ses règles
 udev** : c'est ce que corrige `packaging/60-reverb.rules`.
