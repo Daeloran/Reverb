@@ -63,9 +63,11 @@ pub enum ActionEcran {
         /// Un seul envoi : l'image disparaît au bout d'une trentaine de
         /// secondes, le firmware reprenant la main.
         once: bool,
+        /// Rejoue le préambule complet observé chez CAM avant le premier envoi.
+        full_init: bool,
     },
     /// Affiche la mire de quadrants qui tranche l'ordre des composantes.
-    Mire { once: bool },
+    Mire { once: bool, full_init: bool },
 }
 
 /// Quels ventilateurs sont visés.
@@ -113,8 +115,8 @@ USAGE :
     reverb curve --channel <NOM> --point <POINT:CONSIGNE>… [--force]
     reverb screen
     reverb screen --brightness <0-100>
-    reverb screen --image <FICHIER.raw> [--once]
-    reverb screen --mire [--once]
+    reverb screen --image <FICHIER.raw> [--once] [--full-init]
+    reverb screen --mire [--once] [--full-init]
 
 OPTIONS de « screen » — écran du Kraken (aucun droit root nécessaire) :
     (sans option)         affiche résolution, luminosité et orientation,
@@ -130,6 +132,9 @@ OPTIONS de « screen » — écran du Kraken (aucun droit root nécessaire) :
     --mire                mire de quadrants — rouge, vert, bleu, blanc — qui
                           tranche l'ordre des composantes. Si le quadrant
                           haut-gauche apparaît bleu, l'ordre est inversé
+    --full-init           rejoue le préambule complet observé chez CAM avant
+                          le premier envoi : 36 04, 36 03 et l'énumération
+                          des seize emplacements. 🔶 rôle non établi
     --once                un seul envoi. Sans cette option la commande boucle
                           et réémet l'image, faute de quoi le firmware
                           reprend la main au bout d'une trentaine de secondes.
@@ -225,11 +230,13 @@ fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String>
     let mut image: Option<std::path::PathBuf> = None;
     let mut mire = false;
     let mut once = false;
+    let mut full_init = false;
 
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--once" => once = true,
             "--mire" => mire = true,
+            "--full-init" => full_init = true,
             "--brightness" => {
                 let brut = args
                     .next()
@@ -263,8 +270,12 @@ fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String>
 
     let action = match (luminosite, image, mire) {
         (Some(percent), _, _) => ActionEcran::Luminosite(percent),
-        (_, Some(chemin), _) => ActionEcran::Image { chemin, once },
-        (_, _, true) => ActionEcran::Mire { once },
+        (_, Some(chemin), _) => ActionEcran::Image {
+            chemin,
+            once,
+            full_init,
+        },
+        (_, _, true) => ActionEcran::Mire { once, full_init },
         _ => ActionEcran::Etat,
     };
 

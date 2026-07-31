@@ -13,9 +13,13 @@
 //! bibliothèque, et la surface nécessaire ici tient en trois `ioctl`. Le prix
 //! est le seul bloc `unsafe` du dépôt, confiné à ce module.
 //!
-//! ⚠️ **Le paquet de longueur nulle est obligatoire.** `1 228 800 = 2400 × 512`,
-//! un multiple exact de `wMaxPacketSize` ; sans lui le contrôleur ne sait pas où
-//! l'image s'arrête et concatène la suivante — c'est la dérive du §2.2.1.
+//! ⚠️ **Le paquet de longueur nulle est obligatoire pour l'image, et néfaste
+//! pour l'en-tête.** `1 228 800 = 2400 × 512`, multiple exact de
+//! `wMaxPacketSize` : sans paquet vide, le contrôleur ne sait pas où l'image
+//! s'arrête. Les 20 octets d'en-tête, eux, terminent déjà le transfert par un
+//! paquet court — y ajouter un paquet vide insère un transfert parasite.
+//!
+//! Un seul `ioctl` suffit pour les 1,2 Mo : ce noyau ne découpe pas.
 
 // Seule dérogation du dépôt à `unsafe_code`, que le workspace passe en `deny`
 // pour la rendre possible. Elle couvre trois appels à `ioctl`, tous dans ce
@@ -50,6 +54,10 @@ const INTERFACE: u32 = 0;
 
 /// Endpoint bulk sortant (spec §1).
 const ENDPOINT: u32 = 0x02;
+
+/// `wMaxPacketSize` de l'endpoint bulk (spec §1). Détermine à lui seul quand un
+/// paquet de longueur nulle est nécessaire — voir [`Screen::write_bulk`].
+const MAX_PACKET_SIZE: usize = 512;
 
 /// Délai d'un transfert, en millisecondes. Une image met environ 470 ms
 /// (spec §2.2.1) ; cinq secondes laissent de la marge sans figer la commande.
@@ -129,16 +137,26 @@ impl Screen {
         Ok(())
     }
 
-    /// Écrit une charge utile sur l'endpoint bulk, **suivie d'un paquet de
-    /// longueur nulle**.
+    /// Écrit une charge utile sur l'endpoint bulk, en terminant le transfert
+    /// comme la spécification USB l'exige.
     ///
-    /// Le paquet vide n'est pas une précaution : la spécification USB l'exige
-    /// quand la taille transférée est un multiple exact de `wMaxPacketSize`, ce
-    /// qui est le cas d'une image. Sans lui, le contrôleur ne détecte pas la fin
-    /// du transfert et l'image dérive à chaque envoi (spec §2.2.1).
+    /// Un transfert bulk se termine sur un paquet **plus court** que
+    /// `wMaxPacketSize`. Quand la charge utile est un multiple exact de cette
+    /// taille, aucun paquet court n'arrive jamais et il faut en émettre un vide
+    /// — le *zero-length packet*. Sinon le contrôleur ne sait pas où le
+    /// transfert s'arrête et concatène le suivant : c'est la dérive du §2.2.1.
+    ///
+    /// ⚠️ **La règle est conditionnelle, et l'oublier coûte cher.** Une première
+    /// version émettait le paquet vide après *chaque* transfert, donc aussi
+    /// après l'en-tête de 20 octets qui se termine déjà tout seul. Le contrôleur
+    /// recevait un transfert vide entre l'en-tête et l'image : aucune image ne
+    /// s'affichait, et l'affichage firmware lui-même se dégradait.
     pub fn write_bulk(&self, data: &[u8]) -> io::Result<()> {
         self.transfer(data)?;
-        self.transfer(&[])
+        if !data.is_empty() && data.len().is_multiple_of(MAX_PACKET_SIZE) {
+            self.transfer(&[])?;
+        }
+        Ok(())
     }
 
     fn transfer(&self, data: &[u8]) -> io::Result<()> {

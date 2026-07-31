@@ -97,6 +97,28 @@ pub fn broadcast_mode() -> Frame {
     packet(&[0x38, 0x01, BROADCAST, BUCKET])
 }
 
+/// Nombre d'emplacements de stockage énumérés par CAM au démarrage (spec §3.1).
+pub const BUCKETS: u8 = 16;
+
+/// Préambule que CAM émet avant sa première image, et que la boucle de
+/// rafraîchissement ne répète jamais (spec §3.1, §3.6).
+///
+/// Dans l'ordre de la capture : `36 04`, `36 03`, puis les seize `32 02 <n>`.
+/// La trame de mode [`broadcast_mode`] s'intercale entre les deux groupes.
+///
+/// 🔶 **Rôle non établi.** Le §3.6 montre que la boucle d'images s'en passe une
+/// fois l'état posé ; ce qu'on ignore, c'est si un envoi isolé, machine
+/// fraîchement démarrée, en dépend. `liquidctl` fait précéder chacun de ses
+/// transferts d'un `36 03`. Ces trames sont donc reproduites telles quelles,
+/// sans qu'aucune interprétation ne leur soit prêtée.
+pub fn preamble() -> Vec<Frame> {
+    let mut trames = vec![packet(&[0x36, 0x04]), packet(&[0x36, 0x03])];
+    for emplacement in 0..BUCKETS {
+        trames.push(packet(&[0x32, 0x02, emplacement]));
+    }
+    trames
+}
+
 /// Demande l'état de l'écran — `30 01` (spec §3.7).
 ///
 /// La réponse, à lire sur l'endpoint entrant, se décode par [`parse_state`].

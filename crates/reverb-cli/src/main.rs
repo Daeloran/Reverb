@@ -497,7 +497,11 @@ fn piloter_ecran(action: ActionEcran) -> Result<(), String> {
     match action {
         ActionEcran::Etat => afficher_etat_ecran(),
         ActionEcran::Luminosite(percent) => regler_luminosite(percent),
-        ActionEcran::Image { chemin, once } => {
+        ActionEcran::Image {
+            chemin,
+            once,
+            full_init,
+        } => {
             let donnees = std::fs::read(&chemin)
                 .map_err(|e| format!("« {} » illisible : {e}", chemin.display()))?;
             // Refusée AVANT d'ouvrir le moindre périphérique.
@@ -509,9 +513,9 @@ fn piloter_ecran(action: ActionEcran) -> Result<(), String> {
                     screen::HEIGHT
                 )
             })?;
-            diffuser(&donnees, once)
+            diffuser(&donnees, once, full_init)
         }
-        ActionEcran::Mire { once } => diffuser(&screen::test_pattern(), once),
+        ActionEcran::Mire { once, full_init } => diffuser(&screen::test_pattern(), once, full_init),
     }
 }
 
@@ -545,7 +549,7 @@ fn regler_luminosite(percent: u8) -> Result<(), String> {
 /// au bout d'une trentaine de secondes sans nouvel envoi (spec §2.2.2). C'est
 /// aussi le seul moyen connu d'en revenir — aucune trame ne ramène au mode
 /// firmware, il suffit de cesser d'émettre (spec §2.3).
-fn diffuser(image: &[u8], once: bool) -> Result<(), String> {
+fn diffuser(image: &[u8], once: bool, full_init: bool) -> Result<(), String> {
     let chemin_hid = hidraw_du_kraken()?;
     let ecran = usbfs::Screen::open().map_err(|e| {
         format!(
@@ -556,9 +560,23 @@ fn diffuser(image: &[u8], once: bool) -> Result<(), String> {
         )
     })?;
 
-    // INDISPENSABLE : sans cette trame, l'image est ignorée en silence.
-    hidraw::write_frame(&chemin_hid, &screen::broadcast_mode())
-        .map_err(|e| format!("mode de diffusion refusé : {e}"))?;
+    if full_init {
+        for (rang, trame) in screen::preamble().iter().enumerate() {
+            hidraw::write_frame(&chemin_hid, trame)
+                .map_err(|e| format!("préambule refusé à la trame {rang} : {e}"))?;
+            if rang == 1 {
+                // La trame de mode s'intercale ici dans la capture, entre les
+                // « 36 » et l'énumération des emplacements (spec §3.1).
+                hidraw::write_frame(&chemin_hid, &screen::broadcast_mode())
+                    .map_err(|e| format!("mode de diffusion refusé : {e}"))?;
+            }
+        }
+        println!("Préambule complet rejoué.");
+    } else {
+        // INDISPENSABLE : sans cette trame, l'image est ignorée en silence.
+        hidraw::write_frame(&chemin_hid, &screen::broadcast_mode())
+            .map_err(|e| format!("mode de diffusion refusé : {e}"))?;
+    }
 
     let entete = screen::bulk_header(
         u32::try_from(image.len()).map_err(|_| "image trop volumineuse".to_owned())?,
