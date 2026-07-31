@@ -13,4 +13,8 @@
 //! Le reste — socket Unix, unité systemd, ouverture des périphériques — est de l'entrée/sortie :
 //! ça se vérifie sur la machine, avec les critères d'acceptation de l'issue.
 
+pub mod animation;
 pub mod cadence;
+pub mod peripheriques;
+pub mod serveur;
+pub mod telemetrie;

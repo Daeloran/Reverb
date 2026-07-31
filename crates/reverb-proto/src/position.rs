@@ -131,8 +131,13 @@ impl Position {
         NAMES[self.index()]
     }
 
-    /// Rang de la position dans [`Position::ALL`] et [`NAMES`].
-    const fn index(self) -> usize {
+    /// Rang de la position dans [`Position::ALL`], [`Position::names`] et
+    /// [`Position::slug`].
+    ///
+    /// Public depuis l'issue #17 : le démon garde l'état des dix ventilateurs
+    /// dans un tableau, et ce rang est la seule clé qui ne dépende ni du nom
+    /// d'affichage ni du numéro de canal.
+    pub const fn index(self) -> usize {
         match self {
             Position::BasGauche => 0,
             Position::BasMilieu => 1,

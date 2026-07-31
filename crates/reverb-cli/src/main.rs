@@ -27,6 +27,11 @@ fn main() -> ExitCode {
         }
     };
 
+    if let Err(message) = ceder_le_pas(&commande) {
+        eprintln!("erreur : {message}");
+        return ExitCode::FAILURE;
+    }
+
     let resultat = match commande {
         Command::List => lister(),
         Command::Modes => {
@@ -66,6 +71,45 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Chemin du socket du démon.
+const SOCKET_DU_DEMON: &str = "/run/reverb/reverbd.sock";
+
+/// Refuse d'écrire sur le matériel quand le démon tourne.
+///
+/// L'ADR-002 pose qu'un seul processus doit détenir les bus. Rien dans le noyau
+/// ne l'impose — plusieurs processus peuvent ouvrir le même `/dev/hidraw*` ou
+/// le même `/dev/i2c-*` — et deux écritures SMBus qui se croisent corrompent
+/// une transaction (SPEC-CORSAIR-RAM §6).
+///
+/// Le refus ne porte que sur les commandes qui **écrivent**. Énumérer reste
+/// permis, et `screen` aussi : le démon ne tient pas l'écran, précisément pour
+/// que cet outil garde de quoi diagnostiquer quand la fenêtre ne suffit pas.
+///
+/// La présence du fichier ne suffit pas à conclure — un socket peut survivre à
+/// un arrêt brutal. On se connecte : c'est le seul test qui distingue un démon
+/// vivant d'un fichier mort.
+fn ceder_le_pas(commande: &Command) -> Result<(), String> {
+    let ecrit = matches!(
+        commande,
+        Command::Set { .. }
+            | Command::Paint { .. }
+            | Command::Fan { .. }
+            | Command::Curve { .. }
+            | Command::Ram { .. }
+    );
+    if !ecrit || std::os::unix::net::UnixStream::connect(SOCKET_DU_DEMON).is_err() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "le démon tourne et détient les bus — cet outil refuse d'écrire en même temps.\n  \
+         Passer par lui :\n    \
+         echo 'light all ff00ff' | socat - UNIX-CONNECT:{SOCKET_DU_DEMON}\n  \
+         ou l'arrêter le temps d'un diagnostic :\n    \
+         sudo systemctl stop reverbd"
+    ))
 }
 
 /// Énumère les contrôleurs et les positions que chacun pilote.

@@ -384,7 +384,10 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
             position.map_or_else(|| ABSENT.to_owned(), Position::slug),
             rpm.map_or_else(|| ABSENT.to_owned(), |v| v.to_string()),
             pwm.map_or_else(|| ABSENT.to_owned(), |v| v.to_string()),
-            jeton(mode),
+            // Le mode est le **dernier** champ : il a droit à ses espaces, comme
+            // la raison d'un `unreadable`. « courbe de l'hôte » se lit ;
+            // « courbe_de_l'hôte » se déchiffre.
+            reste(mode),
         ),
         ResponseLine::Temp {
             sensor,
@@ -435,7 +438,9 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
         });
     }
 
-    let champs: Vec<&str> = line.split(' ').collect();
+    // `chan` porte son mode en dernier, donc à espaces : on ne découpe que les
+    // quatre champs qui précèdent, et le reste est le mode.
+    let champs: Vec<&str> = line.splitn(6, ' ').collect();
     match champs[..] {
         ["chan", canal, position, rpm, pwm, mode] => Ok(ResponseLine::Channel {
             channel: canal.to_owned(),
