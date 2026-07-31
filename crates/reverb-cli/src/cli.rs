@@ -46,6 +46,26 @@ pub enum Command {
         points: Vec<(usize, Percent)>,
         force: bool,
     },
+    /// Pilote l'écran du Kraken.
+    Screen { action: ActionEcran },
+}
+
+/// Ce qu'on demande à l'écran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionEcran {
+    /// Affiche l'état déclaré par le contrôleur, sans rien écrire.
+    Etat,
+    /// Règle la luminosité, en pourcent.
+    Luminosite(u8),
+    /// Affiche une image brute de 640 × 640 en trois octets par pixel.
+    Image {
+        chemin: std::path::PathBuf,
+        /// Un seul envoi : l'image disparaît au bout d'une trentaine de
+        /// secondes, le firmware reprenant la main.
+        once: bool,
+    },
+    /// Affiche la mire de quadrants qui tranche l'ordre des composantes.
+    Mire { once: bool },
 }
 
 /// Quels ventilateurs sont visés.
@@ -91,6 +111,30 @@ USAGE :
     reverb fan   --all|--channel <NOM> --pwm <0-100> [--force] [--manual]
     reverb fan   --all|--channel <NOM> --auto
     reverb curve --channel <NOM> --point <POINT:CONSIGNE>… [--force]
+    reverb screen
+    reverb screen --brightness <0-100>
+    reverb screen --image <FICHIER.raw> [--once]
+    reverb screen --mire [--once]
+
+OPTIONS de « screen » — écran du Kraken (aucun droit root nécessaire) :
+    (sans option)         affiche résolution, luminosité et orientation,
+                          telles que le contrôleur les déclare. N'écrit rien
+    --brightness <0-100>  luminosité. 0 éteint l'écran.
+                          ⚠️ à régler AVANT d'envoyer une image : la commande
+                          réinitialise l'affichage
+    --image <FICHIER>     image brute de 640 × 640 en 3 octets par pixel,
+                          soit 1 228 800 octets exactement. Reverb ne décode
+                          ni PNG ni JPEG :
+                            ffmpeg -i img.png -vf scale=640:640 \
+                                   -f rawvideo -pix_fmt bgr24 img.raw
+    --mire                mire de quadrants — rouge, vert, bleu, blanc — qui
+                          tranche l'ordre des composantes. Si le quadrant
+                          haut-gauche apparaît bleu, l'ordre est inversé
+    --once                un seul envoi. Sans cette option la commande boucle
+                          et réémet l'image, faute de quoi le firmware
+                          reprend la main au bout d'une trentaine de secondes.
+                          ⚠️ il n'existe aucune commande de retour au mode
+                          firmware : cesser d'émettre est le seul moyen connu
 
 OPTIONS de « fan » — vitesse de rotation (demande les droits root) :
     --channel <NOM>      canal, tel que « reverb fans » le nomme
@@ -168,11 +212,67 @@ where
         "fans" => Ok(Command::Fans),
         "fan" => parse_fan(args),
         "curve" => parse_curve(args),
+        "screen" => parse_screen(args),
         autre => Err(format!(
             "sous-commande « {autre} » inconnue. \
-             Attendu : list, modes, set, paint, fans, fan, curve."
+             Attendu : list, modes, set, paint, fans, fan, curve, screen."
         )),
     }
+}
+
+fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
+    let mut luminosite: Option<u8> = None;
+    let mut image: Option<std::path::PathBuf> = None;
+    let mut mire = false;
+    let mut once = false;
+
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--once" => once = true,
+            "--mire" => mire = true,
+            "--brightness" => {
+                let brut = args
+                    .next()
+                    .ok_or_else(|| "« --brightness » attend un entier de 0 à 100.".to_owned())?;
+                luminosite = Some(brut.trim().parse().map_err(|_| {
+                    format!("luminosité « {brut} » invalide : attendu un entier de 0 à 100.")
+                })?);
+            }
+            "--image" => {
+                let brut = args
+                    .next()
+                    .ok_or_else(|| "« --image » attend un chemin de fichier.".to_owned())?;
+                image = Some(std::path::PathBuf::from(brut));
+            }
+            autre => return Err(format!("option « {autre} » inconnue.")),
+        }
+    }
+
+    // Les trois actions s'excluent : chacune ouvre le périphérique pour une
+    // raison différente, et les enchaîner silencieusement masquerait une faute
+    // de frappe. La luminosité doit de toute façon précéder l'image (spec §3.4),
+    // ce qui se fait en deux commandes.
+    let demandes =
+        usize::from(luminosite.is_some()) + usize::from(image.is_some()) + usize::from(mire);
+    if demandes > 1 {
+        return Err("« --brightness », « --image » et « --mire » s'excluent. \
+             Régler la luminosité AVANT d'envoyer l'image, en deux commandes : \
+             un changement de luminosité réinitialise l'affichage."
+            .to_owned());
+    }
+
+    let action = match (luminosite, image, mire) {
+        (Some(percent), _, _) => ActionEcran::Luminosite(percent),
+        (_, Some(chemin), _) => ActionEcran::Image { chemin, once },
+        (_, _, true) => ActionEcran::Mire { once },
+        _ => ActionEcran::Etat,
+    };
+
+    if once && matches!(action, ActionEcran::Etat | ActionEcran::Luminosite(_)) {
+        return Err("« --once » ne s'applique qu'à « --image » ou « --mire ».".to_owned());
+    }
+
+    Ok(Command::Screen { action })
 }
 
 fn parse_curve(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {

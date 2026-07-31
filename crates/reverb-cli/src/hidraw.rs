@@ -7,7 +7,7 @@
 //! 64 octets tels quels, sans préfixe (spec §0).
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use reverb_proto::{Frame, Model, VENDOR_ID};
@@ -126,6 +126,51 @@ pub fn write_frame(path: &Path, frame: &Frame) -> io::Result<()> {
     let mut fichier = OpenOptions::new().write(true).open(path)?;
     fichier.write_all(frame)?;
     fichier.flush()
+}
+
+/// Nombre de trames lues avant d'abandonner l'attente d'une réponse.
+///
+/// Le Kraken émet spontanément un rapport d'état `75 02` **chaque seconde**
+/// (spec §7.1) : une réponse à une question ne sera donc pas forcément la
+/// première trame qui arrive. Vingt lectures laissent passer une poignée de ces
+/// bavardages sans jamais bloquer indéfiniment.
+const MAX_LECTURES: usize = 20;
+
+/// Pose une question et attend la réponse dont on connaît l'en-tête.
+///
+/// Écrit `question`, puis lit jusqu'à trouver une trame commençant par
+/// `attendu`, en écartant les rapports spontanés du contrôleur.
+///
+/// # Erreurs
+///
+/// [`io::ErrorKind::TimedOut`] si la réponse n'arrive pas en [`MAX_LECTURES`]
+/// trames. Le périphérique est ouvert une seule fois pour les deux sens : le
+/// rouvrir entre l'écriture et la lecture ferait perdre les réponses émises
+/// entre-temps.
+pub fn ask(path: &Path, question: &Frame, attendu: &[u8]) -> io::Result<Frame> {
+    let mut fichier = OpenOptions::new().read(true).write(true).open(path)?;
+    fichier.write_all(question)?;
+    fichier.flush()?;
+
+    for _ in 0..MAX_LECTURES {
+        let mut reponse = [0u8; reverb_proto::FRAME_LEN];
+        let lus = fichier.read(&mut reponse)?;
+        if lus >= attendu.len() && reponse.starts_with(attendu) {
+            return Ok(reponse);
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "pas de réponse {} après {MAX_LECTURES} trames lues",
+            attendu
+                .iter()
+                .map(|o| format!("{o:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    ))
 }
 
 #[cfg(test)]

@@ -13,12 +13,14 @@ pub mod frame;
 pub mod led;
 pub mod mode;
 pub mod position;
+pub mod screen;
 
 pub use color::{Brightness, Rgb};
 pub use frame::{FRAME_LEN, Frame};
 pub use led::{Apply, LedCountError};
 pub use mode::{ColorCountError, Mode, UnknownMode};
 pub use position::{Placement, Position, UnknownPosition};
+pub use screen::{BrightnessError, ImageError, ScreenState, StateError};
 
 /// Modèle de contrôleur, qui détermine la séquence d'initialisation (spec §8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

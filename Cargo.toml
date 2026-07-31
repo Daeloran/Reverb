@@ -9,7 +9,14 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/Daeloran/Reverb"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` et non `forbid` : le module `crates/reverb-cli/src/usbfs.rs` doit y
+# déroger, les transferts bulk vers l'écran du Kraken passant par des `ioctl`
+# qu'aucune API sûre de la bibliothèque standard n'expose. `forbid` est absolu
+# et ne se lève pas localement.
+#
+# La dérogation est unique, déclarée en tête de ce module, et n'y couvre que
+# trois appels. Partout ailleurs, un `unsafe` reste une erreur de compilation.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

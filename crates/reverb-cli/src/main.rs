@@ -6,10 +6,11 @@
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 
-use reverb_cli::cli::{self, ActionVentilateur, Cible, CibleCanal, Command};
+use reverb_cli::cli::{self, ActionEcran, ActionVentilateur, Cible, CibleCanal, Command};
 use reverb_cli::hidraw::{self, Controller};
 use reverb_cli::hwmon::{self, FanChannel, Percent};
-use reverb_proto::{Apply, Brightness, Mode, Model, Position, Rgb, frame};
+use reverb_cli::usbfs;
+use reverb_proto::{Apply, Brightness, Mode, Model, Position, Rgb, frame, screen};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -50,6 +51,7 @@ fn main() -> ExitCode {
             points,
             force,
         } => poser_courbe(&canal, &points, force),
+        Command::Screen { action } => piloter_ecran(action),
     };
 
     match resultat {
@@ -461,4 +463,138 @@ fn decouvrir() -> Result<Vec<Controller>, String> {
     }
 
     Ok(controleurs)
+}
+
+// ─── Écran du Kraken (issue #13) ─────────────────────────────────────────────
+
+/// Retrouve le `/dev/hidraw*` du Kraken.
+///
+/// `hidraw::discover` ne rend que les contrôleurs d'éclairage : le Kraken n'est
+/// pas un `Model`, il ne pilote aucune LED de ventilateur.
+fn hidraw_du_kraken() -> Result<std::path::PathBuf, String> {
+    const KRAKEN: u16 = 0x300c;
+
+    let entrees = std::fs::read_dir("/sys/class/hidraw")
+        .map_err(|e| format!("/sys/class/hidraw illisible : {e}"))?;
+
+    for entree in entrees.flatten() {
+        let uevent = entree.path().join("device/uevent");
+        let Ok(contenu) = std::fs::read_to_string(&uevent) else {
+            continue;
+        };
+        let Some(infos) = hidraw::parse_uevent(&contenu) else {
+            continue;
+        };
+        if infos.vendor_id == reverb_proto::VENDOR_ID && infos.product_id == KRAKEN {
+            return Ok(std::path::Path::new("/dev").join(entree.file_name()));
+        }
+    }
+
+    Err("aucun Kraken 1e71:300c branché.".to_owned())
+}
+
+fn piloter_ecran(action: ActionEcran) -> Result<(), String> {
+    match action {
+        ActionEcran::Etat => afficher_etat_ecran(),
+        ActionEcran::Luminosite(percent) => regler_luminosite(percent),
+        ActionEcran::Image { chemin, once } => {
+            let donnees = std::fs::read(&chemin)
+                .map_err(|e| format!("« {} » illisible : {e}", chemin.display()))?;
+            // Refusée AVANT d'ouvrir le moindre périphérique.
+            screen::check_image(&donnees).map_err(|e| {
+                format!(
+                    "{e}.\n  Convertir une image quelconque :\n    \
+                     ffmpeg -i image.png -vf scale={}:{} -f rawvideo -pix_fmt bgr24 image.raw",
+                    screen::WIDTH,
+                    screen::HEIGHT
+                )
+            })?;
+            diffuser(&donnees, once)
+        }
+        ActionEcran::Mire { once } => diffuser(&screen::test_pattern(), once),
+    }
+}
+
+fn afficher_etat_ecran() -> Result<(), String> {
+    let chemin = hidraw_du_kraken()?;
+    let reponse = hidraw::ask(&chemin, &screen::query_state(), &[0x31, 0x01])
+        .map_err(|e| format!("pas de réponse du Kraken : {e}"))?;
+    let etat = screen::parse_state(&reponse).map_err(|e| format!("réponse illisible : {e}"))?;
+
+    println!("Écran du Kraken — {}", chemin.display());
+    println!("  résolution  : {} × {}", etat.width, etat.height);
+    println!("  luminosité  : {} %", etat.brightness);
+    println!("  orientation : {}", etat.orientation);
+    Ok(())
+}
+
+fn regler_luminosite(percent: u8) -> Result<(), String> {
+    let trame = screen::set_brightness(percent).map_err(|e| e.to_string())?;
+    let chemin = hidraw_du_kraken()?;
+    hidraw::write_frame(&chemin, &trame).map_err(|e| format!("écriture refusée : {e}"))?;
+    println!("Luminosité de l'écran réglée à {percent} %.");
+    if percent == 0 {
+        println!("  (0 % éteint l'écran — « reverb screen --brightness 80 » le rallume)");
+    }
+    Ok(())
+}
+
+/// Envoie une image, une fois ou en boucle.
+///
+/// La boucle n'est pas un confort : l'écran retombe sur son affichage firmware
+/// au bout d'une trentaine de secondes sans nouvel envoi (spec §2.2.2). C'est
+/// aussi le seul moyen connu d'en revenir — aucune trame ne ramène au mode
+/// firmware, il suffit de cesser d'émettre (spec §2.3).
+fn diffuser(image: &[u8], once: bool) -> Result<(), String> {
+    let chemin_hid = hidraw_du_kraken()?;
+    let ecran = usbfs::Screen::open().map_err(|e| {
+        format!(
+            "écran inaccessible : {e}.\n  \
+             Si c'est un refus de permission, installer la règle udev :\n    \
+             sudo cp packaging/60-reverb.rules /etc/udev/rules.d/ && \
+             sudo udevadm control --reload && sudo udevadm trigger"
+        )
+    })?;
+
+    // INDISPENSABLE : sans cette trame, l'image est ignorée en silence.
+    hidraw::write_frame(&chemin_hid, &screen::broadcast_mode())
+        .map_err(|e| format!("mode de diffusion refusé : {e}"))?;
+
+    let entete = screen::bulk_header(
+        u32::try_from(image.len()).map_err(|_| "image trop volumineuse".to_owned())?,
+    );
+
+    let envoyer = || -> Result<(), String> {
+        hidraw::write_frame(&chemin_hid, &screen::begin_image())
+            .map_err(|e| format!("annonce refusée : {e}"))?;
+        ecran
+            .write_bulk(&entete)
+            .map_err(|e| format!("en-tête refusé : {e}"))?;
+        ecran
+            .write_bulk(image)
+            .map_err(|e| format!("image refusée : {e}"))?;
+        hidraw::write_frame(&chemin_hid, &screen::end_image())
+            .map_err(|e| format!("validation refusée : {e}"))
+    };
+
+    envoyer()?;
+
+    if once {
+        println!(
+            "Image envoyée une fois. Le firmware reprendra la main dans ~{} s.",
+            screen::FIRMWARE_FALLBACK_SECS
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Image affichée, réémise toutes les {} s. Ctrl-C pour rendre l'écran au firmware.",
+        screen::REFRESH_INTERVAL_SECS
+    );
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(
+            screen::REFRESH_INTERVAL_SECS,
+        ));
+        envoyer()?;
+    }
 }
