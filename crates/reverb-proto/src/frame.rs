@@ -33,7 +33,7 @@ const APPLY_TRAILER: [u8; 8] = [0x00, 0x00, 0x80, 0x00, 0x32, 0x00, 0x00, 0x01];
 /// Construit un paquet de 64 octets à partir de ses octets significatifs.
 ///
 /// Spec §1 — « Les paquets sont toujours complétés à 64 octets par des zéros. »
-fn packet(head: &[u8]) -> Frame {
+pub(crate) fn packet(head: &[u8]) -> Frame {
     let mut frame = [0u8; FRAME_LEN];
     frame[..head.len()].copy_from_slice(head);
     frame

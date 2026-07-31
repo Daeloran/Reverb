@@ -12,25 +12,42 @@
 
 | Besoin | Coût | Statut |
 |---|---|---|
-| Afficher la **température du liquide** | aucun trafic, mode firmware | ✅ |
+| Afficher la **température du liquide** | aucun trafic — c'est le comportement par défaut | ✅ |
+| Lire **résolution, luminosité, orientation** | une commande HID | ✅ §3.7 |
 | Régler la **luminosité** | une commande HID | ✅ |
-| Afficher une **image** | 1,2 Mo, à réémettre toutes les ~25 s | ✅ envoi reproduit, ⚠️ dérive à corriger |
+| Afficher une **image** | 1,2 Mo, à réémettre toutes les ~25 s | ✅ **affichée sous Linux le 2026-07-31** |
 | Afficher une **animation** | 1,2 Mo par image, ~2 images/s maximum | 🔶 |
+| Garder une image **stable** à l'envoi répété | le paquet de longueur nulle | ✅ §2.2.1 |
+| **Revenir** au mode firmware sur commande | aucune trame connue — cesser d'émettre | ❓ §2.3 |
 
 **Recette minimale pour afficher une image :**
 
 ```
-1. HID   38 01 02                     forcer le mode d affichage   <-- INDISPENSABLE
+1. HID   38 01 02 00                  mode de diffusion, bucket 0   <-- INDISPENSABLE
 2. HID   30 02 01 <lum> 00 00 00 00 1e   luminosite, AVANT l image
 3. HID   36 01 00 01 09               annonce
-4. BULK  en-tete de 20 octets
-5. BULK  1 228 800 octets  (640x640)  + PAQUET DE LONGUEUR NULLE
-6. HID   36 02                        validation
-7. repeter les etapes 3 a 6 toutes les ~25 s
+4. HID   <- 37 01                     ATTENDRE L ACCUSE             <-- INDISPENSABLE
+5. BULK  en-tete de 20 octets         (PAS de paquet de longueur nulle : 20 n est
+                                       pas un multiple de wMaxPacketSize)
+6. BULK  1 228 800 octets  (640x640)  + PAQUET DE LONGUEUR NULLE
+7. HID   36 02                        validation
+8. HID   <- 37 02                     accuse
+9. repeter les etapes 3 a 8 toutes les ~25 s
 ```
 
-⚠️ Les deux pièges qui coûtent le plus cher, détaillés plus bas : **sans l'étape 1 l'image est
-ignorée en silence**, et **sans le paquet de longueur nulle de l'étape 5 l'image dérive**.
+✅ **Vérifiée sur la capture le 2026-07-31** : c'est exactement ce que fait CAM, cinquante fois de
+suite, sans jamais rien intercaler. Aucune gestion de bucket dans la boucle — §3.6.
+
+⚠️ **Les trois pièges de cette cible**, tous silencieux — l'envoi réussit, aucun code d'erreur,
+rien ne s'affiche :
+
+1. **sans l'étape 1**, l'image est ignorée ;
+2. **sans l'attente de l'accusé à l'étape 4**, les données arrivent trop tôt et sont perdues.
+   C'est ce qui a fait échouer trois vérifications matérielles d'affilée alors que toutes les
+   trames étaient correctes ;
+3. **le paquet de longueur nulle est conditionnel**, pas systématique. Il termine l'étape 6, dont
+   la taille est un multiple exact de 512. L'ajouter aussi à l'étape 5 insère un transfert
+   parasite entre l'en-tête et l'image, et **dégrade jusqu'à l'affichage firmware**.
 
 ---
 
@@ -78,6 +95,12 @@ progressif et un motif en diagonale — ce n'est pas le cas.
 lectures possibles donnaient turquoise `(0,63,63)` en RGB ou olive `(63,63,0)` en BGR ; la jauge
 affichée à l'écran au moment de la capture était **olive**, ce qui tranche pour **BGR**.
 
+✅ **Confirmé par une mire le 2026-07-31**, ce que la dérive avait empêché jusque-là (§2.2.1). Une
+image de quatre quadrants — rouge, vert, bleu, blanc — a été envoyée par `reverb screen --mire`.
+Observé à l'écran : **rouge en haut à gauche, vert en haut à droite, bleu en bas à gauche, blanc en
+bas à droite**, soit exactement la disposition prescrite. Une inversion rouge/bleu aurait échangé
+les deux coins concernés. La question ouverte n° 2 est close.
+
 Attention donc : les LED des ventilateurs sont en **GRB** et l'écran en **BGR**. Deux ordres
 différents dans le même écosystème NZXT — c'est une source d'erreur à isoler proprement dans le code.
 
@@ -121,22 +144,44 @@ Sous Linux, `libusb` suffit — aucun pilote à installer.
 
 **Débit mesuré : environ 470 ms par image**, soit ~2 images par seconde au maximum.
 
-⚠️ **Défaut connu de l'implémentation de référence : l'image dérive.** À l'envoi répété, le
-contenu se décale progressivement à l'écran, comme une grille qui défile.
+⚠️ **Défaut de l'implémentation Windows de référence : l'image dérive.** À l'envoi répété, le
+contenu se décalait progressivement à l'écran, comme une grille qui défile.
 
-🔶 Cause quasi certaine : **absence de paquet de longueur nulle** en fin de transfert.
-`1 228 800 = 2400 × 512`, un multiple exact de `wMaxPacketSize`. Dans ce cas la spécification USB
-exige un **ZLP** (*zero-length packet*) pour signaler la fin du transfert ; sans lui, le
-contrôleur ne sait pas où une image se termine et concatène la suivante — ce qui produit
-exactement ce décalage.
+✅ **Cause confirmée et corrigée le 2026-07-31 : le paquet de longueur nulle manquant.**
+`1 228 800 = 2400 × 512`, un multiple exact de `wMaxPacketSize` ; la spécification USB exige alors
+un **ZLP** pour signaler la fin du transfert, sans quoi le contrôleur ne sait pas où une image
+s'arrête et concatène la suivante.
 
-Sous Linux avec `libusb`, cela correspond au drapeau `LIBUSB_TRANSFER_ADD_ZERO_PACKET`, ou à
-l'envoi explicite d'un transfert de 0 octet après l'image. **À traiter en premier** si l'image
-n'est pas stable.
+L'hypothèse posée pendant la rétro-ingénierie était donc juste. Vérifiée sous Linux par vingt
+envois consécutifs : **l'image ne bouge pas d'un pixel**, frontières entre quadrants comprises.
 
-⚠️ C'est aussi pourquoi **l'ordre des composantes n'a pas pu être vérifié directement** : la mire
-défilant, les quadrants n'étaient jamais au même endroit. L'ordre **BGR** reste établi par le
-raisonnement du §2.1 (jauge olive), pas par une mire. À reconfirmer une fois la dérive corrigée.
+⚠️ Le ZLP est **conditionnel** — voir le §0, piège n° 3. L'ajouter après l'en-tête de 20 octets,
+qui n'est pas un multiple de 512, insère un transfert parasite qui empêche toute image de
+s'afficher.
+
+Sous Linux, un second `USBDEVFS_BULK` de longueur nulle suffit ; avec `libusb`, c'est le drapeau
+`LIBUSB_TRANSFER_ADD_ZERO_PACKET`.
+
+C'est cette dérive qui avait empêché de **vérifier l'ordre des composantes** — la mire défilant,
+les quadrants n'étaient jamais au même endroit. Une fois corrigée, la vérification a pu être faite :
+voir §2.1.
+
+### 2.2.3 L'affichage ne survit pas à la fermeture du périphérique ✅
+
+Observé le 2026-07-31 en enchaînant vingt envois **par vingt lancements successifs** du binaire.
+Entre chaque image, l'écran repasse brièvement au noir puis à l'affichage firmware, avant que
+l'image suivante ne s'affiche. Sur une boucle unique qui garde le périphérique ouvert, rien de tel :
+l'image reste affichée sans clignoter.
+
+🔶 Deux causes candidates, non départagées, chacune se produisant une fois par lancement :
+
+- l'interface bulk est **réclamée puis rendue** à chaque ouverture ;
+- la trame `38 01 02 00` est **réémise** à chaque lancement, et le §3.4 constate déjà qu'une
+  commande d'affichage réinitialise le pipeline.
+
+**Sans conséquence pratique** : un affichage durable impose de toute façon un processus qui réémet
+(§2.2.2), et celui-là garde le périphérique ouvert. À trancher seulement si un usage réclame des
+envois ponctuels rapprochés.
 
 ### 2.2.2 Délai de garde de 30 secondes ✅
 
@@ -161,10 +206,18 @@ firmware**, qui lit lui-même la température du liquide et la met en page.
 
 Conséquence pour l'implémentation Linux : **afficher la température du liquide ne demande aucun
 streaming**. Les 1,2 Mo par seconde ne sont nécessaires que pour un contenu arbitraire (image,
-animation, mise en page personnalisée). Pour l'usage courant, il suffit de sélectionner le mode
-intégré — vraisemblablement via `38 01 02` (🔶 correspondance non isolée formellement).
+animation, mise en page personnalisée).
 
-C'est le renversement de perspective de cette cible : le coûteux est optionnel.
+⚠️ **Corrigé le 2026-07-31.** Ce paragraphe supposait que le mode intégré se sélectionnait
+« vraisemblablement via `38 01 02` ». **C'est faux** : le §3.5 établit que cette trame sélectionne
+au contraire le mode de **diffusion**. Aucune commande connue ne ramène l'écran à son affichage
+firmware — **il y retombe seul**, au bout des ~30 s du §2.2.2.
+
+❓ Une commande de retour explicite existe peut-être ; elle n'a pas été identifiée. Ne pas en
+inventer une : cesser d'émettre suffit, et c'est le seul mécanisme observé.
+
+C'est le renversement de perspective de cette cible : le coûteux est optionnel, et le gratuit est
+le comportement par défaut.
 
 ---
 
@@ -180,21 +233,43 @@ C'est le renversement de perspective de cette cible : le coûteux est optionnel.
 30 01
 36 03
 30 02 00 00 00 00 00 00 1e   <- 0x1e = 30
-38 01 02                     <- mode d affichage 2
-32 02                        <- puis 32 02 01 .. 32 02 0f
+38 01 02 00                  <- mode de diffusion, bucket 0 (§3.5)
+32 02 00                     <- puis 32 02 01 .. 32 02 0f
 ```
 
-✅ `32 02 <n>` est émis pour `n` de `0x01` à `0x0f` : **quinze emplacements** sont énumérés
-ou effacés au démarrage. 🔶 Il s'agit vraisemblablement des « buckets » de stockage d'images
-du Kraken, que `liquidctl` manipule déjà sous ce nom.
+✅ **Corrigé le 2026-07-31 — seize emplacements, pas quinze.** `32 02 <n>` est émis pour `n` de
+`0x00` à `0x0f`, ce que confirme le décompte de `tools/extrait_kraken.py` : exactement seize
+trames `32 02` sortantes et seize réponses `33 02`. La version antérieure de ce paragraphe partait
+de `0x01`.
+
+✅ Ce sont bien les « buckets » de stockage d'images, que `liquidctl` manipule sous ce nom.
+Chaque réponse `33 02` porte `01` à l'offset 14 et rien d'autre : les seize emplacements sont
+vides.
+
+⚠️ **Cette énumération n'a lieu qu'au démarrage.** La boucle de rafraîchissement du §3.2 ne touche
+jamais aux buckets — voir §3.6.
 
 ### 3.2 Boucle de rafraîchissement, chaque seconde
 
 ```
-36 01 00 01 09      <- annonce l envoi d une image
-36 02               <- validation
-   (puis les deux transferts bulk du §2)
+36 01 00 01 09      -->   annonce l envoi d une image
+37 01 ... 01 ...    <--   ACCUSE, 3 ms plus tard
+   (les deux transferts bulk du §2 passent ici, ~62 ms)
+36 02               -->   validation
+37 02 ... 01 ...    <--   ACCUSE
 ```
+
+⚠️ **Le contrôleur accuse chaque étape, et il faut attendre l'accusé ✅.** C'est le
+point qui a coûté le plus cher à l'implémentation Linux : trois vérifications matérielles
+successives sans aucune image, alors que toutes les trames étaient correctes. Envoyer les
+1,2 Mo sans attendre `37 01`, c'est parler à un contrôleur qui n'écoute pas encore — et
+l'échec est silencieux, l'`ioctl` rendant « 1 228 800 octets écrits ».
+
+L'octet à l'**offset 14** porte le verdict : `01` pour un succès. `liquidctl` le teste
+(`response[14] == 0x1`) et tous les accusés de la capture le portent.
+
+Les délais relevés : 3 ms entre `36 01` et son accusé, 62 ms pour les deux transferts bulk,
+18 ms entre `36 02` et son accusé.
 
 ### 3.3 Consignes pompe et ventilateur, chaque seconde
 
@@ -219,12 +294,107 @@ Même logique que le `62 01` des contrôleurs RGB : **CAM réémet la consigne c
 ✅ **Vérifié visuellement** : en alternant `<lum>` entre 5 et 100, l'intensité de l'écran change
 nettement. L'octet à l'offset 3 est bien la **luminosité en pourcent**.
 
-❓ L'octet `0x1e` (30) en fin de trame reste inexpliqué — inchangé dans toutes les observations.
+🔶 L'octet `0x1e` en fin de trame reste sans rôle établi, mais il vaut **30** — exactement le
+délai de repli mesuré au §2.2.2. L'hypothèse qu'il porte ce délai en secondes est cohérente et
+**testable** : lui donner une autre valeur et mesurer le repli. Non vérifié à ce jour. Tant que
+ça n'est pas fait, reproduire `0x1e` tel quel sans lui prêter de sens.
 
 **Effet de bord constaté** : un changement de luminosité provoque un **bref retour à l'affichage
 intégré** (« NZXT — 39° Liquid ») avant que l'image téléversée ne revienne. La commande semble
 donc réinitialiser le pipeline d'affichage. À prévoir si l'on enchaîne luminosité et image :
 régler la luminosité **avant** d'envoyer l'image, pas après.
+
+### 3.5 Mode d'affichage — `38 01 <mode> <bucket>` ✅
+
+Décodé le 2026-07-31 en recoupant la capture et `_switch_bucket` de `liquidctl`, qui émet
+`[0x38, 0x01, mode, bucketIndex]`. La trame de CAM se lit donc :
+
+```
+38 01 02 00
+   │  │  └── bucket 0
+   │  └───── mode 2
+   └──────── commande
+```
+
+✅ **`38 01 02` sélectionne le mode de diffusion**, celui dans lequel les images téléversées
+s'affichent. Deux observations indépendantes concordent : CAM l'émet à l'init puis diffuse des
+images qui apparaissent bien, et le rejeu Windows du §2.2.1 a constaté que **sans cette trame
+l'image est ignorée en silence**.
+
+⚠️ `liquidctl` nomme ce même mode 2 « liquid » et réserve le mode 4 à l'affichage d'un bucket
+stocké. **Ne pas s'y fier** : son pilote est marqué `(broken)` pour le `1e71:300c`, et nos deux
+observations disent le contraire. En cas de doute, la capture fait foi.
+
+✅ **Confirmé sur le matériel le 2026-07-31**, et c'est `liquidctl` qui a tort sur ce modèle : la
+mire s'affiche après `38 01 02 00`. Le mode 2 est bien le mode de diffusion, pas un mode « liquid ».
+
+### 3.5.1 Les autres modes, mesurés ✅
+
+Session du 2026-07-31, `tools/verifie_ecran.sh`. Une mire envoyée, puis un `38 01 <mode> 00` émis
+juste après la validation :
+
+| Mode | Effet observé |
+|---|---|
+| **2** | l'image reste affichée — c'est le mode nominal |
+| 4 | l'image disparaît **avant** les 30 s du repli. Bascule vers l'emplacement 0, qui est vide |
+| 1 | **écran noir** |
+| 0 | sans effet, l'image reste |
+
+Le mode 4 est celui que `liquidctl` emploie après avoir rempli un emplacement. Il est cohérent
+qu'il éteigne une diffusion : il commute l'affichage vers un emplacement stocké, et le nôtre est
+vide.
+
+🔶 Le mode 1 éteint peut-être l'écran ; une seule observation, et la luminosité à 0 (§3.4) fait
+déjà le travail par un chemin documenté.
+
+### 3.6 Ni bucket, ni gestion mémoire dans la boucle ✅
+
+Résultat **négatif et acquis**, établi par `tools/extrait_kraken.py` sur la capture d'init.
+
+`liquidctl` interroge les buckets, en cherche un libre, calcule un offset mémoire, le configure,
+transfère, puis bascule le bucket actif — à **chaque** image. **CAM ne fait rien de tout cela.**
+Sur les cinquante images de la capture, la boucle est strictement :
+
+```
+36 01 00 01 09   →     annonce, invariante d'une image à l'autre
+   en-tete bulk + 1 228 800 octets
+36 02            →     validation
+37 01 / 37 02    ←     accuses, offset 14 = 01
+```
+
+Aucune trame `32` ni `38` entre deux images. Les seize `32 02 <n>` de l'init ne se reproduisent
+jamais.
+
+**Conséquence sur la dérive du §2.2.1** : elle ne peut pas venir d'une gestion mémoire absente du
+protocole réel. L'hypothèse d'origine — **le paquet de longueur nulle manquant** — reste la seule
+qui tienne, et c'est bien elle qu'il faut corriger en premier.
+
+### 3.7 État de l'écran — `30 01` / `31 01` ✅
+
+Décodé le 2026-07-31. La demande `30 01` est sans paramètre ; la réponse porte la géométrie et les
+réglages courants :
+
+```
+31 01 bb 8c 90 82 0e 90 06 30 00 00 00 00 05 00 80 00 00 10 80 02 80 02 50 01 00 ff ...
+                                                            └─┬─┘ └─┬─┘ │     │
+offset 0x14-0x15  largeur      80 02 = 640  ─────────────────┘      │   │     │
+offset 0x16-0x17  hauteur      80 02 = 640  ────────────────────────┘   │     │
+offset 0x18       luminosite   50    = 80 %  ───────────────────────────┘     │
+offset 0x1a       orientation  00                                             │
+                                                                    offset 0x19 = 01 ❓
+```
+
+Entiers **petit-boutistes**. Les offsets de luminosité et d'orientation correspondent à ceux que
+lit `liquidctl` (`msg[0x18]` et `msg[0x1a]`) — ici les deux sources concordent.
+
+✅ **Le contrôleur annonce lui-même sa résolution.** Le 640×640 du §2 n'est donc plus une déduction
+à partir de la taille des transferts : le matériel le déclare.
+
+✅ La luminosité relue vaut 80, et la trame `30 02 01 50 …` émise par CAM porte `0x50` = 80. Écriture
+et lecture concordent, ce qui confirme une deuxième fois l'offset 3 du §3.4.
+
+❓ Les octets `0x19` (`01`) et `0x1b` (`ff`) restent inexpliqués, ainsi que `0x12-0x13` (`00 10`,
+soit 4096).
 
 ---
 
@@ -244,13 +414,20 @@ fiche de préparation. Le décodage ci-dessus sert alors de vérification, pas d
 
 | # | Question | Comment trancher |
 |---|---|---|
-| 1 | **Corriger la dérive de l'image** — voir §2.2.1 | ajouter le paquet de longueur nulle en fin de transfert. **À faire en premier** |
-| 2 | **RGB ou BGR** confirmé par une mire | une fois la dérive corrigée, afficher les quadrants et lire les positions |
-| 3 | Rôle des octets `12 fa 01 e8` et `09 00 00 00` de l'en-tête | envoyer une image de taille différente |
-| 4 | Orientation | faire varier les octets restants de `30 02` |
-| 5 | Peut-on désactiver le repli de 30 s ? | non identifié — voir §2.2.2 |
-| ~~—~~ | ~~Luminosité~~ | ✅ **tranché — §3.4** |
-| ~~—~~ | ~~Mode d'affichage autonome~~ | ✅ **tranché — §2.3** |
+| ~~1~~ | ~~Corriger la dérive de l'image~~ | ✅ **tranché — §2.2.1, c'était bien le paquet de longueur nulle** |
+| ~~2~~ | ~~RGB ou BGR confirmé par une mire~~ | ✅ **tranché le 2026-07-31 — §2.1, c'est BGR** |
+| 3 | Rôle des octets `12 fa 01 e8` et `09 00 00 00` de l'en-tête | `09 00 00 00` occupe la place du sélecteur de contenu de `liquidctl` (`01` gif, `02` image fixe) ; CAM y met une troisième valeur. Envoyer une image de taille différente |
+| 4 | Écrire l'orientation | lue en `31 01` offset `0x1a` (§3.7), mais l'offset en **écriture** n'est pas établi : la trame de CAM et celle de `liquidctl` ne coïncident pas |
+| 5 | Peut-on désactiver le repli de 30 s ? | 🔶 l'octet `0x1e` de `30 02` vaut 30 (§3.4). Lui donner une autre valeur et mesurer |
+| 6 | **Existe-t-il une commande de retour au mode firmware ?** | non identifiée. Cesser d'émettre suffit — §2.3 |
+| 7 | Autres valeurs de `<mode>` dans `38 01` | seul le mode 2 est observé sur ce modèle — §3.5 |
+| ~~—~~ | ~~Luminosité~~ | ✅ **tranché — §3.4, reconfirmé §3.7** |
+| ~~—~~ | ~~Mode d'affichage autonome~~ | ✅ **tranché — §2.3, corrigé le 2026-07-31** |
+| ~~—~~ | ~~Structure de `38 01`~~ | ✅ **tranché — §3.5** |
+| ~~—~~ | ~~Rôle des buckets dans la boucle~~ | ✅ **tranché — §3.6, ils n'y jouent aucun rôle** |
+| ~~—~~ | ~~Lecture de l'état de l'écran~~ | ✅ **tranché — §3.7** |
+| ~~—~~ | ~~Faut-il attendre les accusés ?~~ | ✅ **oui, et c'est indispensable — §3.2** |
+| ~~—~~ | ~~Sémantique des modes 0, 1 et 4~~ | ✅ **mesurée — §3.5.1** |
 
 ⚠️ **Limite de capture** : USBPcap tronque à 65 535 octets. Les images ne sont donc capturées
 qu'à 5 % (65 508 octets sur 1 228 800). Suffisant pour valider en-tête, cadence et géométrie ;

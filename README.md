@@ -101,6 +101,26 @@ Deux accès restent hors de sa portée :
 - **`/dev/i2c-*`**, nécessaire à la RAM Corsair, dépend encore de la règle d'OpenRGB. À traiter
   avec le chantier RAM.
 
+## L'écran du Kraken
+
+```bash
+reverb screen                                   # resolution, luminosite, orientation
+reverb screen --brightness 40
+ffmpeg -i photo.png -vf scale=640:640 -f rawvideo -pix_fmt bgr24 /tmp/img.raw
+reverb screen --image /tmp/img.raw              # boucle jusqu'a Ctrl-C
+```
+
+L'image fait exactement 1 228 800 octets — 640 × 640 en **BGR**, trois octets par pixel. Reverb ne
+décode ni PNG ni JPEG : la conversion est le travail de `ffmpeg`, et l'interface graphique
+produira ces octets directement.
+
+⚠️ **La commande boucle, et ce n'est pas un choix.** Le firmware reprend la main une trentaine de
+secondes après le dernier envoi ; un affichage durable impose de réémettre. Il n'existe aucune
+commande de retour au mode firmware — arrêter la commande est le seul moyen connu d'y revenir.
+
+`reverb screen --mire` affiche quatre quadrants de couleurs connues. C'est la mire qui a confirmé
+l'ordre BGR, que la rétro-ingénierie n'avait jamais pu vérifier.
+
 ## Documentation
 
 **Les spécifications de protocole font foi**, et cette copie est la référence :
