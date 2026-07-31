@@ -19,11 +19,18 @@ NOTES="/tmp/reverb-observations-demon.txt"
 pause() { echo; read -r -p "   ↳ $1 " r; printf '%s\t%s\n' "$2" "$r" >>"$NOTES"; }
 
 # Un client minimal : envoie une ligne, lit jusqu'à la ligne terminale.
+#
+# Une erreur de connexion est rendue en une phrase, pas en trace Python : ce qui
+# intéresse ici c'est qu'on n'a pas pu parler au démon, pas la pile d'appels.
 dis() {
     python3 -c "
 import socket, sys
-s = socket.socket(socket.AF_UNIX)
-s.connect('$SOCKET')
+try:
+    s = socket.socket(socket.AF_UNIX)
+    s.connect('$SOCKET')
+except OSError as e:
+    print(f'    ❌ socket injoignable : {e.strerror}')
+    sys.exit(1)
 s.sendall((sys.argv[1] + '\n').encode())
 for l in s.makefile('r'):
     print('    ' + l.rstrip())
@@ -35,14 +42,10 @@ echo "═══ 1. Installation ═══"
 cd "$RACINE" || exit 1
 cargo build --release 2>&1 | tail -1
 
-if ! getent group reverb >/dev/null; then
+getent group reverb >/dev/null || {
     echo "   Création du groupe reverb…"
-    sudo groupadd -f reverb && sudo usermod -aG reverb "$USER"
-    echo "   ⚠️ Groupe créé. Il faut te DÉCONNECTER/RECONNECTER pour qu'il prenne."
-    echo "      Le script continue : systemd n'a pas besoin d'attendre, mais les"
-    echo "      étapes qui parlent au socket échoueront tant que tu n'as pas"
-    echo "      rouvert ta session. Relance-le après."
-fi
+    sudo groupadd -f reverb && sudo usermod -aG reverb "$USER" || exit 1
+}
 
 sudo install -m 0755 target/release/reverbd /usr/local/bin/ \
     && sudo install -m 0644 packaging/reverbd.service /etc/systemd/system/ \
@@ -50,6 +53,22 @@ sudo install -m 0755 target/release/reverbd /usr/local/bin/ \
     && sudo systemctl enable --now reverbd \
     && echo "   ✅ installé et démarré"
 sleep 2
+
+# Le groupe existe, mais une session ouverte avant sa création ne le connaît
+# pas : le noyau fixe les groupes au login et ne les relit jamais. Plutôt que
+# d'exiger une déconnexion, on se relance dans une session de groupe — `sg`
+# fait exactement ça, et la garde ci-dessous empêche la récursion puisque le
+# script relancé, lui, aura le groupe.
+if ! id -nG | grep -qw reverb; then
+    echo
+    echo "   Le groupe reverb n'est pas actif dans cette session — c'est normal,"
+    echo "   il vient d'être créé. Relance du script sous « sg reverb »…"
+    echo
+    exec sg reverb "$0" || {
+        echo "   ❌ « sg » a échoué. Déconnecte-toi, reconnecte-toi, et relance." >&2
+        exit 1
+    }
+fi
 
 echo
 echo "═══ 2. Le service tourne, et systemd l'a attendu ═══"
