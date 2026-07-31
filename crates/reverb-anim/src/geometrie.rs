@@ -131,9 +131,12 @@ pub struct Point {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Plan {
     /// Couché : plancher et plafond. Toutes ses LED sont à la même hauteur —
-    /// c'est ce qui permet à une onde verticale de les atteindre ensemble.
+    /// c'est ce qui permet à une onde verticale de les atteindre ensemble, et
+    /// aussi ce qui l'empêche de les dégrader.
     Couche,
-    /// Debout : face avant (le radiateur) et face arrière.
+    /// Sur le flanc du plateau de carte mère : les trois du radiateur.
+    Flanc,
+    /// Debout dans le plan avant-arrière : le ventilateur du fond.
     Debout,
 }
 
@@ -147,31 +150,69 @@ const ENTRAXE: f32 = 140.0;
 /// ventilateurs voisins.
 const RAYON: f32 = 55.0;
 
-/// Hauteur du boîtier occupée, soit trois ventilateurs empilés sur la face avant.
+/// Hauteur du boîtier occupée, soit trois ventilateurs empilés sur le flanc.
 const HAUTEUR: f32 = 3.0 * ENTRAXE;
 
 /// Profondeur occupée, soit trois ventilateurs alignés au plancher.
 const PROFONDEUR: f32 = 3.0 * ENTRAXE;
 
-/// Centre et plan de chaque ventilateur, dans l'ordre de [`Position::ALL`].
+/// Distance de la vitre au plateau de carte mère.
+///
+/// 🔶 Estimée. Seul son rapport aux deux autres compte, et il n'a d'effet que
+/// sur la forme du tour du boîtier.
+const LARGEUR: f32 = 220.0;
+
+/// Milieu de la largeur : l'axe des ventilateurs couchés et de celui du fond.
+const MILIEU: f32 = LARGEUR / 2.0;
+
+/// Où l'écoulement entre dans un ventilateur, en heures d'horloge.
+///
+/// ✅ **Relevé auprès de Nico le 2026-08-01**, dans ses termes : « on part du
+/// bas des ventilos d'en bas et on remonte vers la face du fond du boîtier, où
+/// se situe la CM, puis on grimpe ce fond, puis on arrive en haut et là on part
+/// du fond des ventilos du haut pour revenir vers nous ».
+///
+/// C'est une donnée que ni le protocole ni la position ne portent : quand la
+/// direction demandée **aplatit** un ventilateur — une onde verticale sur un
+/// ventilateur couché, qui n'a aucune hauteur — rien ne dit par où le motif
+/// doit le traverser. Cette table le dit.
+///
+/// Les heures sont **absolues dans le repère du boîtier**, avec la convention
+/// de la mesure d'orientation : midi vers le haut pour un ventilateur debout,
+/// vers le plateau de carte mère pour un ventilateur couché. Elles ne dépendent
+/// donc pas de l'orientation de la LED 1, et ne changent pas si l'on remonte un
+/// ventilateur.
+const ENTREE_MIDI: u16 = 0;
+const ENTREE_SIX_HEURES: u16 = 180;
+
+/// Centre, plan et point d'entrée de chaque ventilateur, dans l'ordre de
+/// [`Position::ALL`].
 ///
 /// « gauche » est le plus proche de l'**arrière** : c'est ce que la mesure a
 /// établi, et ce que la disposition ATX recoupe.
-const CENTRES: [(Point, Plan); 10] = [
-    // Plancher, d'arrière en avant.
-    (pt(0.0, 0.0, 350.0), Plan::Couche),
-    (pt(0.0, 0.0, 210.0), Plan::Couche),
-    (pt(0.0, 0.0, 70.0), Plan::Couche),
-    // Face avant, le radiateur du Kraken, de haut en bas.
-    (pt(0.0, 350.0, 0.0), Plan::Debout),
-    (pt(0.0, 210.0, 0.0), Plan::Debout),
-    (pt(0.0, 70.0, 0.0), Plan::Debout),
-    // Face arrière, en haut.
-    (pt(0.0, 350.0, PROFONDEUR), Plan::Debout),
-    // Plafond, d'arrière en avant.
-    (pt(0.0, HAUTEUR, 350.0), Plan::Couche),
-    (pt(0.0, HAUTEUR, 210.0), Plan::Couche),
-    (pt(0.0, HAUTEUR, 70.0), Plan::Couche),
+///
+/// ⚠️ Le radiateur est sur le **flanc du plateau de carte mère**, pas sur la
+/// face avant. `SPEC-PROTOCOLE-NZXT.md` §3 se contredisait sur ce point
+/// (« 3 sur l'avant » et « plaqué contre la face de la carte mère ») ; Nico a
+/// tranché le 2026-08-01. Une onde avant-arrière les traversait donc de travers.
+const CENTRES: [(Point, Plan, u16); 10] = [
+    // Plancher, d'arrière en avant. Le flux les traverse de la vitre vers la
+    // carte mère, donc il entre par six heures.
+    (pt(MILIEU, 0.0, 350.0), Plan::Couche, ENTREE_SIX_HEURES),
+    (pt(MILIEU, 0.0, 210.0), Plan::Couche, ENTREE_SIX_HEURES),
+    (pt(MILIEU, 0.0, 70.0), Plan::Couche, ENTREE_SIX_HEURES),
+    // Le radiateur, empilé sur le flanc de la carte mère, de haut en bas. Le
+    // flux le grimpe : il entre par le bas.
+    (pt(LARGEUR, 350.0, 210.0), Plan::Flanc, ENTREE_SIX_HEURES),
+    (pt(LARGEUR, 210.0, 210.0), Plan::Flanc, ENTREE_SIX_HEURES),
+    (pt(LARGEUR, 70.0, 210.0), Plan::Flanc, ENTREE_SIX_HEURES),
+    // Le fond, en haut. Dernier de la boucle, traversé de haut en bas.
+    (pt(MILIEU, 350.0, PROFONDEUR), Plan::Debout, ENTREE_MIDI),
+    // Plafond, d'arrière en avant. Le flux revient de la carte mère vers nous,
+    // donc il entre par midi.
+    (pt(MILIEU, HAUTEUR, 350.0), Plan::Couche, ENTREE_MIDI),
+    (pt(MILIEU, HAUTEUR, 210.0), Plan::Couche, ENTREE_MIDI),
+    (pt(MILIEU, HAUTEUR, 70.0), Plan::Couche, ENTREE_MIDI),
 ];
 
 /// Écart de `Point` utilisable dans une constante.
@@ -181,10 +222,9 @@ const fn pt(x: f32, y: f32, z: f32) -> Point {
 
 /// Décalage latéral des barrettes par rapport au plan des ventilateurs.
 ///
-/// Non nul à dessein : il place la RAM hors du plan médian, comme elle l'est
-/// réellement, et garantit qu'aucune LED de barrette ne tombe sur une LED de
-/// ventilateur.
-const RAM_X: f32 = 20.0;
+/// Du côté du plateau de carte mère, comme la RAM l'est réellement, et à une
+/// valeur qu'aucune LED de ventilateur n'atteint.
+const RAM_X: f32 = 150.0;
 
 /// Profondeur de la barrette la plus proche du CPU.
 const RAM_Z: f32 = 240.0;
@@ -281,16 +321,15 @@ impl Geometrie {
         if led >= LEDS_PER_FAN as usize {
             return None;
         }
-        let (centre, plan) = CENTRES[position.index()];
+        let (centre, plan, _) = CENTRES[position.index()];
         let angle = f32::from(self.orientations[position.index()].angle_led(led)).to_radians();
         // Vers quoi pointe midi, selon le plan :
         //
-        // - **debout** (radiateur, arrière) — vers le haut du boîtier, sans
-        //   ambiguïté possible ;
-        // - **couché** (plancher, plafond) — ✅ **vers le plateau de carte
-        //   mère**, donc vers le flanc, et non vers l'arrière. Le plan étant
-        //   horizontal, « midi » n'a de sens que rapporté à la direction depuis
-        //   laquelle on l'a regardé ; la mesure a tranché.
+        // - **debout** et **flanc** — vers le haut du boîtier, sans ambiguïté ;
+        // - **couché** — ✅ **vers le plateau de carte mère**, donc vers le
+        //   flanc, et non vers l'arrière. Le plan étant horizontal, « midi »
+        //   n'a de sens que rapporté à la direction depuis laquelle on l'a
+        //   regardé ; la mesure a tranché.
         let (sin, cos) = (angle.sin(), angle.cos());
         Some(match plan {
             // La hauteur est **exactement** celle du centre, sans passer par un
@@ -302,12 +341,41 @@ impl Geometrie {
                 y: centre.y,
                 z: centre.z + RAYON * sin,
             },
+            Plan::Flanc => Point {
+                x: centre.x,
+                y: centre.y + RAYON * cos,
+                z: centre.z + RAYON * sin,
+            },
             Plan::Debout => Point {
                 x: centre.x + RAYON * sin,
                 y: centre.y + RAYON * cos,
                 z: centre.z,
             },
         })
+    }
+
+    /// Le centre d'un ventilateur, indépendant de son orientation.
+    pub fn centre_ventilateur(&self, position: Position) -> Point {
+        CENTRES[position.index()].0
+    }
+
+    /// Où en est une LED dans la traversée de son ventilateur : 0 au point
+    /// d'entrée du flux, 1 à l'opposé.
+    ///
+    /// C'est ce qui permet à un motif de franchir un ventilateur LED par LED
+    /// **même quand la direction demandée l'aplatit** — une onde verticale sur
+    /// un ventilateur couché, qui n'a aucune hauteur. Le point d'entrée vient
+    /// de la table [`CENTRES`], relevée auprès de Nico.
+    ///
+    /// Sur un ventilateur que la direction n'aplatit pas, cette traversée
+    /// **coïncide** avec la position réelle : pour un ventilateur du radiateur,
+    /// entrée en bas, elle vaut `(1 + cos θ) / 2`, soit exactement sa hauteur
+    /// normalisée dans l'anneau. Ce n'est donc pas un motif plaqué par-dessus la
+    /// géométrie, c'est son prolongement là où elle ne dit plus rien.
+    pub fn traversee(&self, position: Position, led: usize) -> f32 {
+        let entree = f32::from(CENTRES[position.index()].2);
+        let angle = f32::from(self.orientations[position.index()].angle_led(led));
+        (1.0 - (angle - entree).to_radians().cos()) / 2.0
     }
 
     /// Position d'une LED de barrette. `slot` dans `0..4`, `led` dans `0..11`.

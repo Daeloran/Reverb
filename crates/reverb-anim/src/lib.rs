@@ -14,12 +14,16 @@
 //!
 //! ## Comment un motif traverse le boîtier
 //!
-//! Chaque animation ramène une LED à un seul nombre — sa **projection** dans
-//! la direction demandée, entre 0 et 1 — puis peint en fonction de ce nombre
-//! et du temps. C'est ce qui remplace la file d'attente numérotée de la
-//! première `vague` : deux LED à la même hauteur ont la même projection en
-//! `bas-haut`, donc reçoivent la même couleur, quels que soient leur
-//! ventilateur et leur numéro d'ordre.
+//! Chaque animation ramène une LED à un seul nombre entre 0 et 1, puis peint en
+//! fonction de ce nombre et du temps. C'est ce qui remplace la file d'attente
+//! numérotée de la première `vague`.
+//!
+//! Ce nombre se calcule de deux façons, et le catalogue se partage entre elles.
+//! `vague` prend la **position réelle** le long de la direction : deux LED à la
+//! même hauteur reçoivent donc la même couleur d'une onde qui monte, quels que
+//! soient leur ventilateur et leur numéro d'ordre. Les cinq autres suivent
+//! l'**écoulement**, qui traverse chaque ventilateur d'un bord à l'autre même
+//! quand la direction l'aplatit — voir [`Geometrie::traversee`].
 
 use std::fmt;
 
@@ -39,15 +43,16 @@ pub struct Image {
 
 /// Direction d'un motif dans le boîtier.
 ///
-/// ⚠️ **Il n'y a pas de direction gauche-droite, et c'est une conclusion de la
-/// mesure, pas un oubli.** Les trois ventilateurs du plancher et les trois du
-/// plafond s'alignent d'avant en arrière, les barrettes aussi
-/// (`docs/GEOMETRIE.md`) : l'axe des flancs est occupé par la seule épaisseur
-/// des anneaux, et une onde qui le traverserait n'aurait rien à traverser.
+/// `Horaire` et `Antihoraire` décrivent **le tour du boîtier vu de face** :
+/// plancher, flanc de la carte mère, plafond. C'est le chemin que Nico décrit —
+/// « on part du bas des ventilos d'en bas, on remonte vers la face du fond où
+/// se situe la CM, on grimpe ce fond, puis du fond des ventilos du haut on
+/// revient vers nous ».
 ///
-/// `Horaire` et `Antihoraire` tournent **autour de l'axe des flancs** : le tour
-/// du boîtier tel qu'on le voit par la vitre — plancher, face avant, plafond,
-/// arrière. C'est le seul cercle que ce boîtier contienne réellement.
+/// ⚠️ **Il n'y a pas de direction gauche-droite.** Le seul axe qu'elle
+/// traverserait est celui de la vitre au plateau de carte mère, et il ne porte
+/// que trois ventilateurs — le radiateur, à une extrémité. Les sept autres s'y
+/// superposeraient.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     BasHaut,
@@ -91,6 +96,14 @@ impl Direction {
 const VITESSE_MIN: u8 = 1;
 /// Vitesse la plus rapide acceptée.
 const VITESSE_MAX: u8 = 10;
+
+/// Part d'un cycle qu'un ventilateur occupe dans le motif.
+///
+/// Deux fois le rayon de l'anneau rapporté à l'étendue du boîtier : c'est la
+/// place qu'un ventilateur occupe **réellement** le long d'une direction qui ne
+/// l'aplatit pas. La reprendre pour ceux que la direction aplatit fait traverser
+/// tous les ventilateurs à la même allure, quel que soit leur plan.
+const EMPRISE: f32 = 0.26;
 
 /// Durée d'un cycle complet, en pas, à la vitesse 1.
 ///
@@ -289,16 +302,21 @@ impl Animation {
 
         let mut ventilateurs = [(Position::BasGauche, [Rgb::BLACK; LEDS_PER_FAN as usize]); 10];
         for (place, position) in ventilateurs.iter_mut().zip(Position::ALL) {
-            let orientation = geometrie.orientation(position);
+            // Le ventilateur entier occupe une place dans le motif ; chacune de
+            // ses LED occupe une fraction de cette place, selon où elle se
+            // trouve dans sa traversée.
+            let du_ventilateur = projection(
+                reglages.direction,
+                geometrie.centre_ventilateur(position),
+                bornes,
+            );
             let mut couleurs = [Rgb::BLACK; LEDS_PER_FAN as usize];
             for (led, couleur) in couleurs.iter_mut().enumerate() {
                 if let Some(point) = geometrie.led_ventilateur(position, led) {
-                    let projection = projection(reglages.direction, point, bornes);
-                    // Le rang de la LED sur son propre anneau, d'après
-                    // l'orientation mesurée : c'est ce qui fait tourner un
-                    // ventilateur sur lui-même en plus du mouvement d'ensemble.
-                    let propre = f32::from(orientation.angle_led(led)) / 360.0;
-                    *couleur = self.peindre(reglages, projection, propre, temps);
+                    let spatiale = projection(reglages.direction, point, bornes);
+                    let flux =
+                        du_ventilateur + EMPRISE * (geometrie.traversee(position, led) - 0.5);
+                    *couleur = self.peindre(reglages, spatiale, flux, temps);
                 }
             }
             *place = (position, couleurs);
@@ -306,13 +324,13 @@ impl Animation {
 
         let mut barrettes = [[Rgb::BLACK; LEDS_PER_STICK]; SLOT_COUNT];
         for (slot, couleurs) in barrettes.iter_mut().enumerate() {
-            // Une barrette n'a pas d'anneau : son rang propre est son emplacement,
-            // ce qui suffit à ce que les quatre ne battent pas à l'unisson.
-            let propre = slot as f32 / SLOT_COUNT as f32;
             for (led, couleur) in couleurs.iter_mut().enumerate() {
                 if let Some(point) = geometrie.led_barrette(slot, led) {
-                    let projection = projection(reglages.direction, point, bornes);
-                    *couleur = self.peindre(reglages, projection, propre, temps);
+                    // Une barrette est une ligne de onze LED : la direction ne
+                    // l'aplatit jamais au point qu'il faille lui inventer une
+                    // traversée. Sa position réelle suffit dans les deux voies.
+                    let spatiale = projection(reglages.direction, point, bornes);
+                    *couleur = self.peindre(reglages, spatiale, spatiale, temps);
                 }
             }
         }
@@ -325,40 +343,36 @@ impl Animation {
 
     /// La couleur d'une LED, connaissant sa place dans le boîtier et l'instant.
     ///
-    /// `projection` est sa position le long de la direction demandée ; `propre`
-    /// est son rang sur son propre organe — l'angle de la LED sur son anneau,
-    /// l'emplacement d'une barrette.
+    /// Deux places, et le catalogue se partage entre elles :
     ///
-    /// ## Pourquoi `propre` existe, et pourquoi `vague` ne s'en sert pas
+    /// - `spatiale` — la position réelle le long de la direction demandée ;
+    /// - `flux` — la place du ventilateur, plus la traversée de la LED depuis
+    ///   le point d'entrée de l'écoulement.
+    ///
+    /// ## Pourquoi les deux, et pourquoi `vague` s'en tient à la première
     ///
     /// Une onde purement plane éclaire d'un seul bloc tout ce qui se trouve
     /// dans un même plan d'égale phase. Or **six ventilateurs sur dix sont
     /// couchés** : les vingt-quatre LED du plancher sont exactement à la même
     /// hauteur, et une onde `bas-haut` les allume ensemble, d'une seule
-    /// couleur. En `avant-arriere`, ce sont les trois du radiateur, plaqués
-    /// dans un même plan vertical. Constaté à l'œil le 2026-07-31.
+    /// couleur. Constaté à l'œil le 2026-07-31.
     ///
     /// Ce n'est pas un défaut de calcul, c'est la géométrie du boîtier : une
     /// onde plane ne peut pas dégrader ce qui n'a aucune épaisseur dans sa
-    /// direction. Le `propre` fait tourner chaque anneau sur lui-même par
-    /// dessus le mouvement d'ensemble, ce qui rend son relief à un ventilateur
-    /// que la direction aplatit — et, l'orientation étant mesurée par
-    /// ventilateur, deux voisins montés différemment ne tournent pas en phase.
+    /// direction. Le `flux` prolonge la géométrie là où elle ne dit plus
+    /// rien — voir [`Geometrie::traversee`], et noter qu'il **coïncide** avec
+    /// la position réelle sur un ventilateur que la direction n'aplatit pas.
     ///
-    /// **`vague` s'en abstient**, seule du catalogue : elle est l'onde plane, et
-    /// la démonstration que le boîtier et la RAM sont bien synchronisés dans
-    /// l'espace. Les cinq autres ont du relief.
-    fn peindre(&self, reglages: &Reglages, projection: f32, propre: f32, temps: f32) -> Rgb {
-        // Assez pour donner du relief, trop peu pour noyer la direction : au
-        // tiers d'un cycle, un anneau complet se lit encore comme un détail du
-        // motif d'ensemble et non comme un motif concurrent.
-        const RELIEF: f32 = 0.3;
-        let place = fraction(projection + RELIEF * propre);
+    /// **`vague` s'en tient au `spatiale`**, seule du catalogue : elle est
+    /// l'onde plane, et la démonstration que le boîtier et la RAM sont
+    /// synchronisés dans l'espace. Les cinq autres suivent l'écoulement.
+    fn peindre(&self, reglages: &Reglages, spatiale: f32, flux: f32, temps: f32) -> Rgb {
+        let place = fraction(flux);
 
         match self.famille {
             // Une sinusoïde le long de la direction, et rien d'autre : le seul
             // motif du lot dont la couleur ne dépende que de la projection.
-            Famille::Vague => teinter(reglages.couleur, (1.0 + cycle(projection - temps)) / 2.0),
+            Famille::Vague => teinter(reglages.couleur, (1.0 + cycle(spatiale - temps)) / 2.0),
 
             // Une tête vive suivie d'une traînée qui s'éteint. Le reste est
             // noir, ce que le cache de cibles inchangées du démon apprécie.
@@ -442,19 +456,21 @@ fn projection(direction: Direction, point: Point, bornes: (Point, Point)) -> f32
         Direction::HautBas => 1.0 - rapport(point.y, bas.y, haut.y),
         Direction::AvantArriere => rapport(point.z, bas.z, haut.z),
         Direction::ArriereAvant => 1.0 - rapport(point.z, bas.z, haut.z),
-        Direction::Horaire => angle_autour_des_flancs(point, bornes),
-        Direction::Antihoraire => 1.0 - angle_autour_des_flancs(point, bornes),
+        Direction::Horaire => angle_du_tour(point, bornes),
+        Direction::Antihoraire => 1.0 - angle_du_tour(point, bornes),
     }
 }
 
-/// L'angle d'un point autour de l'axe des flancs, entre 0 et 1.
+/// L'angle d'un point sur le tour du boîtier, entre 0 et 1.
 ///
-/// C'est le tour du boîtier vu par la vitre : plancher, face avant, plafond,
-/// arrière.
-fn angle_autour_des_flancs(point: Point, (bas, haut): (Point, Point)) -> f32 {
+/// La rotation se fait dans le plan **vitre / hauteur**, donc autour de l'axe
+/// avant-arrière : c'est le seul cercle que ce boîtier contienne réellement,
+/// puisque ses parois occupées sont le plancher, le flanc de la carte mère et
+/// le plafond.
+fn angle_du_tour(point: Point, (bas, haut): (Point, Point)) -> f32 {
+    let centre_x = (bas.x + haut.x) / 2.0;
     let centre_y = (bas.y + haut.y) / 2.0;
-    let centre_z = (bas.z + haut.z) / 2.0;
-    let angle = (point.z - centre_z).atan2(point.y - centre_y);
+    let angle = (point.x - centre_x).atan2(point.y - centre_y);
     fraction(angle / std::f32::consts::TAU + 0.5)
 }
 

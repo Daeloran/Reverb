@@ -144,14 +144,15 @@ numéro d'ordre. C'est ce que la [géométrie mesurée](docs/GEOMETRIE.md) rend 
 
 ⚠️ **Une onde purement plane aplatit ce qui n'a pas d'épaisseur dans sa direction.** Six
 ventilateurs sur dix sont couchés : leurs vingt-quatre LED sont exactement à la même hauteur, et
-`bas-haut` les allumerait d'un seul bloc. Les trois du radiateur subiraient le même sort en
-`avant-arriere`. Cinq familles ajoutent donc un **relief** — l'angle propre de chaque LED sur son
-anneau, qui fait tourner un ventilateur sur lui-même par-dessus le mouvement d'ensemble, et que
-l'orientation mesurée déphase d'un ventilateur à l'autre.
+`bas-haut` les allumerait d'un seul bloc. Cinq familles suivent donc l'**écoulement** plutôt que
+la seule position : chaque ventilateur est traversé d'un bord à l'autre depuis un point d'entrée
+relevé à l'œil (`docs/GEOMETRIE.md`), de sorte que le motif le franchit LED par LED même quand la
+direction ne lui donne aucune épaisseur. Sur un ventilateur que la direction n'aplatit pas, cette
+traversée **coïncide** avec la position réelle : ce n'est pas un motif plaqué par-dessus la
+géométrie, c'est son prolongement là où elle se tait.
 
-`vague` s'en abstient, seule du catalogue : elle *est* l'onde plane, et la démonstration que le
-boîtier et la RAM sont synchronisés dans l'espace. La direction par défaut est `horaire`, la seule
-où les dix ventilateurs ont tous de l'épaisseur.
+`vague` s'en tient à la position, seule du catalogue : elle *est* l'onde plane, et la
+démonstration que le boîtier et la RAM sont synchronisés dans l'espace.
 
 ### La géométrie
 

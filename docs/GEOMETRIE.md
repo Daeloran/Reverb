@@ -59,8 +59,14 @@ identique en haut et en bas — c'est un contrôle croisé qui n'était pas dema
 Les trois du **bas** et les trois du **dessus** s'alignent d'**avant en arrière**, pas d'un flanc
 à l'autre. Dans les deux cas, « gauche » est le plus proche de l'**arrière** du boîtier.
 
-Les trois du **radiateur** sont empilés verticalement sur la face avant, « radiateur bas » étant
-bien le plus bas.
+Les trois du **radiateur** sont empilés verticalement sur le **flanc du plateau de carte mère**,
+« radiateur bas » étant bien le plus bas.
+
+> ⚠️ **Corrigé le 2026-08-01.** `SPEC-PROTOCOLE-NZXT.md` §3 se contredit sur ce point : « 3 sur
+> l'avant » et, dans la même phrase, « plaqué contre la face de la carte mère ». La première
+> version de la table les avait placés sur la face avant, ce qui faisait traverser la direction
+> `avant-arriere` de travers et ne laissait aucun ventilateur sur le chemin que décrit
+> l'écoulement. Le boîtier n'a donc **rien** sur sa face avant.
 
 La **RAM** se situe entre le plancher et le plafond, un peu plus près du plafond, et à mi-chemin
 entre le plan du radiateur et le ventilateur arrière. L'écran du Kraken est immédiatement du côté
@@ -69,6 +75,36 @@ arrière des barrettes.
 > Ce dernier point recoupe la disposition ATX : sur une carte mère, le socket CPU est du côté du
 > panneau d'E/S arrière par rapport aux slots DIMM. Deux observations indépendantes concordent sur
 > « gauche = arrière », ce qui est plus solide que l'une des deux seule.
+
+## Par où l'écoulement entre dans un ventilateur ✅
+
+Relevé le **2026-08-01**, dans les termes de Nico :
+
+> on part du bas des ventilos d'en bas et on remonte vers la face du fond du boîtier, où se situe
+> la CM, puis on grimpe ce fond, puis on arrive en haut et là on part du fond des ventilos du haut
+> pour revenir vers nous
+
+Soit, en heures d'horloge — le point par lequel le motif **entre** dans chaque ventilateur :
+
+| Groupe | Entrée |
+|---|---|
+| les trois du plancher | 6 h |
+| les trois du radiateur | 6 h |
+| les trois du plafond | 12 h |
+| celui du fond | 12 h |
+
+**Pourquoi cette donnée doit exister.** Quand la direction demandée aplatit un ventilateur — une
+onde verticale sur un ventilateur couché, qui n'a aucune hauteur — sa position ne dit plus par où
+le motif doit le traverser. Ni le protocole ni la géométrie ne le portent : c'est un choix de
+lecture, et il appartient à celui qui regarde le boîtier.
+
+Les heures sont **absolues dans le repère du boîtier**, même convention que les angles ci-dessus.
+Elles ne dépendent donc pas de l'orientation de la LED 1 et ne changent pas si l'on remonte un
+ventilateur.
+
+Sur un ventilateur que la direction n'aplatit **pas**, la traversée ainsi calculée coïncide
+exactement avec la position réelle. Ce n'est donc pas un motif plaqué par-dessus la géométrie,
+c'est son prolongement là où elle se tait.
 
 ## Échelle
 

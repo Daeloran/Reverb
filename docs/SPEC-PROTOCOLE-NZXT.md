@@ -121,8 +121,13 @@ intervertit rouge et vert sur toute l'installation.
 > raisonnement indirect — « celui qui n'a qu'un canal utilisé » — qui casserait silencieusement
 > si un ventilateur était ajouté.
 
-Disposition réelle : **3 en bas**, **3 sur l'avant** — le radiateur du Kraken, plaqué contre la
-face de la carte mère —, **3 sur le dessus**, **1 à l'arrière**.
+Disposition réelle : **3 en bas**, **3 sur le flanc de la carte mère** — le radiateur du Kraken —,
+**3 sur le dessus**, **1 à l'arrière**. La face avant ne porte aucun ventilateur.
+
+> ⚠️ **Corrigé le 2026-08-01.** Cette phrase disait « 3 sur l'avant » tout en précisant, dans le
+> même souffle, « plaqué contre la face de la carte mère » — deux parois différentes. La
+> contradiction est passée inaperçue jusqu'à ce qu'une animation traverse le boîtier et n'ait
+> rien à grimper. Voir [`GEOMETRIE.md`](GEOMETRIE.md).
 
 ⚠️ Les trois ventilateurs du radiateur sont sur le device **7**, pas sur le Kraken. La pompe n'a
 aucune LED.
