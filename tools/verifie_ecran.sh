@@ -1,25 +1,18 @@
 #!/usr/bin/env bash
-# Vérification matérielle de l'écran du Kraken (issue #13), troisième passe.
+# Dernière vérification de l'écran du Kraken (issue #13) : la dérive.
 #
-# ⚠️ REGARDE L'ÉCRAN DU KRAKEN. Seul l'œil répond.
+# ⚠️ REGARDE L'ÉCRAN DU KRAKEN pendant toute la durée.
 #
-# Historique des deux passes précédentes :
+# Tout le reste est acquis : la mire s'affiche, et ses quadrants sont à leur
+# place — rouge en haut à gauche, ce qui confirme l'ordre BGR et clôt la
+# question ouverte n° 2 de la spec.
 #
-#   1. aucune image, affichage firmware dégradé. Cause : un paquet de longueur
-#      nulle était émis après l'en-tête de 20 octets, qui n'en a pas besoin.
-#      Corrigé.
-#   2. toujours aucune image, affichage firmware propre. Deux défauts trouvés
-#      depuis, tous deux visibles dans la capture depuis le début :
-#        - CAM attend l'accusé 37 01 avant d'envoyer les données ; on
-#          enchaînait sans rien attendre. Corrigé ;
-#        - « 38 01 02 » est peut-être le mode LIQUIDE et non le mode image.
-#          liquidctl le nomme ainsi, et l'écran nous montre effectivement le
-#          liquide. C'est ce que cette passe teste.
+# Ce qui reste : le §2.2.1 signale qu'à l'envoi RÉPÉTÉ, l'implémentation
+# Windows voyait l'image se décaler « comme une grille qui défile ». La cause
+# supposée était le paquet de longueur nulle, que Reverb émet maintenant au bon
+# endroit. Reste à le vérifier.
 #
-# Six variantes, de la plus proche de la capture à la plus proche de liquidctl.
-# La première qui affiche la mire tranche.
-#
-# Aucun sudo. Usage : ./tools/verifie_ecran.sh
+# Usage : ./tools/verifie_ecran.sh
 
 set -u
 
@@ -30,43 +23,36 @@ NOTES="/tmp/reverb-observations-ecran.txt"
 [ -x "$REVERB" ] || { echo "Compile d'abord : cargo build" >&2; exit 1; }
 : >"$NOTES"
 
-echo "Mire attendue :   haut-gauche ROUGE    haut-droite VERT"
-echo "                  bas-gauche  BLEU     bas-droite  BLANC"
+pause() { echo; read -r -p "   ↳ $1 " r; printf '%s\t%s\n' "$2" "$r" >>"$NOTES"; }
+
+echo "═══ 1. Vingt envois d'affilée ═══"
+echo "La mire doit rester IMMOBILE. Surveille surtout la frontière entre les"
+echo "quadrants : une dérive d'un pixel par envoi s'y verrait avant tout."
 echo
-echo "À chaque essai, réponds par ce que tu vois. « rien » si l'écran ne bouge"
-echo "pas de son affichage NZXT habituel."
+for i in $(seq 1 20); do
+    printf "\r   envoi %2d/20" "$i"
+    "$REVERB" screen --mire --once >/dev/null 2>&1 || { echo; echo "   ❌ envoi $i refusé"; break; }
+done
 echo
+sleep 2
+pause "L'image a-t-elle bougé, glissé ou défilé ? (stable / décrire)" "derive"
 
-essai() {
-    local libelle="$1"; shift
-    echo "─── $libelle"
-    echo "    $ reverb screen --mire --once $*"
-    # shellcheck disable=SC2086
-    if ! "$REVERB" screen --mire --once "$@" 2>&1 | sed 's/^/    /'; then
-        printf '%s\tCOMMANDE EN ECHEC\n' "$libelle" >>"$NOTES"
-        return
-    fi
-    sleep 4
-    read -r -p "    ↳ que montre l'écran ? " reponse
-    printf '%s\t%s\n' "$libelle" "$reponse" >>"$NOTES"
-    echo
-}
+echo
+echo "═══ 2. Le mode boucle, tel qu'on l'utilisera vraiment ═══"
+echo "La commande tourne et réémet toute les 25 s. L'écran ne doit JAMAIS"
+echo "revenir à l'affichage NZXT tant qu'elle tourne."
+echo "Elle s'arrête seule au bout de 70 s — assez pour couvrir deux réémissions."
+echo
+timeout 70 "$REVERB" screen --mire || true
+echo
+pause "L'écran est-il resté sur la mire tout du long ? (oui / décrire)" "boucle"
 
-essai "1-capture-fidele"
-essai "2-mode-4-apres"            --after-mode 4
-essai "3-preambule"               --full-init
-essai "4-preambule-et-mode-4"     --full-init --after-mode 4
-essai "5-mode-1-apres"            --after-mode 1
-essai "6-mode-0-apres"            --after-mode 0
-
-echo "═══ Si une mire est apparue ═══"
-read -r -p "Quel numéro d'essai a affiché la mire ? (1-6, ou « aucun ») " GAGNANT
-printf 'essai-gagnant\t%s\n' "$GAGNANT" >>"$NOTES"
-
-if [ "$GAGNANT" != "aucun" ] && [ -n "$GAGNANT" ]; then
-    read -r -p "Couleur du quadrant HAUT-GAUCHE ? (rouge/bleu/vert/blanc) " COIN
-    printf 'ordre-composantes\t%s\n' "$COIN" >>"$NOTES"
-fi
+echo
+echo "═══ 3. Le retour au firmware ═══"
+echo "Plus rien n'émet. L'écran doit revenir à « NZXT — xx° Liquid »."
+for i in $(seq 40 -1 1); do printf "\r   %2d s " "$i"; sleep 1; done
+printf "\r         \r"
+pause "L'écran est-il revenu à l'affichage NZXT ? (oui/non)" "repli-firmware"
 
 echo
 echo "═══ Relevé ═══"

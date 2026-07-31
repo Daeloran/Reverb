@@ -63,17 +63,9 @@ pub enum ActionEcran {
         /// Un seul envoi : l'image disparaît au bout d'une trentaine de
         /// secondes, le firmware reprenant la main.
         once: bool,
-        /// Rejoue le préambule complet observé chez CAM avant le premier envoi.
-        full_init: bool,
-        /// Bascule sur ce mode d'affichage APRÈS le transfert. ❓ expérimental.
-        after_mode: Option<u8>,
     },
-    /// Affiche la mire de quadrants qui tranche l'ordre des composantes.
-    Mire {
-        once: bool,
-        full_init: bool,
-        after_mode: Option<u8>,
-    },
+    /// Affiche la mire de quadrants qui a tranché l'ordre des composantes.
+    Mire { once: bool },
 }
 
 /// Quels ventilateurs sont visés.
@@ -121,8 +113,8 @@ USAGE :
     reverb curve --channel <NOM> --point <POINT:CONSIGNE>… [--force]
     reverb screen
     reverb screen --brightness <0-100>
-    reverb screen --image <FICHIER.raw> [--once] [--full-init]
-    reverb screen --mire [--once] [--full-init]
+    reverb screen --image <FICHIER.raw> [--once]
+    reverb screen --mire [--once]
 
 OPTIONS de « screen » — écran du Kraken (aucun droit root nécessaire) :
     (sans option)         affiche résolution, luminosité et orientation,
@@ -138,13 +130,6 @@ OPTIONS de « screen » — écran du Kraken (aucun droit root nécessaire) :
     --mire                mire de quadrants — rouge, vert, bleu, blanc — qui
                           tranche l'ordre des composantes. Si le quadrant
                           haut-gauche apparaît bleu, l'ordre est inversé
-    --after-mode <N>      bascule sur le mode d'affichage N après le transfert.
-                          ❓ expérimental : seul le mode 2 figure dans la
-                          capture, liquidctl emploie le mode 4 pour afficher
-                          un emplacement qu'il vient de remplir
-    --full-init           rejoue le préambule complet observé chez CAM avant
-                          le premier envoi : 36 04, 36 03 et l'énumération
-                          des seize emplacements. 🔶 rôle non établi
     --once                un seul envoi. Sans cette option la commande boucle
                           et réémet l'image, faute de quoi le firmware
                           reprend la main au bout d'une trentaine de secondes.
@@ -240,22 +225,11 @@ fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String>
     let mut image: Option<std::path::PathBuf> = None;
     let mut mire = false;
     let mut once = false;
-    let mut full_init = false;
-    let mut after_mode: Option<u8> = None;
 
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--once" => once = true,
             "--mire" => mire = true,
-            "--full-init" => full_init = true,
-            "--after-mode" => {
-                let brut = args
-                    .next()
-                    .ok_or_else(|| "« --after-mode » attend un numéro de mode.".to_owned())?;
-                after_mode = Some(brut.trim().parse().map_err(|_| {
-                    format!("mode « {brut} » invalide : attendu un entier de 0 à 255.")
-                })?);
-            }
             "--brightness" => {
                 let brut = args
                     .next()
@@ -289,17 +263,8 @@ fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String>
 
     let action = match (luminosite, image, mire) {
         (Some(percent), _, _) => ActionEcran::Luminosite(percent),
-        (_, Some(chemin), _) => ActionEcran::Image {
-            chemin,
-            once,
-            full_init,
-            after_mode,
-        },
-        (_, _, true) => ActionEcran::Mire {
-            once,
-            full_init,
-            after_mode,
-        },
+        (_, Some(chemin), _) => ActionEcran::Image { chemin, once },
+        (_, _, true) => ActionEcran::Mire { once },
         _ => ActionEcran::Etat,
     };
 

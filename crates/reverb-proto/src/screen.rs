@@ -94,43 +94,7 @@ const BRIGHTNESS_TRAILER: u8 = 0x1e;
 /// [`FIRMWARE_FALLBACK_SECS`] — cesser d'émettre suffit, et c'est le seul
 /// mécanisme observé (spec §2.3).
 pub fn broadcast_mode() -> Frame {
-    display_mode(BROADCAST)
-}
-
-/// Sélectionne un mode d'affichage quelconque — `38 01 <mode> 00` (spec §3.5).
-///
-/// ❓ **Seul le mode 2 est observé dans la capture.** `liquidctl` emploie le
-/// mode 4 pour afficher un emplacement qu'il vient de remplir, et nomme le
-/// mode 2 « liquid » — ce que les premières vérifications matérielles semblent
-/// lui donner raison, contre la lecture qu'on avait faite de la capture.
-///
-/// Cette fonction existe pour **trancher par la mesure**, pas pour être
-/// employée à l'aveugle. Tant qu'un mode n'est pas établi, ne pas le câbler
-/// dans le chemin nominal.
-pub fn display_mode(mode: u8) -> Frame {
-    packet(&[0x38, 0x01, mode, BUCKET])
-}
-
-/// Nombre d'emplacements de stockage énumérés par CAM au démarrage (spec §3.1).
-pub const BUCKETS: u8 = 16;
-
-/// Préambule que CAM émet avant sa première image, et que la boucle de
-/// rafraîchissement ne répète jamais (spec §3.1, §3.6).
-///
-/// Dans l'ordre de la capture : `36 04`, `36 03`, puis les seize `32 02 <n>`.
-/// La trame de mode [`broadcast_mode`] s'intercale entre les deux groupes.
-///
-/// 🔶 **Rôle non établi.** Le §3.6 montre que la boucle d'images s'en passe une
-/// fois l'état posé ; ce qu'on ignore, c'est si un envoi isolé, machine
-/// fraîchement démarrée, en dépend. `liquidctl` fait précéder chacun de ses
-/// transferts d'un `36 03`. Ces trames sont donc reproduites telles quelles,
-/// sans qu'aucune interprétation ne leur soit prêtée.
-pub fn preamble() -> Vec<Frame> {
-    let mut trames = vec![packet(&[0x36, 0x04]), packet(&[0x36, 0x03])];
-    for emplacement in 0..BUCKETS {
-        trames.push(packet(&[0x32, 0x02, emplacement]));
-    }
-    trames
+    packet(&[0x38, 0x01, BROADCAST, BUCKET])
 }
 
 /// Demande l'état de l'écran — `30 01` (spec §3.7).
