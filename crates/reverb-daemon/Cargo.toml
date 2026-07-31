@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 reverb-proto = { path = "../reverb-proto" }
+reverb-hw = { path = "../reverb-hw" }
 
 [lints]
 workspace = true

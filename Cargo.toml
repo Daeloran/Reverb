@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/reverb-proto", "crates/reverb-cli", "crates/reverb-daemon"]
+members = ["crates/reverb-proto", "crates/reverb-hw", "crates/reverb-cli", "crates/reverb-daemon"]
 
 [workspace.package]
 edition = "2024"
@@ -9,13 +9,16 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/Daeloran/Reverb"
 
 [workspace.lints.rust]
-# `deny` et non `forbid` : le module `crates/reverb-cli/src/usbfs.rs` doit y
-# déroger, les transferts bulk vers l'écran du Kraken passant par des `ioctl`
-# qu'aucune API sûre de la bibliothèque standard n'expose. `forbid` est absolu
-# et ne se lève pas localement.
+# `deny` et non `forbid` : deux modules de `crates/reverb-hw/src/` doivent y
+# déroger — `usbfs.rs` pour les transferts bulk vers l'écran du Kraken,
+# `i2c.rs` pour les transactions SMBus vers la RAM. Aucune API sûre de la
+# bibliothèque standard n'expose `ioctl`, et `forbid` est absolu : il ne se
+# lève pas localement.
 #
-# La dérogation est unique, déclarée en tête de ce module, et n'y couvre que
-# trois appels. Partout ailleurs, un `unsafe` reste une erreur de compilation.
+# La dérogation est déclarée en tête de chacun de ces deux modules et n'y
+# couvre que quatre appels au total, tous à `ioctl`, tous sur un descripteur
+# ouvert par `std`. Partout ailleurs, un `unsafe` reste une erreur de
+# compilation. Voir l'ADR-004 pour la condition de révision.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

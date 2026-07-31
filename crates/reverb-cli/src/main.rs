@@ -9,10 +9,10 @@ use std::process::ExitCode;
 use reverb_cli::cli::{
     self, ActionEcran, ActionRam, ActionVentilateur, Cible, CibleCanal, CibleRam, Command,
 };
-use reverb_cli::hidraw::{self, Controller};
-use reverb_cli::hwmon::{self, FanChannel, Percent};
-use reverb_cli::i2c;
-use reverb_cli::usbfs;
+use reverb_hw::hidraw::{self, Controller};
+use reverb_hw::hwmon::{self, FanChannel, Percent};
+use reverb_hw::i2c;
+use reverb_hw::usbfs;
 use reverb_proto::ram::{self, SlotAddress};
 use reverb_proto::{Apply, Brightness, Mode, Model, Position, Rgb, frame, screen};
 

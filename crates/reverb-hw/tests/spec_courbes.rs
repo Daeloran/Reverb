@@ -101,7 +101,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use reverb_cli::hwmon::{self, CURVE_POINTS, Curve, CurveError, FanChannel, Percent};
+use reverb_hw::hwmon::{self, CURVE_POINTS, Curve, CurveError, FanChannel, Percent};
 
 // ---------------------------------------------------------------------------
 // Fausse arborescence sysfs
@@ -565,7 +565,7 @@ mod interpolation {
 
 mod validation {
     use super::{CURVE_POINTS, au_point, consignes, courbe, point, refus};
-    use reverb_cli::hwmon::{CurveError, Percent};
+    use reverb_hw::hwmon::{CurveError, Percent};
 
     #[test]
     fn une_courbe_strictement_plate_est_acceptee() {
@@ -809,12 +809,12 @@ mod ecriture {
         CURVE_POINTS, arborescence_de_reference, canal, courbe, ecarts, lire, photographie, point,
         relatif,
     };
-    use reverb_cli::hwmon::set_curve;
+    use reverb_hw::hwmon::set_curve;
 
     /// Les 40 chemins de courbe d'un canal, relatifs à la racine, triés.
     fn chemins_attendus(
         racine: &std::path::Path,
-        canal: &reverb_cli::hwmon::FanChannel,
+        canal: &reverb_hw::hwmon::FanChannel,
     ) -> Vec<String> {
         let mut chemins: Vec<String> = canal.curve.iter().map(|c| relatif(racine, c)).collect();
         chemins.sort();

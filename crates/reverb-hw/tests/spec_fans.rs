@@ -3,7 +3,7 @@
 //! Écrits **avant** l'implémentation, depuis l'issue #7, son commentaire de
 //! clôture de la session matérielle et `docs/VENTILATEURS.md` seuls. Rien n'est
 //! relu depuis `crates/reverb-cli/src/` : à l'écriture de ce fichier, le module
-//! `reverb_cli::hwmon` n'existe pas.
+//! `reverb_hw::hwmon` n'existe pas.
 //!
 //! Comme pour `spec.rs` (#1), `spec_modes.rs` (#3) et `spec_led.rs` (#5) : ces
 //! tests encodent ce que le logiciel doit faire, pas ce que le code fait. Si
@@ -69,7 +69,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use reverb_cli::hwmon::{self, FanChannel, Mode};
+use reverb_hw::hwmon::{self, FanChannel, Mode};
 
 // ---------------------------------------------------------------------------
 // Fausse arborescence sysfs
@@ -320,7 +320,7 @@ fn mode(canal: &FanChannel) -> Mode {
 // ---------------------------------------------------------------------------
 
 mod libelles {
-    use reverb_cli::hwmon::slug;
+    use reverb_hw::hwmon::slug;
 
     #[test]
     fn les_espaces_deviennent_des_tirets_et_les_majuscules_des_minuscules() {
@@ -424,7 +424,7 @@ mod noms_de_canaux {
         CANAUX_DU_MATERIEL, FauxSysfs, NOMS_ATTENDUS, arborescence_de_reference, canal,
         canal_complet,
     };
-    use reverb_cli::hwmon::slug;
+    use reverb_hw::hwmon::slug;
 
     #[test]
     fn le_nom_est_la_source_puis_le_libelle_en_kebab_case() {
@@ -509,7 +509,7 @@ mod noms_de_canaux {
 // ---------------------------------------------------------------------------
 
 mod pourcentage {
-    use reverb_cli::hwmon::{Percent, PercentError};
+    use reverb_hw::hwmon::{Percent, PercentError};
 
     /// La consigne `p`, qui doit être acceptée.
     fn consigne(p: u8) -> Percent {
@@ -923,7 +923,7 @@ mod decouverte {
 
 mod modes {
     use super::{arborescence_de_reference, canal, mode};
-    use reverb_cli::hwmon::Mode;
+    use reverb_hw::hwmon::Mode;
 
     #[test]
     fn enable_a_zero_est_la_courbe_firmware() {
@@ -1026,7 +1026,7 @@ mod modes {
 
 mod ecriture {
     use super::{arborescence_de_reference, canal, ecarts, lire, mode, photographie};
-    use reverb_cli::hwmon::{Mode, Percent, set_mode, set_pwm};
+    use reverb_hw::hwmon::{Mode, Percent, set_mode, set_pwm};
 
     /// La consigne `p`, qui doit être acceptée.
     fn consigne(p: u8) -> Percent {
@@ -1312,7 +1312,7 @@ mod robustesse {
         ));
         let _ = std::fs::remove_dir_all(&absente);
 
-        match reverb_cli::hwmon::discover_in(&absente) {
+        match reverb_hw::hwmon::discover_in(&absente) {
             Ok(canaux) => assert!(
                 canaux.is_empty(),
                 "une racine absente ne peut rien avoir découvert : {:?}",
