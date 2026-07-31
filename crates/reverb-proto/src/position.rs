@@ -71,6 +71,25 @@ impl fmt::Display for UnknownPosition {
 
 impl std::error::Error for UnknownPosition {}
 
+/// Noms sans espace ni accent, dans le même ordre que [`Position::ALL`].
+///
+/// Écrits en clair plutôt que dérivés de [`NAMES`] par translittération : une
+/// règle de conversion des accents serait du code à maintenir pour dix chaînes
+/// connues, et le jour où une position s'appellerait « côté œil » elle serait
+/// fausse sans prévenir.
+const SLUGS: [&str; 10] = [
+    "bas-gauche",
+    "bas-milieu",
+    "bas-droite",
+    "radiateur-haut",
+    "radiateur-milieu",
+    "radiateur-bas",
+    "arriere",
+    "haut-gauche",
+    "haut-milieu",
+    "haut-droite",
+];
+
 /// Noms des positions, dans le même ordre que [`Position::ALL`] (spec §3).
 const NAMES: [&str; 10] = [
     "bas gauche",
@@ -149,6 +168,31 @@ impl Position {
             .ok_or_else(|| UnknownPosition {
                 input: input.to_owned(),
                 valid: &NAMES,
+            })
+    }
+
+    /// Nom sans espace ni accent, pour le protocole IPC.
+    ///
+    /// Les noms d'affichage portent une espace (« radiateur haut ») et un
+    /// accent (« arrière ») : une position à espace casserait le découpage
+    /// d'une ligne en jetons.
+    pub fn slug(self) -> String {
+        SLUGS[self.index()].to_owned()
+    }
+
+    /// Réciproque de [`Position::slug`].
+    ///
+    /// Stricte : ni les noms d'affichage, ni les variantes de casse, ni les
+    /// alias. C'est un dialogue entre deux programmes, pas une saisie humaine —
+    /// [`Position::from_name`] reste la porte tolérante, celle de la ligne de
+    /// commande.
+    pub fn from_slug(input: &str) -> Result<Self, UnknownPosition> {
+        Position::ALL
+            .into_iter()
+            .find(|position| SLUGS[position.index()] == input)
+            .ok_or_else(|| UnknownPosition {
+                input: input.to_owned(),
+                valid: &SLUGS,
             })
     }
 
