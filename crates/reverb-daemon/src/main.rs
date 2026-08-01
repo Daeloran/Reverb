@@ -57,11 +57,12 @@ fn main() -> ExitCode {
     let socket = std::env::args()
         .nth(1)
         .map_or_else(|| PathBuf::from(SOCKET), PathBuf::from);
-    let fichier_geometrie = std::env::args()
-        .nth(2)
-        .map_or_else(|| PathBuf::from(persistance::CHEMIN), PathBuf::from);
+    let fichier_geometrie = std::env::args().nth(2).map_or_else(
+        || PathBuf::from(persistance::CHEMIN_GEOMETRIE),
+        PathBuf::from,
+    );
 
-    let (geometrie, souci) = persistance::charger(&fichier_geometrie);
+    let (geometrie, souci) = persistance::charger_geometrie(&fichier_geometrie);
     if let Some(souci) = souci {
         eprintln!("attention : {souci}");
     }
@@ -392,7 +393,9 @@ fn geometrie(
     };
     etat.geometrie.definir(position, orientation);
 
-    if let Err(erreur) = persistance::enregistrer(&etat.fichier_geometrie, &etat.geometrie) {
+    if let Err(erreur) =
+        persistance::enregistrer_geometrie(&etat.fichier_geometrie, &etat.geometrie)
+    {
         // L'orientation est appliquée en mémoire mais ne survivra pas : le dire
         // plutôt que de laisser croire à un réglage acquis.
         return echec(format!(
