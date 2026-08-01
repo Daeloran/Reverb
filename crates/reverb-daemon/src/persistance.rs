@@ -23,7 +23,7 @@ use std::io;
 use std::path::Path;
 
 use reverb_anim::{Animation, Geometrie, Reglages};
-use reverb_proto::{Rgb, ram};
+use reverb_proto::{Position, Rgb, ram};
 
 /// Où la géométrie est conservée entre deux démarrages.
 pub const CHEMIN_GEOMETRIE: &str = "/etc/reverb/geometrie.conf";
@@ -164,7 +164,11 @@ impl Eclairage {
     /// une installation qui n'a jamais reçu de commande prouve d'elle-même que
     /// la chaîne complète fonctionne.
     pub fn accueil() -> Eclairage {
-        todo!("#21")
+        Eclairage {
+            ventilateurs: [ACCUEIL; 10],
+            barrettes: [ACCUEIL; ram::SLOT_COUNT],
+            animation: None,
+        }
     }
 
     /// Le texte du fichier, en-tête exclu.
@@ -174,7 +178,39 @@ impl Eclairage {
     /// redonnerait au démarrage suivant serait rejeté en bloc — l'éclairage
     /// entier perdu pour une clé de trop.
     pub fn encoder(&self) -> String {
-        todo!("#21")
+        let mut texte = String::new();
+        for position in Position::ALL {
+            let couleur = hexa(self.ventilateurs[position.index()]);
+            texte.push_str(&format!("ventilateur {} {couleur}\n", position.slug()));
+        }
+        for (slot, couleur) in self.barrettes.iter().enumerate() {
+            texte.push_str(&format!("barrette {slot} {}\n", hexa(*couleur)));
+        }
+
+        if let Some((animation, reglages)) = &self.animation {
+            // Déstructuration exhaustive, volontairement sans `..` : un réglage
+            // ajouté un jour à `Reglages` ne compilera plus ici tant qu'on ne
+            // lui aura pas donné sa place dans le fichier. Sans ça, il serait
+            // simplement perdu au redémarrage, sans un message.
+            let Reglages {
+                couleur,
+                vitesse,
+                direction,
+            } = *reglages;
+            let tous = [
+                ("couleur", hexa(couleur)),
+                ("vitesse", vitesse.to_string()),
+                ("direction", direction.slug().to_owned()),
+            ];
+            texte.push_str(&format!("animation {}", animation.nom()));
+            for (cle, valeur) in tous {
+                if animation.parametres_acceptes().contains(&cle) {
+                    texte.push_str(&format!(" {cle}={valeur}"));
+                }
+            }
+            texte.push('\n');
+        }
+        texte
     }
 
     /// L'inverse d'[`Eclairage::encoder`].
@@ -185,9 +221,148 @@ impl Eclairage {
     /// tronqué détectable, et un fichier tronqué doit être signalé, pas
     /// complété au jugé.
     pub fn decoder(texte: &str) -> Result<Eclairage, EclairageInvalide> {
-        let _ = texte;
-        todo!("#21")
+        let mut ventilateurs: [Option<Rgb>; 10] = [None; 10];
+        let mut barrettes: [Option<Rgb>; ram::SLOT_COUNT] = [None; ram::SLOT_COUNT];
+        let mut animation = None;
+
+        for (rang, brut) in texte.lines().enumerate() {
+            // Le rang dans le fichier qu'on ouvre, commentaires et lignes vides
+            // compris : c'est le numéro qu'affiche un éditeur.
+            let ligne = rang + 1;
+            let refus = |raison: String| EclairageInvalide { ligne, raison };
+
+            let contenu = brut.trim();
+            if contenu.is_empty() || contenu.starts_with('#') {
+                continue;
+            }
+            let jetons: Vec<&str> = contenu.split_whitespace().collect();
+
+            match jetons[0] {
+                "ventilateur" => {
+                    if jetons.len() != 3 {
+                        return Err(refus(format!(
+                            "« ventilateur » attend une position et une couleur : « {contenu} »"
+                        )));
+                    }
+                    let position = Position::from_slug(jetons[1])
+                        .map_err(|erreur| refus(erreur.to_string()))?;
+                    let couleur =
+                        Rgb::from_hex(jetons[2]).map_err(|erreur| refus(erreur.to_string()))?;
+                    if ventilateurs[position.index()].is_some() {
+                        return Err(refus(format!(
+                            "ventilateur « {} » donné deux fois : impossible de savoir laquelle \
+                             des deux couleurs était la bonne",
+                            jetons[1]
+                        )));
+                    }
+                    ventilateurs[position.index()] = Some(couleur);
+                }
+
+                "barrette" => {
+                    if jetons.len() != 3 {
+                        return Err(refus(format!(
+                            "« barrette » attend un rang et une couleur : « {contenu} »"
+                        )));
+                    }
+                    let dernier = ram::SLOT_COUNT - 1;
+                    let slot: usize = jetons[1].parse().map_err(|_| {
+                        refus(format!(
+                            "barrette « {} » : attendu un rang de 0 à {dernier}",
+                            jetons[1]
+                        ))
+                    })?;
+                    if slot >= ram::SLOT_COUNT {
+                        return Err(refus(format!(
+                            "barrette {slot} : il n'y en a que {}, de 0 à {dernier}",
+                            ram::SLOT_COUNT
+                        )));
+                    }
+                    let couleur =
+                        Rgb::from_hex(jetons[2]).map_err(|erreur| refus(erreur.to_string()))?;
+                    if barrettes[slot].is_some() {
+                        return Err(refus(format!(
+                            "barrette {slot} donnée deux fois : impossible de savoir laquelle des \
+                             deux couleurs était la bonne"
+                        )));
+                    }
+                    barrettes[slot] = Some(couleur);
+                }
+
+                "animation" => {
+                    if animation.is_some() {
+                        return Err(refus(
+                            "une animation à la fois : « animation » est donné deux fois"
+                                .to_owned(),
+                        ));
+                    }
+                    if jetons.len() < 2 {
+                        return Err(refus("« animation » attend un nom du catalogue".to_owned()));
+                    }
+                    let choisie = Animation::par_nom(jetons[1])
+                        .map_err(|erreur| refus(erreur.to_string()))?;
+
+                    // Les mêmes paires que sur le socket, et le même juge :
+                    // c'est l'animation qui dit ce qu'elle accepte, ici comme
+                    // là-bas. Deux vocabulaires divergeraient au premier
+                    // réglage ajouté.
+                    let mut paires = Vec::new();
+                    for jeton in &jetons[2..] {
+                        match jeton.split_once('=') {
+                            Some((cle, valeur)) if !cle.is_empty() && !valeur.is_empty() => {
+                                paires.push((cle.to_owned(), valeur.to_owned()));
+                            }
+                            _ => {
+                                return Err(refus(format!(
+                                    "réglage « {jeton} » : attendu « clé=valeur »"
+                                )));
+                            }
+                        }
+                    }
+                    let reglages = choisie
+                        .reglages(&paires)
+                        .map_err(|erreur| refus(erreur.to_string()))?;
+                    animation = Some((choisie, reglages));
+                }
+
+                autre => {
+                    return Err(refus(format!(
+                        "« {autre} » n'est pas une ligne d'éclairage. Lignes attendues : \
+                         ventilateur, barrette, animation"
+                    )));
+                }
+            }
+        }
+
+        // Ce qui manque n'est écrit nulle part : la faute ne tient à aucune
+        // ligne, d'où le numéro 0. Compléter au jugé — par du noir, par
+        // l'accueil — rendrait un éclairage plausible et faux.
+        let mut couleurs_ventilateurs = [Rgb::BLACK; 10];
+        for position in Position::ALL {
+            couleurs_ventilateurs[position.index()] =
+                ventilateurs[position.index()].ok_or_else(|| EclairageInvalide {
+                    ligne: 0,
+                    raison: format!("ventilateur « {} » absent du fichier", position.slug()),
+                })?;
+        }
+        let mut couleurs_barrettes = [Rgb::BLACK; ram::SLOT_COUNT];
+        for (slot, couleur) in barrettes.iter().enumerate() {
+            couleurs_barrettes[slot] = couleur.ok_or_else(|| EclairageInvalide {
+                ligne: 0,
+                raison: format!("barrette {slot} absente du fichier"),
+            })?;
+        }
+
+        Ok(Eclairage {
+            ventilateurs: couleurs_ventilateurs,
+            barrettes: couleurs_barrettes,
+            animation,
+        })
     }
+}
+
+/// Une couleur en six chiffres hexadécimaux, comme sur le socket.
+fn hexa(couleur: Rgb) -> String {
+    format!("{:02x}{:02x}{:02x}", couleur.r, couleur.g, couleur.b)
 }
 
 /// Lit l'éclairage à retrouver, ou celui d'accueil.
@@ -199,8 +374,33 @@ impl Eclairage {
 /// message : la différence entre « jamais réglé » et « réglé puis abîmé » ne
 /// doit pas se perdre.
 pub fn charger_eclairage(chemin: &Path) -> (Eclairage, Option<String>) {
-    let _ = chemin;
-    todo!("#21")
+    let texte = match fs::read_to_string(chemin) {
+        Ok(texte) => texte,
+        // L'absence n'est pas une anomalie : c'est le premier démarrage.
+        Err(erreur) if erreur.kind() == io::ErrorKind::NotFound => {
+            return (Eclairage::accueil(), None);
+        }
+        Err(erreur) => {
+            return (
+                Eclairage::accueil(),
+                Some(format!(
+                    "éclairage illisible dans {} ({erreur}) : couleur d'accueil appliquée",
+                    chemin.display()
+                )),
+            );
+        }
+    };
+
+    match Eclairage::decoder(&texte) {
+        Ok(eclairage) => (eclairage, None),
+        Err(erreur) => (
+            Eclairage::accueil(),
+            Some(format!(
+                "éclairage invalide dans {} ({erreur}) : couleur d'accueil appliquée",
+                chemin.display()
+            )),
+        ),
+    }
 }
 
 /// Écrit l'éclairage, en une fois.

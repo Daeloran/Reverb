@@ -46,7 +46,8 @@ La RAM est la seule contrainte temps réel. Tout le reste est en écriture uniqu
 est au repos absolu le reste du temps.
 
 ⚠️ **Aucune persistance matérielle** : rien ne survit au redémarrage. Le démon rejoue
-l'initialisation et réapplique les couleurs au démarrage.
+l'initialisation et réapplique les couleurs au démarrage, depuis
+[l'état qu'il a conservé](#léclairage-retrouvé).
 
 ## Architecture
 
@@ -166,6 +167,29 @@ tourne : c'est une donnée de montage (spec §5), relevée à l'œil et conserv�
 `/etc/reverb/geometrie.conf`. Un ventilateur démonté puis remis reprend une orientation
 quelconque — d'où une commande plutôt qu'une recompilation. Le démon, qui est root, écrit le
 fichier ; **la fenêtre ne l'écrira jamais**, elle demandera par le socket.
+
+### L'éclairage retrouvé
+
+Le boîtier retrouve seul, après un redémarrage, ce qu'il affichait — une couleur fixe comme une
+animation avec ses réglages. Le démon écrit son état dans `/var/lib/reverb/eclairage.conf` à
+**chaque changement**, pas à l'arrêt : ce qu'on veut retrouver, c'est justement l'éclairage
+d'avant une coupure de courant, qui ne laisse le temps d'écrire nulle part.
+
+Deux fichiers, deux natures. La géométrie est une donnée de montage, décidée une fois, et reste
+dans `/etc` ; l'éclairage est l'état courant du service, réécrit à chaque commande, et va dans
+`/var/lib` (`StateDirectory=reverb`). Les mêler ferait réécrire à chaque changement de couleur le
+fichier qui a coûté un relevé au sol.
+
+**Un fichier absent et un fichier disant « noir » ne se confondent jamais.** Le premier est un
+premier démarrage : le boîtier s'allume en **bleu pur**, ce qui prouve du même coup que les deux
+bus répondent, sans avoir eu à taper une commande. Le second est un choix : `animate off` puis
+extinction se retrouve éteint. Sans cette distinction, éteindre volontairement son boîtier le
+rallumerait au démarrage suivant.
+
+Un fichier illisible ou tronqué ne bloque pas le démarrage : il est signalé dans le journal, et
+l'accueil s'applique. Une entrée absente ou répétée est refusée **en la nommant** — c'est ce qui
+rend un fichier tronqué détectable, plutôt que complété au jugé par un éclairage plausible et
+faux.
 
 ## Prérequis
 
