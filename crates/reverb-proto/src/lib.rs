@@ -19,7 +19,7 @@ pub mod position;
 pub mod ram;
 pub mod screen;
 
-pub use color::{Brightness, Rgb};
+pub use color::{Brightness, Rgb, Tsl, TslInvalide};
 pub use frame::{FRAME_LEN, Frame};
 pub use led::{Apply, LedCountError};
 pub use mode::{ColorCountError, Mode, UnknownMode};

@@ -33,7 +33,7 @@ use reverb_gui::reglages::{Poignee, Reglage};
 use reverb_gui::{FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, PointLed};
 use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine};
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
-use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
+use reverb_proto::{LEDS_PER_FAN, Position, Rgb, Tsl};
 use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 
 /// Ce que chaque animation donne à voir.
@@ -309,6 +309,12 @@ struct Pupitre {
     detail: Cell<Detail>,
     /// Les réglages d'animation tels qu'ils sont affichés.
     reglage: RefCell<Reglage>,
+    /// La couleur choisie, gardée **en teinte/saturation/luminosité**.
+    ///
+    /// Et non en `Rgb` : un gris n'a pas de teinte et le noir n'a pas de
+    /// saturation. Repasser par le `Rgb` à chaque geste perdrait la teinte dès
+    /// qu'on descend un curseur à zéro, et il faudrait la retrouver au jugé.
+    couleur: Cell<Tsl>,
     /// Une poignée par canal de ventilateur, jamais partagée entre canaux.
     poignees: RefCell<HashMap<String, Poignee>>,
     /// Le modèle des lignes de ventilateur, **gardé vivant** : le reconstruire
@@ -333,6 +339,7 @@ impl Pupitre {
                 vitesse: 3,
                 direction: 0,
             }),
+            couleur: Cell::new(Rgb::new(0xff, 0x40, 0xff).en_tsl()),
             poignees: RefCell::new(HashMap::new()),
             canaux: Rc::new(VecModel::default()),
             depart: Instant::now(),
@@ -341,6 +348,14 @@ impl Pupitre {
 
     fn maintenant(&self) -> Duration {
         self.depart.elapsed()
+    }
+
+    /// La couleur choisie, en composantes.
+    ///
+    /// Le `Tsl` gardé vient toujours d'un `en_tsl` ou d'un curseur borné : la
+    /// conversion ne peut pas échouer, et le noir est le repli qui se voit.
+    fn rgb(&self) -> Rgb {
+        Rgb::depuis_tsl(self.couleur.get()).unwrap_or(Rgb::BLACK)
     }
 }
 
@@ -518,10 +533,50 @@ fn dessiner(fenetre: &Fenetre, pupitre: &Pupitre) {
     fenetre.set_cible(SharedString::from(selection.nom()));
     fenetre.set_detail_led(detail == Detail::Led);
     fenetre.set_vue_face(plan.vue() == Vue::Face);
+    poser_couleur(fenetre, pupitre);
     fenetre.set_titre_maquette(SharedString::from(match plan.vue() {
         Vue::Face => "LE BOÎTIER — ARRIÈRE À GAUCHE, VU DU PANNEAU LATÉRAL",
         Vue::Isometrique => "LE BOÎTIER — DE TROIS-QUARTS, AUX POSITIONS RÉELLES",
     }));
+}
+
+/// Bouge un axe de la couleur choisie, puis réécrit les quatre lectures.
+fn bouger_un_axe(faible: &Weak<Fenetre>, pupitre: &Pupitre, changer: impl FnOnce(&mut Tsl)) {
+    let Some(fenetre) = faible.upgrade() else {
+        return;
+    };
+    let mut tsl = pupitre.couleur.get();
+    changer(&mut tsl);
+    pupitre.couleur.set(tsl);
+    poser_couleur(&fenetre, pupitre);
+}
+
+/// Écrit dans la fenêtre les quatre façons de lire la couleur choisie.
+fn poser_couleur(fenetre: &Fenetre, pupitre: &Pupitre) {
+    let tsl = pupitre.couleur.get();
+    let rgb = pupitre.rgb();
+    fenetre.set_teinte(tsl.teinte);
+    fenetre.set_saturation(tsl.saturation);
+    fenetre.set_luminosite(tsl.luminosite);
+    fenetre.set_couleur(SharedString::from(format!(
+        "{:02x}{:02x}{:02x}",
+        rgb.r, rgb.g, rgb.b
+    )));
+    fenetre.set_apercu(en_slint(rgb));
+    // Les deux extrémités des voies « saturation » et « luminosité » : elles
+    // dépendent de la teinte courante, donc elles se recalculent avec elle.
+    let pure = Tsl {
+        teinte: tsl.teinte,
+        saturation: 100.0,
+        luminosite: 100.0,
+    };
+    let grise = Tsl {
+        teinte: tsl.teinte,
+        saturation: 0.0,
+        luminosite: tsl.luminosite,
+    };
+    fenetre.set_teinte_pure(en_slint(Rgb::depuis_tsl(pure).unwrap_or(Rgb::BLACK)));
+    fenetre.set_teinte_grise(en_slint(Rgb::depuis_tsl(grise).unwrap_or(Rgb::BLACK)));
 }
 
 fn modele_leds(
@@ -704,13 +759,65 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         });
     }
 
-    // ── L'aperçu de la couleur saisie ──────────────────────────────────────
+    // ── Le sélecteur de couleur ────────────────────────────────────────────
+    //
+    // Les trois curseurs et le champ hexadécimal désignent la même couleur, et
+    // c'est le `Tsl` du pupitre qui l'est : le champ le reformule, les curseurs
+    // en bougent un axe. Une saisie fautive ne change **rien** — ni l'aperçu ni
+    // les curseurs — et le dit.
     {
+        let pupitre = pupitre.clone();
         let faible = fenetre.as_weak();
         fenetre.on_couleur_saisie(move |texte| {
-            if let (Some(fenetre), Some(couleur)) = (faible.upgrade(), lire_couleur(&texte)) {
-                fenetre.set_apercu(en_slint(couleur));
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            let Some(couleur) = lire_couleur(&texte) else {
+                return;
+            };
+            let ancienne = pupitre.couleur.get();
+            let mut tsl = couleur.en_tsl();
+            // Un gris n'a pas de teinte, le noir pas de saturation : garder
+            // celles d'avant plutôt que de les remettre à zéro sous les doigts.
+            if tsl.saturation == 0.0 {
+                tsl.teinte = ancienne.teinte;
             }
+            if tsl.luminosite == 0.0 {
+                tsl.saturation = ancienne.saturation;
+                tsl.teinte = ancienne.teinte;
+            }
+            pupitre.couleur.set(tsl);
+            poser_couleur(&fenetre, &pupitre);
+        });
+    }
+    // Un axe bougé, les trois autres lectures suivent. Le `clamp` n'est pas une
+    // précaution de style : la teinte s'arrête à 359, 360 étant le même point
+    // que 0 et refusé par `depuis_tsl`.
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_teinte_changee(move |valeur| {
+            bouger_un_axe(&faible, &pupitre, |tsl| {
+                tsl.teinte = valeur.clamp(0.0, 359.0);
+            });
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_saturation_changee(move |valeur| {
+            bouger_un_axe(&faible, &pupitre, |tsl| {
+                tsl.saturation = valeur.clamp(0.0, 100.0);
+            });
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_luminosite_changee(move |valeur| {
+            bouger_un_axe(&faible, &pupitre, |tsl| {
+                tsl.luminosite = valeur.clamp(0.0, 100.0);
+            });
         });
     }
 
@@ -718,17 +825,8 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
     {
         let pupitre = pupitre.clone();
         let envoi = ordres.clone();
-        let faible = fenetre.as_weak();
         fenetre.on_appliquer_couleur(move || {
-            let Some(fenetre) = faible.upgrade() else {
-                return;
-            };
-            let Some(couleur) = lire_couleur(&fenetre.get_couleur()) else {
-                fenetre.set_message(SharedString::from(
-                    "couleur : six chiffres hexadécimaux, par exemple ff40ff",
-                ));
-                return;
-            };
+            let couleur = pupitre.rgb();
             for requete in commandes_de_couleur(
                 &pupitre.tableau.borrow(),
                 &pupitre.selection.borrow(),
@@ -754,7 +852,7 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
             fenetre.set_animation_courante(nom.clone());
             let mut reglage = pupitre.reglage.borrow_mut();
             reglage.animation = Some(nom.to_string());
-            relever(&fenetre, &mut reglage);
+            relever(&fenetre, &pupitre, &mut reglage);
             if let Some(requete) = reglage.commande() {
                 let _ = envoi.send(requete);
             }
@@ -775,7 +873,7 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
                 return;
             };
             let mut reglage = pupitre.reglage.borrow_mut();
-            relever(&fenetre, &mut reglage);
+            relever(&fenetre, &pupitre, &mut reglage);
             // `None` quand rien ne tourne : bouger la vitesse à vide ne doit
             // pas démarrer une animation que personne n'a demandée.
             if let Some(requete) = reglage.commande() {
@@ -855,10 +953,8 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
 
 /// Recopie dans les réglages ce que la fenêtre affiche de la couleur, de la
 /// vitesse et de la direction.
-fn relever(fenetre: &Fenetre, reglage: &mut Reglage) {
-    if let Some(couleur) = lire_couleur(&fenetre.get_couleur()) {
-        reglage.couleur = couleur;
-    }
+fn relever(fenetre: &Fenetre, pupitre: &Pupitre, reglage: &mut Reglage) {
+    reglage.couleur = pupitre.rgb();
     reglage.vitesse = u8::try_from(fenetre.get_vitesse().clamp(0, 255)).unwrap_or(3);
     reglage.direction = usize::try_from(fenetre.get_direction()).unwrap_or(0);
 }
