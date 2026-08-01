@@ -22,7 +22,9 @@ use std::rc::Rc;
 
 use reverb_anim::{CATALOGUE, Geometrie};
 use reverb_gui::plan::Plan;
-use reverb_gui::{FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, PointLed};
+use reverb_gui::{
+    FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointLed,
+};
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
 use reverb_proto::{LEDS_PER_FAN, Position};
 use slint::platform::software_renderer::{
@@ -234,7 +236,21 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
         )
         .collect::<Vec<LigneTemperature>>(),
     )));
-    interface.set_cible(SharedString::from("le ventilateur arriere"));
+    interface.set_zones(ModelRc::new(VecModel::from(vec![
+        LigneZone {
+            nom: SharedString::from("radiateur"),
+            rendu: SharedString::from("braise"),
+            combien: 24,
+            visee: true,
+        },
+        LigneZone {
+            nom: SharedString::from("ram"),
+            rendu: SharedString::from("#00aeed"),
+            combien: 44,
+            visee: false,
+        },
+    ])));
+    interface.set_cible(SharedString::from("la zone « radiateur »"));
     interface.set_animation_courante(SharedString::from("comete"));
     interface.set_message(SharedString::from(if vraies.is_some() {
         "aperçu de la vraie image, prise sur le socket"

@@ -18,3 +18,4 @@ pub mod peripheriques;
 pub mod persistance;
 pub mod serveur;
 pub mod telemetrie;
+pub mod zones;

@@ -31,10 +31,12 @@ use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
 use reverb_gui::plan::{Cible, Place, Plan, Vue};
 use reverb_gui::reglages::{Poignee, Reglage};
 use reverb_gui::sondes::{Historique, Releve};
-use reverb_gui::{FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, PointLed};
+use reverb_gui::{
+    FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointLed,
+};
 use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine};
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
-use reverb_proto::{LEDS_PER_FAN, Position, Rgb, Tsl};
+use reverb_proto::{LEDS_PER_FAN, Led, Position, Rgb, Tsl};
 use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 
 /// Ce que chaque animation donne à voir.
@@ -320,6 +322,11 @@ struct Pupitre {
     poignees: RefCell<HashMap<String, Poignee>>,
     /// Deux minutes glissantes de relevés, pour tracer les courbes.
     historique: RefCell<Historique>,
+    /// Les zones telles que le démon les rend : nom, rendu, nombre de LED.
+    zones: RefCell<Vec<(String, String, usize)>>,
+    /// La zone visée, s'il y en a une. Quand elle existe, la couleur et les
+    /// animations lui vont **au lieu** d'aller au boîtier entier.
+    visee: RefCell<Option<String>>,
     /// Le modèle des lignes de ventilateur, **gardé vivant** : le reconstruire
     /// à chaque seconde recrée les curseurs, et un curseur recréé sous les
     /// doigts perd le geste en cours.
@@ -345,6 +352,8 @@ impl Pupitre {
             couleur: Cell::new(Rgb::new(0xff, 0x40, 0xff).en_tsl()),
             poignees: RefCell::new(HashMap::new()),
             historique: RefCell::new(Historique::nouvel()),
+            zones: RefCell::new(Vec::new()),
+            visee: RefCell::new(None),
             canaux: Rc::new(VecModel::default()),
             depart: Instant::now(),
         }
@@ -400,6 +409,7 @@ fn main() -> ExitCode {
         Duration::from_secs(1),
         move || {
             let _ = ordres.send(Request::Status);
+            let _ = ordres.send(Request::ZoneList);
         },
     );
 
@@ -439,6 +449,7 @@ enum Retour {
     Telemetrie(Vec<ResponseLine>),
     Eclairage(Vec<ResponseLine>),
     Image(Vec<(String, Vec<Rgb>)>),
+    Zones(Vec<ResponseLine>),
 }
 
 /// Le fil qui agit : il attend les réponses du démon à la place de l'interface.
@@ -534,7 +545,12 @@ fn dessiner(fenetre: &Fenetre, pupitre: &Pupitre) {
             .map(|(debut, fin)| format!("M {} {} L {} {} ", debut.x, debut.y, fin.x, fin.y))
             .collect::<String>(),
     ));
-    fenetre.set_cible(SharedString::from(selection.nom()));
+    fenetre.set_cible(SharedString::from(
+        match pupitre.visee.borrow().as_deref() {
+            Some(zone) => format!("la zone « {zone} »"),
+            None => selection.nom(),
+        },
+    ));
     fenetre.set_detail_led(detail == Detail::Led);
     fenetre.set_vue_face(plan.vue() == Vue::Face);
     poser_couleur(fenetre, pupitre);
@@ -581,6 +597,56 @@ fn poser_couleur(fenetre: &Fenetre, pupitre: &Pupitre) {
     };
     fenetre.set_teinte_pure(en_slint(Rgb::depuis_tsl(pure).unwrap_or(Rgb::BLACK)));
     fenetre.set_teinte_grise(en_slint(Rgb::depuis_tsl(grise).unwrap_or(Rgb::BLACK)));
+}
+
+/// La même animation, adressée à une zone au lieu du boîtier entier.
+///
+/// Le protocole a deux verbes pour un seul geste ; les réglages, eux, sont les
+/// mêmes. Les recopier ici évite de tenir deux chemins d'accord.
+fn vers_la_zone(nom: String, requete: Request) -> Request {
+    match requete {
+        Request::Animate { name, reglages } => Request::ZoneAnim {
+            nom,
+            animation: name,
+            reglages,
+        },
+        autre => autre,
+    }
+}
+
+/// Écrit la liste des zones dans la fenêtre.
+fn poser_zones(fenetre: &Fenetre, pupitre: &Pupitre) {
+    let visee = pupitre.visee.borrow();
+    let lignes: Vec<LigneZone> = pupitre
+        .zones
+        .borrow()
+        .iter()
+        .map(|(nom, rendu, combien)| LigneZone {
+            nom: SharedString::from(nom.clone()),
+            rendu: SharedString::from(rendu.clone()),
+            combien: i32::try_from(*combien).unwrap_or(i32::MAX),
+            visee: visee.as_deref() == Some(nom.as_str()),
+        })
+        .collect();
+    fenetre.set_zones(ModelRc::new(VecModel::from(lignes)));
+}
+
+/// Les LED de la sélection, en cibles du protocole.
+fn cibles(selection: &Selection) -> Vec<Led> {
+    selection
+        .cibles
+        .iter()
+        .map(|cible| match cible {
+            Cible::Led { position, led } => Led::Ventilateur {
+                position: *position,
+                led: *led,
+            },
+            Cible::Barrette { slot, led } => Led::Barrette {
+                slot: *slot,
+                led: *led,
+            },
+        })
+        .collect()
 }
 
 fn modele_leds(
@@ -763,6 +829,74 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         });
     }
 
+    // ── Les zones ──────────────────────────────────────────────────────────
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_creer_zone(move |nom| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            let nom = nom.trim().to_owned();
+            if nom.is_empty() {
+                fenetre.set_message(SharedString::from("une zone a besoin d'un nom"));
+                return;
+            }
+            let cibles = cibles(&pupitre.selection.borrow());
+            if cibles.is_empty() {
+                fenetre.set_message(SharedString::from(
+                    "sélectionne d'abord des LED sur la maquette",
+                ));
+                return;
+            }
+            let _ = envoi.send(Request::ZoneSet {
+                nom: nom.clone(),
+                cibles,
+            });
+            // Viser la zone qu'on vient de créer : c'est ce qu'on veut régler
+            // dans la seconde qui suit.
+            *pupitre.visee.borrow_mut() = Some(nom);
+            fenetre.set_nouvelle_zone(SharedString::new());
+            let _ = envoi.send(Request::ZoneList);
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_viser_zone(move |nom| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            // Un second clic dévise : sans quoi on ne pourrait plus revenir au
+            // boîtier entier sans supprimer la zone.
+            let mut visee = pupitre.visee.borrow_mut();
+            *visee = if visee.as_deref() == Some(nom.as_str()) {
+                None
+            } else {
+                Some(nom.to_string())
+            };
+            drop(visee);
+            poser_zones(&fenetre, &pupitre);
+            dessiner(&fenetre, &pupitre);
+            let _ = envoi.send(Request::ZoneList);
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        fenetre.on_supprimer_zone(move |nom| {
+            if pupitre.visee.borrow().as_deref() == Some(nom.as_str()) {
+                *pupitre.visee.borrow_mut() = None;
+            }
+            let _ = envoi.send(Request::ZoneDrop {
+                nom: nom.to_string(),
+            });
+            let _ = envoi.send(Request::ZoneList);
+        });
+    }
+
     // ── Le sélecteur de couleur ────────────────────────────────────────────
     //
     // Les trois curseurs et le champ hexadécimal désignent la même couleur, et
@@ -831,6 +965,13 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         let envoi = ordres.clone();
         fenetre.on_appliquer_couleur(move || {
             let couleur = pupitre.rgb();
+            // Une zone visée reçoit la couleur **à la place** du boîtier : c'est
+            // tout l'intérêt d'en avoir une.
+            if let Some(nom) = pupitre.visee.borrow().clone() {
+                let _ = envoi.send(Request::ZoneLight { nom, couleur });
+                let _ = envoi.send(Request::ZoneList);
+                return;
+            }
             for requete in commandes_de_couleur(
                 &pupitre.tableau.borrow(),
                 &pupitre.selection.borrow(),
@@ -853,13 +994,19 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
             if Animation::par_nom(&nom).is_err() {
                 return;
             }
-            fenetre.set_animation_courante(nom.clone());
             let mut reglage = pupitre.reglage.borrow_mut();
             reglage.animation = Some(nom.to_string());
             relever(&fenetre, &pupitre, &mut reglage);
-            if let Some(requete) = reglage.commande() {
-                let _ = envoi.send(requete);
+            let Some(requete) = reglage.commande() else {
+                return;
+            };
+            if let Some(zone) = pupitre.visee.borrow().clone() {
+                let _ = envoi.send(vers_la_zone(zone, requete));
+                let _ = envoi.send(Request::ZoneList);
+                return;
             }
+            fenetre.set_animation_courante(nom.clone());
+            let _ = envoi.send(requete);
         });
     }
     // ── Un réglage change pendant que l'animation tourne ───────────────────
@@ -881,7 +1028,14 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
             // `None` quand rien ne tourne : bouger la vitesse à vide ne doit
             // pas démarrer une animation que personne n'a demandée.
             if let Some(requete) = reglage.commande() {
-                let _ = envoi.send(requete);
+                match pupitre.visee.borrow().clone() {
+                    Some(zone) => {
+                        let _ = envoi.send(vers_la_zone(zone, requete));
+                    }
+                    None => {
+                        let _ = envoi.send(requete);
+                    }
+                }
             }
         });
     }
@@ -890,6 +1044,15 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         let envoi = ordres.clone();
         let faible = fenetre.as_weak();
         fenetre.on_arreter_animation(move || {
+            if let Some(zone) = pupitre.visee.borrow().clone() {
+                let _ = envoi.send(Request::ZoneAnim {
+                    nom: zone,
+                    animation: None,
+                    reglages: Vec::new(),
+                });
+                let _ = envoi.send(Request::ZoneList);
+                return;
+            }
             if let Some(fenetre) = faible.upgrade() {
                 fenetre.set_animation_courante(SharedString::from("aucune"));
             }
@@ -1032,6 +1195,9 @@ fn repondre(
         Request::Lighting => {
             let _ = retours.send(Retour::Eclairage(lignes));
         }
+        Request::ZoneList => {
+            let _ = retours.send(Retour::Zones(lignes));
+        }
         _ => {}
     }
 }
@@ -1054,6 +1220,52 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
                 anime.clone().unwrap_or_else(|| "aucune".to_owned()),
             ));
             pupitre.reglage.borrow_mut().animation = anime;
+            false
+        }
+        Retour::Zones(lignes) => {
+            // Une zone peut tenir sur plusieurs lignes `zone` : le démon les
+            // découpe pour rester sous la longueur maximale d'une ligne, et
+            // c'est ici qu'on les recolle.
+            let mut vues: Vec<(String, String, usize)> = Vec::new();
+            for ligne in &lignes {
+                match ligne {
+                    ResponseLine::Zone { nom, cibles } => {
+                        match vues.iter_mut().find(|(deja, _, _)| deja == nom) {
+                            Some((_, _, combien)) => *combien += cibles.len(),
+                            None => {
+                                vues.push((nom.clone(), "transparente".to_owned(), cibles.len()))
+                            }
+                        }
+                    }
+                    ResponseLine::ZoneLight { nom, couleur } => {
+                        if let Some((_, rendu, _)) =
+                            vues.iter_mut().find(|(deja, _, _)| deja == nom)
+                        {
+                            *rendu =
+                                format!("#{:02x}{:02x}{:02x}", couleur.r, couleur.g, couleur.b);
+                        }
+                    }
+                    ResponseLine::ZoneAnim { nom, animation, .. } => {
+                        if let Some((_, rendu, _)) =
+                            vues.iter_mut().find(|(deja, _, _)| deja == nom)
+                        {
+                            *rendu = animation.clone();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Une zone visée qui vient de disparaître ne doit pas continuer de
+            // recevoir les couleurs.
+            let mut visee = pupitre.visee.borrow_mut();
+            if let Some(nom) = visee.clone()
+                && !vues.iter().any(|(deja, _, _)| *deja == nom)
+            {
+                *visee = None;
+            }
+            drop(visee);
+            *pupitre.zones.borrow_mut() = vues;
+            poser_zones(fenetre, pupitre);
             false
         }
         Retour::Image(cadres) => {

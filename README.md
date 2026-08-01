@@ -231,6 +231,33 @@ fichier : c'est ainsi qu'on vérifie une mise en page sans ouvrir de session gra
   sur GNOME/Wayland elle dépendrait d'une extension du bureau, qui casse aux montées de version.
 - Une LED peinte à la main (`paint`) **ne survit pas à un redémarrage** : `eclairage.conf` garde
   une couleur par cible, pas une par LED (#21). La cible reprend sa couleur unie au démarrage.
+  **Une zone, si** — c'est le moyen de rendre une peinture durable : sélectionner les LED, les
+  nommer, leur donner leur couleur.
+
+### Les zones — une zone, une couche
+
+Une zone est un ensemble de LED que l'on compose soi-même sur la maquette : « le ventilateur
+arrière plus bas-milieu plus haut-milieu » en est une. Elle porte soit une **couleur fixe**, soit
+une **animation** avec sa propre vitesse, pendant que le reste du boîtier continue sa vie.
+
+```
+zone set   <nom> <cible>[,<cible>…]   fan:<position>[:<0-7>] ou slot:<0-3>[:<0-10>]
+zone light <nom> <rrggbb>
+zone anim  <nom> <animation|off> [clé=valeur…]
+zone drop  <nom>
+zone list
+```
+
+⚠️ **Une LED appartient à au plus une zone.** La mettre dans une nouvelle la retire de celle qui la
+tenait — c'est ce qui dispense d'un ordre d'empilement, et donc d'une notion de transparence qu'une
+LED ne sait pas porter. Ce qui n'est dans aucune zone suit la couche « tout le boîtier ».
+
+⚠️ **Une animation de zone se calcule sur le boîtier entier**, et la zone n'en montre que sa part.
+C'est ce qui garde deux zones voisines cohérentes entre elles. Conséquence assumée : une vague sur
+une zone d'une seule LED clignote au lieu de défiler.
+
+Les zones vivent dans `/var/lib/reverb/zones.conf`, à côté de `eclairage.conf` qui porte la couche
+globale. Deux fichiers pour deux natures.
 
 ## Installation
 

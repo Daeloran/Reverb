@@ -27,7 +27,7 @@ pub const SERIAL_RGB_HAUT: &str = "1101F021AA358489609AA5B2";
 /// Disposition du boîtier : trois en bas, trois sur l'avant (le radiateur du
 /// Kraken, plaqué contre la face de la carte mère), trois sur le dessus, un à
 /// l'arrière.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Position {
     BasGauche,
     BasMilieu,
