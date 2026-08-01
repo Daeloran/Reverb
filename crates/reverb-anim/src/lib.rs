@@ -256,6 +256,33 @@ impl Animation {
         }
     }
 
+    /// L'inverse de [`Animation::reglages`] : les paires à réécrire.
+    ///
+    /// **Seulement les clés que cette animation accepte.** `arc-en-ciel` refuse
+    /// `couleur` ; la lui redonner ferait rejeter en bloc le fichier d'état ou
+    /// la commande qui la relance, et l'éclairage entier serait perdu pour une
+    /// clé de trop.
+    pub fn reglages_ecrits(&self, reglages: &Reglages) -> Vec<(String, String)> {
+        // Déstructuration exhaustive, volontairement sans `..` : un réglage
+        // ajouté un jour à `Reglages` ne compilera plus ici tant qu'on ne lui
+        // aura pas donné sa place sur le fil. Sans ça, il serait simplement
+        // perdu au redémarrage, sans un message.
+        let Reglages {
+            couleur,
+            vitesse,
+            direction,
+        } = *reglages;
+        let tous = [
+            ("couleur", couleur_hexa(couleur)),
+            ("vitesse", vitesse.to_string()),
+            ("direction", direction.slug().to_owned()),
+        ];
+        tous.into_iter()
+            .filter(|(cle, _)| self.parametres_acceptes().contains(cle))
+            .map(|(cle, valeur)| (cle.to_owned(), valeur))
+            .collect()
+    }
+
     /// Valide des paires brutes venues du protocole.
     ///
     /// Toutes les paires sont examinées : un décodeur qui s'arrêterait à la
@@ -505,6 +532,11 @@ fn teinte_vers_rgb(teinte: f32) -> Rgb {
         4 => Rgb::new(croissant, 0, 255),
         _ => Rgb::new(255, 0, decroissant),
     }
+}
+
+/// L'inverse de [`couleur`], six chiffres hexadécimaux.
+fn couleur_hexa(couleur: Rgb) -> String {
+    format!("{:02x}{:02x}{:02x}", couleur.r, couleur.g, couleur.b)
 }
 
 /// Décode six chiffres hexadécimaux.

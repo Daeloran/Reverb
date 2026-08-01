@@ -212,13 +212,19 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
         }
 
         "lighting" => {
-            let _ = &arguments;
-            todo!("#23")
+            if arguments.is_empty() {
+                Ok(Request::Lighting)
+            } else {
+                Err(mauvais("n'attend aucun argument"))
+            }
         }
 
         "watch" => {
-            let _ = &arguments;
-            todo!("#23")
+            if arguments.is_empty() {
+                Ok(Request::Watch)
+            } else {
+                Err(mauvais("n'attend aucun argument"))
+            }
         }
 
         "light" => {
@@ -323,7 +329,8 @@ pub fn encode_request(request: &Request) -> String {
             },
             reglages,
         ),
-        Request::Lighting | Request::Watch => todo!("#23"),
+        Request::Lighting => "lighting".to_owned(),
+        Request::Watch => "watch".to_owned(),
     }
 }
 
@@ -553,9 +560,21 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
             angle,
             sens,
         } => format!("geom {} {angle} {}", jeton(position), jeton(sens)),
-        ResponseLine::Light { .. } | ResponseLine::Anim { .. } | ResponseLine::Frame { .. } => {
-            todo!("#23")
+        ResponseLine::Light { cible, couleur } => {
+            format!("light {} {}", jeton(cible), hexa(*couleur))
         }
+        ResponseLine::Anim { nom, reglages } => {
+            ecrire_paires(format!("anim {}", jeton(nom)), reglages)
+        }
+        ResponseLine::Frame { cible, couleurs } => format!(
+            "frame {} {}",
+            jeton(cible),
+            couleurs
+                .iter()
+                .map(|couleur| hexa(*couleur))
+                .collect::<Vec<String>>()
+                .join(",")
+        ),
         ResponseLine::End => "end".to_owned(),
         ResponseLine::Error { message } => format!("err {}", reste(message)),
     }
@@ -598,6 +617,56 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
         });
     }
 
+    // Les trois lignes de la fenêtre se découpent à part : `anim` porte un
+    // nombre libre de réglages, et `frame` une liste dont la longueur dépend de
+    // la cible. Les compter dans le `splitn` fixe ci-dessous les tronquerait.
+    if let Some(champs) = line.strip_prefix("light ") {
+        let [cible, couleur] = champs.split(' ').collect::<Vec<&str>>()[..] else {
+            return Err(illisible(
+                "« light » attend une cible et une couleur, et rien d'autre",
+            ));
+        };
+        if cible.is_empty() {
+            return Err(illisible("« light » attend une cible avant la couleur"));
+        }
+        return Ok(ResponseLine::Light {
+            cible: cible.to_owned(),
+            couleur: couleur_stricte(couleur).ok_or_else(|| illisible(HEXA))?,
+        });
+    }
+    if let Some(champs) = line.strip_prefix("frame ") {
+        let [cible, couleurs] = champs.split(' ').collect::<Vec<&str>>()[..] else {
+            return Err(illisible(
+                "« frame » attend une cible et des couleurs séparées par des virgules",
+            ));
+        };
+        if cible.is_empty() {
+            return Err(illisible("« frame » attend une cible avant ses couleurs"));
+        }
+        // Une couleur manquante n'est **jamais** complétée par du noir : ce
+        // serait une LED éteinte que personne ne saurait expliquer.
+        let mut liste = Vec::new();
+        for brut in couleurs.split(',') {
+            liste.push(couleur_stricte(brut).ok_or_else(|| illisible(HEXA))?);
+        }
+        return Ok(ResponseLine::Frame {
+            cible: cible.to_owned(),
+            couleurs: liste,
+        });
+    }
+    if let Some(champs) = line.strip_prefix("anim ") {
+        let mut mots = champs.split(' ');
+        let nom = mots.next().unwrap_or_default();
+        if nom.is_empty() {
+            return Err(illisible("« anim » attend un nom d'animation"));
+        }
+        let restants: Vec<&str> = mots.collect();
+        return Ok(ResponseLine::Anim {
+            nom: nom.to_owned(),
+            reglages: paires(&restants).map_err(|raison| illisible(&raison))?,
+        });
+    }
+
     // `chan` porte son mode en dernier, donc à espaces : on ne découpe que les
     // quatre champs qui précèdent, et le reste est le mode.
     let champs: Vec<&str> = line.splitn(6, ' ').collect();
@@ -625,7 +694,9 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
                 .map_err(|_| illisible("« geom » attend un angle entier en degrés"))?,
             sens: (*sens).to_owned(),
         }),
-        ["light", ..] | ["anim", ..] | ["frame", ..] => todo!("#23"),
+        ["light", ..] => Err(illisible("« light » attend une cible et une couleur")),
+        ["frame", ..] => Err(illisible("« frame » attend une cible et des couleurs")),
+        ["anim", ..] => Err(illisible("« anim » attend un nom d'animation")),
         ["chan", ..] => Err(illisible("« chan » attend cinq champs")),
         ["geom", ..] => Err(illisible(
             "« geom » attend une position, un angle et un sens",
@@ -634,6 +705,28 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
         [prefixe, ..] => Err(illisible(&format!("préfixe « {prefixe} » inconnu"))),
         [] => Err(illisible("ligne vide")),
     }
+}
+
+/// Ce qu'on répond quand une couleur n'en est pas une.
+const HEXA: &str = "couleur invalide : attendu six chiffres hexadécimaux, par exemple ff2080";
+
+/// Une couleur en six chiffres hexadécimaux, telle qu'elle s'écrit sur le fil.
+fn hexa(couleur: Rgb) -> String {
+    format!("{:02x}{:02x}{:02x}", couleur.r, couleur.g, couleur.b)
+}
+
+/// L'inverse d'[`hexa`], **strict**.
+///
+/// Ni `#`, ni majuscules refusées — mais exactement six chiffres. Ces lignes-là
+/// sont écrites par le démon, pas tapées : y tolérer des variantes ferait passer
+/// une faute d'encodage pour une écriture valide, et le décodeur rattraperait sa
+/// propre erreur au lieu de la signaler.
+fn couleur_stricte(brut: &str) -> Option<Rgb> {
+    if brut.len() != 6 || !brut.bytes().all(|o| o.is_ascii_hexdigit()) {
+        return None;
+    }
+    let composante = |debut: usize| u8::from_str_radix(&brut[debut..debut + 2], 16).ok();
+    Some(Rgb::new(composante(0)?, composante(2)?, composante(4)?))
 }
 
 fn absent_ou<T: std::str::FromStr>(champ: &str) -> Result<Option<T>, String> {
