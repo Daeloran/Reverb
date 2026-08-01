@@ -153,8 +153,9 @@ const RAYON: f32 = 55.0;
 /// Hauteur du boîtier occupée, soit trois ventilateurs empilés sur le flanc.
 const HAUTEUR: f32 = 3.0 * ENTRAXE;
 
-/// Profondeur occupée, soit trois ventilateurs alignés au plancher.
-const PROFONDEUR: f32 = 3.0 * ENTRAXE;
+/// Profondeur occupée : trois ventilateurs alignés au plancher, **plus** la
+/// tranche que le radiateur occupe devant eux.
+const PROFONDEUR: f32 = 4.0 * ENTRAXE;
 
 /// Distance de la vitre au plateau de carte mère.
 ///
@@ -191,28 +192,40 @@ const ENTREE_SIX_HEURES: u16 = 180;
 /// « gauche » est le plus proche de l'**arrière** : c'est ce que la mesure a
 /// établi, et ce que la disposition ATX recoupe.
 ///
-/// ⚠️ Le radiateur est sur le **flanc du plateau de carte mère**, pas sur la
-/// face avant. `SPEC-PROTOCOLE-NZXT.md` §3 se contredisait sur ce point
-/// (« 3 sur l'avant » et « plaqué contre la face de la carte mère ») ; Nico a
-/// tranché le 2026-08-01. Une onde avant-arrière les traversait donc de travers.
+/// ⚠️ Le radiateur est sur le **flanc du plateau de carte mère** — c'est son
+/// plan — et à l'**avant** du boîtier — c'est sa profondeur. Les deux se sont
+/// trompées à tour de rôle :
+///
+/// - `SPEC-PROTOCOLE-NZXT.md` §3 se contredit sur le plan (« 3 sur l'avant » et
+///   « plaqué contre la face de la carte mère ») ; Nico a tranché le
+///   2026-08-01 : c'est le flanc.
+/// - La table l'a ensuite mis à **mi-profondeur**, entre les deux rangées
+///   couchées. Le schéma que Nico a dessiné le 2026-08-01 le dément : la
+///   colonne est devant elles. Une onde avant-arrière la traversait au milieu
+///   du boîtier au lieu de commencer par elle, et la maquette la dessinait
+///   par-dessus la RAM.
+///
+/// La phrase « sur le flanc » et le schéma ne se contredisent pas : l'une dit
+/// le plan, l'autre la profondeur.
 const CENTRES: [(Point, Plan, u16); 10] = [
     // Plancher, d'arrière en avant. Le flux les traverse de la vitre vers la
     // carte mère, donc il entre par six heures.
+    (pt(MILIEU, 0.0, 490.0), Plan::Couche, ENTREE_SIX_HEURES),
     (pt(MILIEU, 0.0, 350.0), Plan::Couche, ENTREE_SIX_HEURES),
     (pt(MILIEU, 0.0, 210.0), Plan::Couche, ENTREE_SIX_HEURES),
-    (pt(MILIEU, 0.0, 70.0), Plan::Couche, ENTREE_SIX_HEURES),
-    // Le radiateur, empilé sur le flanc de la carte mère, de haut en bas. Le
-    // flux le grimpe : il entre par le bas.
-    (pt(LARGEUR, 350.0, 210.0), Plan::Flanc, ENTREE_SIX_HEURES),
-    (pt(LARGEUR, 210.0, 210.0), Plan::Flanc, ENTREE_SIX_HEURES),
-    (pt(LARGEUR, 70.0, 210.0), Plan::Flanc, ENTREE_SIX_HEURES),
+    // Le radiateur, empilé sur le flanc de la carte mère, de haut en bas, et
+    // devant les deux rangées couchées. Le flux le grimpe : il entre par le
+    // bas.
+    (pt(LARGEUR, 350.0, 70.0), Plan::Flanc, ENTREE_SIX_HEURES),
+    (pt(LARGEUR, 210.0, 70.0), Plan::Flanc, ENTREE_SIX_HEURES),
+    (pt(LARGEUR, 70.0, 70.0), Plan::Flanc, ENTREE_SIX_HEURES),
     // Le fond, en haut. Dernier de la boucle, traversé de haut en bas.
     (pt(MILIEU, 350.0, PROFONDEUR), Plan::Debout, ENTREE_MIDI),
     // Plafond, d'arrière en avant. Le flux revient de la carte mère vers nous,
     // donc il entre par midi.
+    (pt(MILIEU, HAUTEUR, 490.0), Plan::Couche, ENTREE_MIDI),
     (pt(MILIEU, HAUTEUR, 350.0), Plan::Couche, ENTREE_MIDI),
     (pt(MILIEU, HAUTEUR, 210.0), Plan::Couche, ENTREE_MIDI),
-    (pt(MILIEU, HAUTEUR, 70.0), Plan::Couche, ENTREE_MIDI),
 ];
 
 /// Écart de `Point` utilisable dans une constante.
@@ -227,7 +240,12 @@ const fn pt(x: f32, y: f32, z: f32) -> Point {
 const RAM_X: f32 = 150.0;
 
 /// Profondeur de la barrette la plus proche du CPU.
-const RAM_Z: f32 = 240.0;
+///
+/// À mi-chemin entre le plan du radiateur et le ventilateur arrière, comme
+/// `docs/GEOMETRIE.md` le décrit — le bloc de quatre barrettes est donc centré
+/// sur `(70 + PROFONDEUR) / 2`, dans le vide que le déplacement du radiateur a
+/// ouvert au milieu du boîtier.
+const RAM_Z: f32 = 330.0;
 
 /// Écart entre deux slots DIMM voisins.
 const RAM_PAS_SLOT: f32 = 10.0;
