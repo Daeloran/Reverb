@@ -46,9 +46,10 @@
 
 use std::fmt;
 
+use crate::LEDS_PER_FAN;
 use crate::color::Rgb;
 use crate::position::Position;
-use crate::ram::SLOT_COUNT;
+use crate::ram::{self, SLOT_COUNT};
 
 /// Longueur maximale d'une ligne acceptée, en octets. `1024` passe, `1025` non.
 ///
@@ -101,6 +102,24 @@ pub enum Request {
     Geometry {
         cible: Option<String>,
         reglages: Vec<(String, String)>,
+    },
+    /// `paint <cible> <rrggbb>,<rrggbb>,…` — une couleur par LED.
+    ///
+    /// La cible est **une seule** : `fan:<position>` ou `slot:<0-3>`. `all`,
+    /// `fans` et `ram` n'ont pas de sens ici — une liste de couleurs appliquée
+    /// à dix ventilateurs ne dit pas laquelle va où.
+    ///
+    /// Le compte est vérifié à la lecture, contre le matériel : huit pour un
+    /// ventilateur, onze pour une barrette. Une liste trop courte complétée par
+    /// du noir donnerait des LED éteintes sans un message.
+    ///
+    /// ⚠️ **Cet état ne survit pas à un redémarrage** : `/var/lib/reverb/
+    /// eclairage.conf` conserve une couleur par cible (#21), pas une par LED.
+    /// Ce qui est peint à la main revient à la couleur de sa cible au
+    /// redémarrage suivant.
+    Paint {
+        target: LightTarget,
+        couleurs: Vec<Rgb>,
     },
     /// `lighting` — rend l'état d'éclairage courant, sans rien changer.
     ///
@@ -227,6 +246,40 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
             }
         }
 
+        "paint" => {
+            let [cible, couleurs] = arguments[..] else {
+                return Err(mauvais(
+                    "attend une cible et des couleurs séparées par des virgules, par exemple \
+                     « paint slot:0 ff0000,00ff00,… »",
+                ));
+            };
+            let target = cible_eclairage(cible).map_err(|raison| mauvais(&raison))?;
+            let attendues = match target {
+                LightTarget::Fan(_) => LEDS_PER_FAN as usize,
+                LightTarget::RamSlot(_) => ram::LEDS_PER_STICK,
+                LightTarget::All | LightTarget::Fans | LightTarget::Ram => {
+                    return Err(mauvais(
+                        "vise une seule cible : « fan:<position> » ou « slot:<0-3> ». Une liste de \
+                         couleurs ne dit pas laquelle va où",
+                    ));
+                }
+            };
+            let mut liste = Vec::with_capacity(attendues);
+            for brut in couleurs.split(',') {
+                liste.push(couleur_hex(brut).map_err(|raison| mauvais(&raison))?);
+            }
+            if liste.len() != attendues {
+                return Err(mauvais(&format!(
+                    "« {cible} » a {attendues} LED, et {} couleur(s) ont été données",
+                    liste.len()
+                )));
+            }
+            Ok(Request::Paint {
+                target,
+                couleurs: liste,
+            })
+        }
+
         "light" => {
             let [cible, couleur] = arguments[..] else {
                 return Err(mauvais(
@@ -299,17 +352,7 @@ pub fn encode_request(request: &Request) -> String {
     match request {
         Request::Status => "status".to_owned(),
         Request::Light { target, color } => {
-            let cible = match target {
-                LightTarget::All => "all".to_owned(),
-                LightTarget::Fans => "fans".to_owned(),
-                LightTarget::Fan(position) => format!("fan:{}", position.slug()),
-                LightTarget::Ram => "ram".to_owned(),
-                LightTarget::RamSlot(slot) => format!("slot:{slot}"),
-            };
-            format!(
-                "light {cible} {:02x}{:02x}{:02x}",
-                color.r, color.g, color.b
-            )
+            format!("light {} {}", cible_ecrite(*target), hexa(*color))
         }
         Request::Animate { name, reglages } => ecrire_paires(
             format!(
@@ -328,6 +371,15 @@ pub fn encode_request(request: &Request) -> String {
                 None => "geometry".to_owned(),
             },
             reglages,
+        ),
+        Request::Paint { target, couleurs } => format!(
+            "paint {} {}",
+            cible_ecrite(*target),
+            couleurs
+                .iter()
+                .map(|couleur| hexa(*couleur))
+                .collect::<Vec<String>>()
+                .join(",")
         ),
         Request::Lighting => "lighting".to_owned(),
         Request::Watch => "watch".to_owned(),
@@ -402,6 +454,17 @@ fn cible_eclairage(brut: &str) -> Result<LightTarget, String> {
                 "cible « {brut} » inconnue : attendu all, fans, ram, fan:<position> ou slot:<0-3>"
             ))
         }
+    }
+}
+
+/// L'inverse de [`cible_eclairage`].
+fn cible_ecrite(target: LightTarget) -> String {
+    match target {
+        LightTarget::All => "all".to_owned(),
+        LightTarget::Fans => "fans".to_owned(),
+        LightTarget::Fan(position) => format!("fan:{}", position.slug()),
+        LightTarget::Ram => "ram".to_owned(),
+        LightTarget::RamSlot(slot) => format!("slot:{slot}"),
     }
 }
 

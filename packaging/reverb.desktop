@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Reverb
+GenericName=Éclairage RGB
+Comment=Éclairage RGB et ventilateurs — boîtier NZXT et RAM Corsair
+Exec=/usr/local/bin/reverb-gui
+Icon=reverb
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=RGB;LED;ventilateur;NZXT;Corsair;
+StartupNotify=true
+StartupWMClass=reverb-gui

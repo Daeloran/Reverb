@@ -55,8 +55,8 @@ Aucune dépendance de runtime — l'OS est immuable, un binaire unique ne casse 
 montée d'image.
 
 ```
-reverb-gui  (fenêtre Slint)
-   │  socket Unix
+reverb-gui  (fenêtre Slint — maquette du boîtier, animations, ventilateurs)
+   │  socket Unix : « lighting » lit l'état, « watch » reçoit les images
    ▼
 reverb-daemon
    ├── write()      ──►  /dev/hidraw*        ventilateurs, GRB
@@ -69,9 +69,10 @@ reverb  (outil de validation, garde l'usbfs ──► 1e71:300c bulk, écran Kra
    └── reverb-proto  (encodage des trames, conversions, CRC-8, protocole IPC — pur)
 ```
 
-`reverb-anim` est importé par le démon **et** par la future fenêtre : l'aperçu du boîtier
-affichera les images exactement calculées par le code qui écrit sur le bus, pas une
-réimplémentation qui divergerait à la première animation ajoutée d'un seul côté.
+`reverb-anim` est importé par le démon **et** par la fenêtre : la maquette place ses LED avec la
+géométrie qui sert à calculer les images, et affiche les couleurs que le démon a réellement
+envoyées au bus — pas une réimplémentation qui divergerait à la première animation ajoutée d'un
+seul côté.
 
 ⚠️ **Trois ordres de composantes différents** : ventilateurs en **GRB**, écran en **BGR**,
 RAM en **RGB**. Une erreur ici ne produit aucun message, juste une mauvaise couleur.
@@ -190,6 +191,46 @@ Un fichier illisible ou tronqué ne bloque pas le démarrage : il est signalé d
 l'accueil s'applique. Une entrée absente ou répétée est refusée **en la nommant** — c'est ce qui
 rend un fichier tronqué détectable, plutôt que complété au jugé par un éclairage plausible et
 faux.
+
+## La fenêtre
+
+```bash
+cargo build --release
+sudo install -m 0755 target/release/reverb-gui /usr/local/bin/
+sudo install -Dm 0644 packaging/reverb.svg /usr/local/share/icons/hicolor/scalable/apps/reverb.svg
+sudo install -Dm 0644 packaging/reverb.desktop /usr/local/share/applications/reverb.desktop
+```
+
+Le boîtier y est dessiné **vu depuis le panneau latéral gauche, face à la carte mère** :
+l'arrière à gauche, l'avant à droite. C'est le point de vue depuis lequel la géométrie a été
+relevée, et celui depuis lequel on lit ses ventilateurs quand on se penche sur le bureau.
+
+**L'aperçu ne recalcule rien.** Il affiche les images que le démon envoie vraiment au matériel,
+reçues par `watch` — ce qui rend « l'aperçu montre ce que le boîtier reçoit » vrai par
+construction, et non par la coïncidence de deux implémentations qu'il faudrait tenir d'accord.
+
+⚠️ **C'est un schéma, pas une photographie**, et deux écarts s'imposent d'eux-mêmes :
+
+| | |
+|---|---|
+| anneaux dessinés plus petits que nature | `bas-milieu` et `radiateur-bas` n'ont que **70 mm** entre leurs centres, pour un rayon physique de **55** |
+| RAM décalée vers l'arrière | sa profondeur réelle la met **dans** la colonne du radiateur, qu'elle masquerait |
+
+Sept des dix ventilateurs sont vus par la tranche depuis ce panneau ; les dessiner fidèlement en
+ferait sept traits, où aucune LED ne serait cliquable. Ils sont donc dessinés en cercles quand
+même. Une vue faite pour ne plus regarder sous le bureau doit montrer les 124 LED.
+
+`cargo run --release --example apercu -p reverb-gui` dessine la fenêtre **sans écran**, dans un
+fichier : c'est ainsi qu'on vérifie une mise en page sans ouvrir de session graphique.
+
+### Ce que la fenêtre ne fait pas
+
+- Elle **n'ouvre aucun périphérique** et **n'écrit aucun fichier**. Tout passe par le socket, qui
+  reste l'unique franchissement de privilège (ADR-002).
+- La fermer n'éteint rien : le démon continue. Il n'y a **pas d'icône dans la barre système** —
+  sur GNOME/Wayland elle dépendrait d'une extension du bureau, qui casse aux montées de version.
+- Une LED peinte à la main (`paint`) **ne survit pas à un redémarrage** : `eclairage.conf` garde
+  une couleur par cible, pas une par LED (#21). La cible reprend sa couleur unie au démarrage.
 
 ## Prérequis
 
