@@ -7,11 +7,17 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "reverb_gui"
+path = "src/lib.rs"
+
 [[bin]]
 name = "reverb-gui"
 path = "src/main.rs"
 
 [dependencies]
+reverb-anim = { path = "../reverb-anim" }
+reverb-proto = { path = "../reverb-proto" }
 slint = "1"
 # Dépendance de FEATURE, pas d'API : ce crate interne de Slint n'est jamais
 # importé par notre code. Il n'est là que pour activer « fontconfig-dlopen »,

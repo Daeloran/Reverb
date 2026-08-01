@@ -295,6 +295,8 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
 
         Request::Geometry { cible, reglages } => geometrie(etat, cible.as_deref(), &reglages),
 
+        Request::Lighting | Request::Watch => todo!("#23"),
+
         Request::Fan { channel, action } => {
             // `Percent::new` refait la vérification de bornes que `parse_request`
             // a déjà faite. Ce n'est pas redondant pour rien : le socket ne doit

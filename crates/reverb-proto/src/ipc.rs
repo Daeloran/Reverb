@@ -102,6 +102,27 @@ pub enum Request {
         cible: Option<String>,
         reglages: Vec<(String, String)>,
     },
+    /// `lighting` — rend l'état d'éclairage courant, sans rien changer.
+    ///
+    /// Quatorze lignes `light` — les couleurs fixes, celles que `animate off`
+    /// rendrait — plus une ligne `anim` s'il y a une animation, puis `end`.
+    ///
+    /// **Un verbe à part, et non un `light` sans argument** comme `geometry`
+    /// sans argument : un test d'intention de #17 exige que `light` seul soit
+    /// refusé en nommant le verbe, et un test d'intention ne se réécrit pas
+    /// pour arranger un design venu après lui.
+    Lighting,
+    /// `watch` — le démon pousse l'image courante, puis chaque nouvelle.
+    ///
+    /// Quatorze lignes `frame` puis `end`, et ainsi de suite tant que le client
+    /// écoute. La première image part **à l'abonnement**, sans attendre un
+    /// changement : une fenêtre qui vient de s'ouvrir doit montrer le boîtier
+    /// tel qu'il est, pas un cadre vide jusqu'à la prochaine animation.
+    ///
+    /// C'est ce qui rend « l'aperçu montre ce que le boîtier reçoit » vrai par
+    /// construction : la fenêtre affiche les images calculées par le code même
+    /// qui écrit sur les bus, au lieu de les recalculer de son côté.
+    Watch,
 }
 
 /// Ce que vise une commande d'éclairage.
@@ -188,6 +209,16 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
             } else {
                 Err(mauvais("n'attend aucun argument"))
             }
+        }
+
+        "lighting" => {
+            let _ = &arguments;
+            todo!("#23")
+        }
+
+        "watch" => {
+            let _ = &arguments;
+            todo!("#23")
         }
 
         "light" => {
@@ -292,6 +323,7 @@ pub fn encode_request(request: &Request) -> String {
             },
             reglages,
         ),
+        Request::Lighting | Request::Watch => todo!("#23"),
     }
 }
 
@@ -424,6 +456,30 @@ pub enum ResponseLine {
         angle: u16,
         sens: String,
     },
+    /// `light <cible> <rrggbb>` — une couleur fixe de l'état courant.
+    ///
+    /// La cible s'écrit comme dans la requête : `fan:<position>` ou
+    /// `slot:<0-3>`. Les cibles collectives — `all`, `fans`, `ram` — n'y
+    /// paraissent jamais : l'état est ce que chaque cible porte, pas la
+    /// commande qui l'y a mise.
+    Light { cible: String, couleur: Rgb },
+    /// `anim <nom> [clé=valeur…]` — l'animation en cours.
+    ///
+    /// Absente quand l'éclairage est fixe. Les réglages sont transportés bruts,
+    /// comme dans `Request::Animate` : le protocole ne sait pas ce qu'une
+    /// animation accepte, et n'a pas à le savoir.
+    Anim {
+        nom: String,
+        reglages: Vec<(String, String)>,
+    },
+    /// `frame <cible> <rrggbb>,<rrggbb>,…` — les couleurs d'une cible dans
+    /// l'image courante.
+    ///
+    /// Huit couleurs pour un ventilateur, onze pour une barrette, dans l'ordre
+    /// du matériel. Séparées par des virgules et non par des espaces : une
+    /// ligne de onze champs se relit mal, et le découpage en jetons du reste du
+    /// protocole reste ainsi valable.
+    Frame { cible: String, couleurs: Vec<Rgb> },
     /// `end` — succès, fin de réponse.
     End,
     /// `err <message>` — échec, fin de réponse.
@@ -497,6 +553,9 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
             angle,
             sens,
         } => format!("geom {} {angle} {}", jeton(position), jeton(sens)),
+        ResponseLine::Light { .. } | ResponseLine::Anim { .. } | ResponseLine::Frame { .. } => {
+            todo!("#23")
+        }
         ResponseLine::End => "end".to_owned(),
         ResponseLine::Error { message } => format!("err {}", reste(message)),
     }
@@ -566,6 +625,7 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
                 .map_err(|_| illisible("« geom » attend un angle entier en degrés"))?,
             sens: (*sens).to_owned(),
         }),
+        ["light", ..] | ["anim", ..] | ["frame", ..] => todo!("#23"),
         ["chan", ..] => Err(illisible("« chan » attend cinq champs")),
         ["geom", ..] => Err(illisible(
             "« geom » attend une position, un angle et un sens",
