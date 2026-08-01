@@ -117,6 +117,16 @@ impl Default for Brightness {
 /// comprend en les bougeant, là où trois octets de rouge, vert et bleu ne se
 /// devinent pas. `Rgb` reste le repère dans lequel on l'**écrit** sur un bus.
 ///
+/// # ⚠️ C'est HSV, malgré le nom
+///
+/// « TSL » se lit d'ordinaire *teinte, saturation, lightness*. Ce n'est **pas**
+/// ce modèle-ci : la luminosité vaut ici la composante la plus forte — la
+/// *value* de HSV — et non la moyenne des extrêmes. C'est ce que montrent les
+/// sélecteurs de couleur sous le nom de *Brightness*, et c'est ce que Nico a
+/// demandé : `00aeed` doit afficher 93, ce qui est `0xed / 255`. En HSL la même
+/// couleur afficherait 46,5, et les curseurs seraient faux sans qu'aucun test de
+/// forme ne s'en aperçoive. Trois tests d'intention épinglent HSV explicitement.
+///
 /// # Pourquoi des flottants
 ///
 /// Un tour de teinte à l'entier près ne compte que 360 valeurs, la saturation et
@@ -155,6 +165,50 @@ impl fmt::Display for TslInvalide {
 
 impl std::error::Error for TslInvalide {}
 
+/// Refuse une valeur non finie ou hors de `0..=haut`.
+///
+/// `haut_inclus` dit si la borne haute compte. Une valeur hors bornes est
+/// **refusée** et non repliée : replier en silence ferait tourner une animation
+/// dans une teinte que personne n'a demandée, et sans rien dire.
+fn borner(
+    champ: &'static str,
+    valeur: f32,
+    haut: f32,
+    haut_inclus: bool,
+) -> Result<(), TslInvalide> {
+    if !valeur.is_finite() {
+        return Err(TslInvalide {
+            champ,
+            raison: format!("{valeur} n'est pas un nombre"),
+        });
+    }
+    let dedans = valeur >= 0.0
+        && if haut_inclus {
+            valeur <= haut
+        } else {
+            valeur < haut
+        };
+    if dedans {
+        return Ok(());
+    }
+    Err(TslInvalide {
+        champ,
+        raison: format!(
+            "{valeur} est hors de 0 à {haut}{}",
+            if haut_inclus { " inclus" } else { " exclu" }
+        ),
+    })
+}
+
+/// Une fraction de 0 à 1, en octet, **arrondie au plus proche**.
+///
+/// ⚠️ Pas tronquée, contrairement à [`Rgb::with_brightness`] : là-bas la
+/// troncature est la règle du protocole (spec §11), ici elle décalerait chaque
+/// aller-retour d'un cran vers le noir.
+fn octet(fraction: f32) -> u8 {
+    (fraction * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
 impl Rgb {
     /// La même couleur, en teinte, saturation et luminosité.
     ///
@@ -163,14 +217,68 @@ impl Rgb {
     /// un [`Tsl`] comme état et non un `Rgb` — sinon la teinte se perdrait en
     /// passant par le gris, et il faudrait la retrouver au jugé.
     pub fn en_tsl(self) -> Tsl {
-        todo!("issue #30")
+        let (r, v, b) = (f32::from(self.r), f32::from(self.g), f32::from(self.b));
+        let fort = r.max(v).max(b);
+        let faible = r.min(v).min(b);
+        let ecart = fort - faible;
+
+        let teinte = if ecart == 0.0 {
+            // Un gris n'a pas de teinte. Zéro faute de mieux — et c'est
+            // précisément pourquoi la fenêtre garde un `Tsl` comme état : sinon
+            // la teinte se perdrait en passant par le gris.
+            0.0
+        } else if fort == r {
+            60.0 * (v - b) / ecart
+        } else if fort == v {
+            60.0 * ((b - r) / ecart + 2.0)
+        } else {
+            60.0 * ((r - v) / ecart + 4.0)
+        };
+        let teinte = if teinte < 0.0 { teinte + 360.0 } else { teinte };
+
+        Tsl {
+            // ⚠️ Jamais 360, même par arrondi : `depuis_tsl` refuse cette valeur,
+            // et refuser une couleur que `en_tsl` vient de produire serait un
+            // aller-retour cassé sur une poignée de teintes.
+            teinte: if teinte >= 360.0 { 0.0 } else { teinte },
+            saturation: if fort == 0.0 {
+                // Le noir n'a pas de saturation : `0 / 0` rendrait `NaN`.
+                0.0
+            } else {
+                ecart / fort * 100.0
+            },
+            luminosite: fort / 255.0 * 100.0,
+        }
     }
 
     /// La couleur que ces trois axes désignent.
     ///
     /// L'aller-retour est **exact** : `Rgb::depuis_tsl(couleur.en_tsl())` rend
     /// `couleur`, pour les seize millions sept cent mille.
-    pub fn depuis_tsl(_tsl: Tsl) -> Result<Rgb, TslInvalide> {
-        todo!("issue #30")
+    pub fn depuis_tsl(tsl: Tsl) -> Result<Rgb, TslInvalide> {
+        // La borne haute de la teinte est **exclue** : 360 est le même point que
+        // 0, et l'accepter donnerait deux écritures pour une seule couleur.
+        borner("teinte", tsl.teinte, 360.0, false)?;
+        borner("saturation", tsl.saturation, 100.0, true)?;
+        borner("luminosite", tsl.luminosite, 100.0, true)?;
+
+        let valeur = tsl.luminosite / 100.0;
+        let saturation = tsl.saturation / 100.0;
+        let vive = valeur * saturation;
+        let secteur = tsl.teinte / 60.0;
+        // La composante intermédiaire : elle monte d'un bord du sextant à
+        // l'autre, ce qui fait la continuité du tour.
+        let milieu = vive * (1.0 - ((secteur % 2.0) - 1.0).abs());
+        let fond = valeur - vive;
+
+        let (r, v, b) = match secteur as u32 {
+            0 => (vive, milieu, 0.0),
+            1 => (milieu, vive, 0.0),
+            2 => (0.0, vive, milieu),
+            3 => (0.0, milieu, vive),
+            4 => (milieu, 0.0, vive),
+            _ => (vive, 0.0, milieu),
+        };
+        Ok(Rgb::new(octet(r + fond), octet(v + fond), octet(b + fond)))
     }
 }

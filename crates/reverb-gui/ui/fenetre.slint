@@ -37,6 +37,55 @@ export struct FamilleAnimation {
     accepte-couleur: bool,
 }
 
+// Un curseur peint par ce qu'il parcourt.
+//
+// `std-widgets` n'expose pas la voie : impossible d'y mettre l'arc-en-ciel
+// entier, ni le degrade du gris a la couleur. Vingt lignes ici valent mieux que
+// de laisser trois curseurs identiques dire trois choses differentes.
+component Curseur inherits Rectangle {
+    in property <float> valeur;
+    in property <float> maximum: 100;
+    in property <brush> voie;
+    callback change(float);
+
+    height: 20px;
+
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 10px;
+        border-radius: 5px;
+        background: root.voie;
+        border-width: 1px;
+        border-color: #00000040;
+    }
+
+    poignee := Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: #ffffff;
+        border-width: 2px;
+        border-color: #00000060;
+        x: (root.valeur / root.maximum) * (parent.width - self.width);
+        y: (parent.height - self.height) / 2;
+    }
+
+    zone := TouchArea {
+        // La poignee est centree sur le point vise : la course utile est donc
+        // amputee de sa largeur, une demie a chaque bout.
+        function lue() -> float {
+            return Math.clamp(
+                (self.mouse-x - poignee.width / 2) / (self.width - poignee.width),
+                0, 1
+            ) * root.maximum;
+        }
+        pointer-event(evenement) => {
+            if (evenement.kind == PointerEventKind.down) { root.change(zone.lue()); }
+        }
+        moved => { if (self.pressed) { root.change(zone.lue()); } }
+    }
+}
+
 component Titre inherits Text {
     font-size: 12px;
     font-weight: 700;
@@ -76,6 +125,12 @@ export component Fenetre inherits Window {
     in property <bool> connecte;
     in-out property <string> couleur: "ff40ff";
     in property <color> apercu: #ff40ff;
+    // Les trois axes du selecteur, et la teinte pure qui peint deux des voies.
+    in property <float> teinte: 300;
+    in property <float> saturation: 75;
+    in property <float> luminosite: 100;
+    in property <color> teinte-pure: #ff00ff;
+    in property <color> teinte-grise: #808080;
     in-out property <int> vitesse: 3;
     in-out property <int> direction: 4;
 
@@ -86,6 +141,9 @@ export component Fenetre inherits Window {
     callback basculer-detail();
     callback basculer-vue();
     callback couleur-saisie(string);
+    callback teinte-changee(float);
+    callback saturation-changee(float);
+    callback luminosite-changee(float);
     callback choisir-cible(string);
     callback appliquer-couleur();
     callback lancer-animation(string);
@@ -290,6 +348,13 @@ export component Fenetre inherits Window {
                         VerticalLayout {
                             spacing: 6px;
                             Titre { text: "COULEUR"; }
+                            Rectangle {
+                                height: 54px;
+                                border-radius: 8px;
+                                background: root.apercu;
+                                border-width: 1px;
+                                border-color: #00000060;
+                            }
                             HorizontalLayout {
                                 spacing: 6px;
                                 LineEdit {
@@ -312,6 +377,45 @@ export component Fenetre inherits Window {
                                     }
                                 }
                             }
+                            // Trois axes qu'on comprend en les bougeant, chacun
+                            // peint par ce qu'il parcourt.
+                            for axe in [
+                                { nom: "teinte", valeur: root.teinte, maximum: 359 },
+                                { nom: "saturation", valeur: root.saturation, maximum: 100 },
+                                { nom: "luminosité", valeur: root.luminosite, maximum: 100 },
+                            ]: VerticalLayout {
+                                spacing: 1px;
+                                HorizontalLayout {
+                                    Text {
+                                        text: axe.nom;
+                                        font-size: 12px;
+                                        color: #8a8c9b;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: Math.round(axe.valeur);
+                                        font-size: 12px;
+                                        color: #e6e6ef;
+                                    }
+                                }
+                                Curseur {
+                                    valeur: axe.valeur;
+                                    maximum: axe.maximum;
+                                    voie: axe.nom == "teinte"
+                                        ? @linear-gradient(90deg,
+                                            #ff0000 0%, #ffff00 17%, #00ff00 33%,
+                                            #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)
+                                        : axe.nom == "saturation"
+                                        ? @linear-gradient(90deg, root.teinte-grise 0%, root.teinte-pure 100%)
+                                        : @linear-gradient(90deg, #000000 0%, root.teinte-pure 100%);
+                                    change(valeur) => {
+                                        if (axe.nom == "teinte") { root.teinte-changee(valeur); }
+                                        else if (axe.nom == "saturation") { root.saturation-changee(valeur); }
+                                        else { root.luminosite-changee(valeur); }
+                                    }
+                                }
+                            }
+
                             HorizontalLayout {
                                 spacing: 5px;
                                 for teinte in ["ff0000", "ff8000", "ffff00", "00ff00", "00ffff", "0000ff", "ff00ff", "ffffff"]: Rectangle {
