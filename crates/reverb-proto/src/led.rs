@@ -11,6 +11,8 @@
 
 use std::fmt;
 
+use crate::Position;
+
 use crate::LEDS_PER_FAN;
 
 /// Comment le tampon est appliqué — offset 4 de `22 a0` (spec §5.2).
@@ -71,3 +73,54 @@ impl fmt::Display for LedCountError {
 }
 
 impl std::error::Error for LedCountError {}
+
+/// Une LED précise du boîtier.
+///
+/// Le protocole n'en avait pas besoin tant qu'une commande visait un organe
+/// entier. Une **zone** en a besoin : elle est un ensemble de LED quelconque,
+/// composé à la souris, et rien ne dit qu'il suit les frontières des
+/// ventilateurs.
+///
+/// S'écrit `fan:<position>:<0-7>` ou `slot:<0-3>:<0-10>` — la syntaxe de
+/// `LightTarget` prolongée d'un rang.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Led {
+    Ventilateur { position: Position, led: usize },
+    Barrette { slot: usize, led: usize },
+}
+
+/// Une LED n'a pas pu être lue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedInconnue {
+    pub donne: String,
+    pub raison: String,
+}
+
+impl fmt::Display for LedInconnue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "« {} » : {}", self.donne, self.raison)
+    }
+}
+
+impl std::error::Error for LedInconnue {}
+
+impl Led {
+    /// Toutes les LED du boîtier, dans l'ordre du matériel.
+    pub fn toutes() -> Vec<Led> {
+        todo!("issue #29")
+    }
+
+    /// Comment cette LED s'écrit sur le socket et dans les fichiers.
+    pub fn slug(self) -> String {
+        todo!("issue #29")
+    }
+
+    /// L'inverse de [`Led::slug`], strict.
+    ///
+    /// Accepte aussi un **organe entier** — `fan:arriere`, `slot:0` — auquel cas
+    /// toutes ses LED sont rendues : c'est la forme courte qu'on écrit à la
+    /// main, et celle qui rend `zone set maZone fan:arriere` lisible.
+    pub fn depuis_slug(_brut: &str) -> Result<Vec<Led>, LedInconnue> {
+        todo!("issue #29")
+    }
+}

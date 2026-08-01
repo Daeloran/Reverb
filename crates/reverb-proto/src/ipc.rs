@@ -46,6 +46,7 @@
 
 use std::fmt;
 
+use crate::led::Led;
 use crate::LEDS_PER_FAN;
 use crate::color::Rgb;
 use crate::position::Position;
@@ -131,6 +132,31 @@ pub enum Request {
     /// refusé en nommant le verbe, et un test d'intention ne se réécrit pas
     /// pour arranger un design venu après lui.
     Lighting,
+    /// `zone list` — rend la composition et le rendu de chaque zone.
+    ZoneList,
+    /// `zone set <nom> <cible>[,<cible>…]` — crée ou redéfinit une zone.
+    ///
+    /// Une cible est une LED précise (`fan:arriere:3`, `slot:0:7`) ou un organe
+    /// entier (`fan:arriere`, `slot:0`), qui vaut pour toutes ses LED.
+    ///
+    /// ⚠️ **Une LED appartient à au plus une zone.** Les cibles données ici sont
+    /// **retirées** des autres zones, sans qu'il faille le demander : c'est ce
+    /// qui évite d'avoir à trancher un ordre d'empilement.
+    ZoneSet { nom: String, cibles: Vec<Led> },
+    /// `zone drop <nom>` — supprime une zone. Ses LED reviennent à la couche
+    /// « tout le boîtier », sans s'éteindre.
+    ZoneDrop { nom: String },
+    /// `zone light <nom> <rrggbb>` — la zone porte une couleur fixe.
+    ZoneLight { nom: String, couleur: Rgb },
+    /// `zone anim <nom> <animation|off> [clé=valeur…]` — la zone porte une
+    /// animation, avec sa propre vitesse et sa propre phase.
+    ///
+    /// `off` la rend transparente : ses LED reprennent la couche globale.
+    ZoneAnim {
+        nom: String,
+        animation: Option<String>,
+        reglages: Vec<(String, String)>,
+    },
     /// `watch` — le démon pousse l'image courante, puis chaque nouvelle.
     ///
     /// Quatorze lignes `frame` puis `end`, et ainsi de suite tant que le client
@@ -245,6 +271,8 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
                 Err(mauvais("n'attend aucun argument"))
             }
         }
+
+        "zone" => todo!("issue #29"),
 
         "paint" => {
             let [cible, couleurs] = arguments[..] else {
@@ -382,6 +410,11 @@ pub fn encode_request(request: &Request) -> String {
                 .join(",")
         ),
         Request::Lighting => "lighting".to_owned(),
+        Request::ZoneList
+        | Request::ZoneSet { .. }
+        | Request::ZoneDrop { .. }
+        | Request::ZoneLight { .. }
+        | Request::ZoneAnim { .. } => todo!("issue #29"),
         Request::Watch => "watch".to_owned(),
     }
 }
@@ -550,6 +583,23 @@ pub enum ResponseLine {
     /// ligne de onze champs se relit mal, et le découpage en jetons du reste du
     /// protocole reste ainsi valable.
     Frame { cible: String, couleurs: Vec<Rgb> },
+    /// `zone <nom> <cible>,<cible>,…` — la composition d'une zone.
+    ///
+    /// Les cibles sont toujours rendues **LED par LED**, jamais regroupées en
+    /// organes : une zone peut n'en tenir que la moitié, et rendre `fan:arriere`
+    /// pour six LED sur huit serait faux.
+    Zone { nom: String, cibles: Vec<Led> },
+    /// `zone-light <nom> <rrggbb>` — la zone porte cette couleur fixe.
+    ZoneLight { nom: String, couleur: Rgb },
+    /// `zone-anim <nom> <animation> [clé=valeur…]` — la zone porte cette
+    /// animation.
+    ///
+    /// Absente quand la zone est transparente ou fixe.
+    ZoneAnim {
+        nom: String,
+        animation: String,
+        reglages: Vec<(String, String)>,
+    },
     /// `end` — succès, fin de réponse.
     End,
     /// `err <message>` — échec, fin de réponse.
@@ -638,6 +688,9 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
                 .collect::<Vec<String>>()
                 .join(",")
         ),
+        ResponseLine::Zone { .. }
+        | ResponseLine::ZoneLight { .. }
+        | ResponseLine::ZoneAnim { .. } => todo!("issue #29"),
         ResponseLine::End => "end".to_owned(),
         ResponseLine::Error { message } => format!("err {}", reste(message)),
     }

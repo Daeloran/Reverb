@@ -338,6 +338,11 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
         abonnement,
     } = ordre;
     let lignes = match requete {
+        Request::ZoneList
+        | Request::ZoneSet { .. }
+        | Request::ZoneDrop { .. }
+        | Request::ZoneLight { .. }
+        | Request::ZoneAnim { .. } => todo!("issue #29"),
         Request::Status => {
             let mut lignes = telemetrie::releve(
                 peripheriques.canaux(),

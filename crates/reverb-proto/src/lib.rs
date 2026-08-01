@@ -21,7 +21,7 @@ pub mod screen;
 
 pub use color::{Brightness, Rgb, Tsl, TslInvalide};
 pub use frame::{FRAME_LEN, Frame};
-pub use led::{Apply, LedCountError};
+pub use led::{Apply, Led, LedCountError, LedInconnue};
 pub use mode::{ColorCountError, Mode, UnknownMode};
 pub use position::{Placement, Position, UnknownPosition};
 pub use screen::{BrightnessError, ImageError, ScreenState, StateError};
