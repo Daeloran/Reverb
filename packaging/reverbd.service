@@ -37,6 +37,13 @@ RuntimeDirectory=reverb
 RuntimeDirectoryMode=0750
 UMask=0007
 
+# /var/lib/reverb : l'eclairage courant, reecrit a chaque commande, relu au
+# demarrage. `StateDirectory` le cree au bon proprietaire et — contrairement a
+# `RuntimeDirectory` — ne l'efface pas a l'arret : c'est precisement ce qui doit
+# traverser un redemarrage. La geometrie, elle, reste dans /etc : une donnee de
+# montage relevee une fois, pas un etat de service.
+StateDirectory=reverb
+
 # ⚠️ Ne PAS ajouter `ProtectKernelTunables=yes` : il monte /sys en lecture
 # seule, ce qui coupe précisément le réglage des ventilateurs.
 NoNewPrivileges=yes

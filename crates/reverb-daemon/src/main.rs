@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use reverb_anim::{Animation, Geometrie, Image, Orientation, Reglages, Sens};
 use reverb_daemon::cadence::{Cadence, Tick};
 use reverb_daemon::peripheriques::{Consigne, Peripheriques};
-use reverb_daemon::persistance;
+use reverb_daemon::persistance::{self, Eclairage};
 use reverb_daemon::serveur::{self, Ordre};
 use reverb_daemon::telemetrie;
 use reverb_hw::hwmon::Percent;
@@ -57,14 +57,24 @@ fn main() -> ExitCode {
     let socket = std::env::args()
         .nth(1)
         .map_or_else(|| PathBuf::from(SOCKET), PathBuf::from);
-    let fichier_geometrie = std::env::args()
-        .nth(2)
-        .map_or_else(|| PathBuf::from(persistance::CHEMIN), PathBuf::from);
+    let fichier_geometrie = std::env::args().nth(2).map_or_else(
+        || PathBuf::from(persistance::CHEMIN_GEOMETRIE),
+        PathBuf::from,
+    );
+    let fichier_eclairage = std::env::args().nth(3).map_or_else(
+        || PathBuf::from(persistance::CHEMIN_ECLAIRAGE),
+        PathBuf::from,
+    );
 
-    let (geometrie, souci) = persistance::charger(&fichier_geometrie);
+    let (geometrie, souci) = persistance::charger_geometrie(&fichier_geometrie);
     if let Some(souci) = souci {
         eprintln!("attention : {souci}");
     }
+    let (eclairage, souci) = persistance::charger_eclairage(&fichier_eclairage);
+    if let Some(souci) = souci {
+        eprintln!("attention : {souci}");
+    }
+    let etat = Etat::nouveau(eclairage, geometrie, fichier_geometrie, fichier_eclairage);
 
     let annonce = socket.display().to_string();
     thread::spawn(move || {
@@ -79,7 +89,7 @@ fn main() -> ExitCode {
     signaler_pret();
     println!("reverbd écoute sur {annonce}");
 
-    boucle(&mut peripheriques, &reception, geometrie, fichier_geometrie);
+    boucle(&mut peripheriques, &reception, etat);
     ExitCode::SUCCESS
 }
 
@@ -93,32 +103,43 @@ struct Etat {
     geometrie: Geometrie,
     /// Le fichier qui conserve la géométrie d'un démarrage à l'autre.
     fichier_geometrie: PathBuf,
+    /// Le fichier qui conserve l'éclairage d'un démarrage à l'autre.
+    fichier_eclairage: PathBuf,
     /// Une couleur fixe a changé et n'a pas encore été écrite.
     a_ecrire: bool,
 }
 
 impl Etat {
-    fn nouveau(geometrie: Geometrie, fichier_geometrie: PathBuf) -> Etat {
+    fn nouveau(
+        eclairage: Eclairage,
+        geometrie: Geometrie,
+        fichier_geometrie: PathBuf,
+        fichier_eclairage: PathBuf,
+    ) -> Etat {
         Etat {
-            ventilateurs: [Rgb::BLACK; 10],
-            barrettes: [Rgb::BLACK; ram::SLOT_COUNT],
-            animation: None,
+            ventilateurs: eclairage.ventilateurs,
+            barrettes: eclairage.barrettes,
+            animation: eclairage.animation,
             geometrie,
             fichier_geometrie,
+            fichier_eclairage,
             // Écrire l'état au démarrage : c'est ce qui donne un éclairage
             // connu au boot, sans qu'aucune fenêtre soit ouverte.
             a_ecrire: true,
         }
     }
+
+    /// L'état à conserver sur disque.
+    fn eclairage(&self) -> Eclairage {
+        Eclairage {
+            ventilateurs: self.ventilateurs,
+            barrettes: self.barrettes,
+            animation: self.animation,
+        }
+    }
 }
 
-fn boucle(
-    peripheriques: &mut Peripheriques,
-    ordres: &Receiver<Ordre>,
-    geometrie: Geometrie,
-    fichier_geometrie: PathBuf,
-) {
-    let mut etat = Etat::nouveau(geometrie, fichier_geometrie);
+fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat: Etat) {
     let mut cadence = Cadence::new(IMAGES_PAR_SECONDE);
     let mut depart = Instant::now();
     let mut animait = false;
@@ -253,7 +274,7 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
             // les mêmes LED, et la dernière écriture gagnerait au hasard.
             etat.animation = None;
             etat.a_ecrire = true;
-            vec![ResponseLine::End]
+            conserver(etat)
         }
 
         Request::Animate { name, reglages } => match name {
@@ -261,12 +282,12 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
                 etat.animation = None;
                 // L'éclairage fixe reprend la main là où l'animation l'a laissé.
                 etat.a_ecrire = true;
-                vec![ResponseLine::End]
+                conserver(etat)
             }
             Some(nom) => match lancer(&nom, &reglages) {
                 Ok(anime) => {
                     etat.animation = Some(anime);
-                    vec![ResponseLine::End]
+                    conserver(etat)
                 }
                 Err(message) => vec![ResponseLine::Error { message }],
             },
@@ -297,6 +318,29 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
     // Le client peut être parti entre l'ordre et la réponse : ce n'est pas une
     // erreur du démon.
     let _ = ordre.reponse.send(lignes);
+}
+
+/// Écrit l'éclairage courant sur disque, et répond.
+///
+/// À **chaque** changement d'état, et non à l'arrêt du démon : ce qu'on veut
+/// retrouver, c'est précisément l'éclairage d'avant une coupure de courant ou
+/// un arrêt au bouton, qui ne laissent pas le temps d'écrire quoi que ce soit.
+/// Le débit reste celui des commandes humaines — une animation qui tourne à
+/// 21 img/s ne change pas d'état, elle avance.
+///
+/// Un échec d'écriture est dit au client plutôt qu'avalé : la couleur est bien
+/// appliquée, mais elle ne survivra pas au redémarrage, et c'est exactement la
+/// panne que cette issue corrige.
+fn conserver(etat: &Etat) -> Vec<ResponseLine> {
+    match persistance::enregistrer_eclairage(&etat.fichier_eclairage, &etat.eclairage()) {
+        Ok(()) => vec![ResponseLine::End],
+        Err(erreur) => vec![ResponseLine::Error {
+            message: format!(
+                "éclairage appliqué mais non conservé : {} ({erreur})",
+                etat.fichier_eclairage.display()
+            ),
+        }],
+    }
 }
 
 /// Ouvre une animation du catalogue et valide ses réglages.
@@ -392,7 +436,9 @@ fn geometrie(
     };
     etat.geometrie.definir(position, orientation);
 
-    if let Err(erreur) = persistance::enregistrer(&etat.fichier_geometrie, &etat.geometrie) {
+    if let Err(erreur) =
+        persistance::enregistrer_geometrie(&etat.fichier_geometrie, &etat.geometrie)
+    {
         // L'orientation est appliquée en mémoire mais ne survivra pas : le dire
         // plutôt que de laisser croire à un réglage acquis.
         return echec(format!(
