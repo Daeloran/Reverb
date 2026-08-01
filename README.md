@@ -232,6 +232,21 @@ fichier : c'est ainsi qu'on vérifie une mise en page sans ouvrir de session gra
 - Une LED peinte à la main (`paint`) **ne survit pas à un redémarrage** : `eclairage.conf` garde
   une couleur par cible, pas une par LED (#21). La cible reprend sa couleur unie au démarrage.
 
+## Installation
+
+```bash
+./tools/installe.sh      # groupe, règle udev, binaires, service, lanceur
+./tools/desinstalle.sh   # tout retirer, sauf la géométrie et l'éclairage
+```
+
+Rejouable : une seconde exécution met à jour ce qui a changé. Elle ne rend la main qu'une fois le
+socket ouvert — un démon qui ne répond pas se découvrirait sinon en ouvrant la fenêtre.
+
+Au tout premier passage, le groupe `reverb` vient d'être accordé et la session ne l'a pas encore :
+`sg reverb -c reverb-gui` l'active sans se déconnecter. La désinstallation laisse
+`/etc/reverb/geometrie.conf` — une orientation relevée à l'œil sous le bureau ne se jette pas sans
+le dire.
+
 ## Prérequis
 
 Rust, installé dans le `$HOME` — aucune surcouche `rpm-ostree` nécessaire :
