@@ -10,5 +10,6 @@
 
 pub mod client;
 pub mod plan;
+pub mod reglages;
 
 slint::include_modules!();
