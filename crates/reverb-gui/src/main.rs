@@ -17,7 +17,7 @@
 //! image entière, cinquante millisecondes — et l'interface collerait aux doigts
 //! pendant qu'une animation tourne.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
-use reverb_gui::plan::{Cible, Place, Plan};
+use reverb_gui::plan::{Cible, Place, Plan, Vue};
 use reverb_gui::reglages::{Poignee, Reglage};
 use reverb_gui::{FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, PointLed};
 use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine};
@@ -75,30 +75,166 @@ const EFFETS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Ce que l'utilisateur vise en ce moment.
+/// Le niveau de détail de la maquette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Selection {
-    Groupe(LightTarget),
-    Led(Cible),
+enum Detail {
+    /// Dix disques et quatre réglettes : on vise un organe entier.
+    Ventilateur,
+    /// Les cent vingt-quatre pastilles : on peint LED par LED.
+    Led,
+}
+
+/// Ce que l'utilisateur vise en ce moment.
+///
+/// **Un ensemble de LED, jamais autre chose.** Viser un ventilateur entier, c'est
+/// viser ses huit LED — ce qui rend une sélection composable à volonté, et donc
+/// utilisable telle quelle comme définition d'une zone.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Selection {
+    cibles: Vec<Cible>,
 }
 
 impl Selection {
+    /// Les cent vingt-quatre.
+    fn tout() -> Selection {
+        let mut cibles = Vec::with_capacity(124);
+        for position in Position::ALL {
+            for led in 0..LEDS_PER_FAN as usize {
+                cibles.push(Cible::Led { position, led });
+            }
+        }
+        for slot in 0..SLOT_COUNT {
+            for led in 0..LEDS_PER_STICK {
+                cibles.push(Cible::Barrette { slot, led });
+            }
+        }
+        Selection { cibles }
+    }
+
+    /// Toutes les LED des dix ventilateurs, ou des quatre barrettes.
+    fn famille(ventilateurs: bool) -> Selection {
+        Selection {
+            cibles: Selection::tout()
+                .cibles
+                .into_iter()
+                .filter(|cible| matches!(cible, Cible::Led { .. }) == ventilateurs)
+                .collect(),
+        }
+    }
+
+    fn contient(&self, cible: Cible) -> bool {
+        self.cibles.contains(&cible)
+    }
+
+    fn ajouter(&mut self, cibles: Vec<Cible>) {
+        for cible in cibles {
+            if !self.contient(cible) {
+                self.cibles.push(cible);
+            }
+        }
+    }
+
     /// Comment le dire à l'écran.
-    fn nom(self) -> String {
+    ///
+    /// Les cas nommés d'abord : « le ventilateur arrière » se lit, « huit LED »
+    /// ne se lit pas. On ne retombe sur le compte que lorsque la sélection ne
+    /// correspond à aucun organe entier.
+    fn nom(&self) -> String {
+        let compte = self.cibles.len();
+        if compte == 0 {
+            return "rien".to_owned();
+        }
+        if *self == Selection::tout() {
+            return "tout le boîtier".to_owned();
+        }
+        if *self == Selection::famille(true) {
+            return "les dix ventilateurs".to_owned();
+        }
+        if *self == Selection::famille(false) {
+            return "les quatre barrettes".to_owned();
+        }
+        if compte == 1 {
+            return match self.cibles[0] {
+                Cible::Led { position, led } => {
+                    format!("la LED {} de {}", led + 1, position.name())
+                }
+                Cible::Barrette { slot, led } => {
+                    format!("la LED {} de la barrette {slot}", led + 1)
+                }
+            };
+        }
+        let organes = self.organes();
+        if organes.len() == 1 && self.est_entier(organes[0]) {
+            return match organes[0] {
+                Organe::Ventilateur(position) => format!("le ventilateur {}", position.name()),
+                Organe::Reglette(slot) => format!("la barrette {slot}"),
+            };
+        }
+        if organes.iter().all(|organe| self.est_entier(*organe)) {
+            return format!("{} organes entiers", organes.len());
+        }
+        format!("{compte} LED sur {} organes", organes.len())
+    }
+
+    /// Les organes que cette sélection touche, dans l'ordre de la maquette.
+    fn organes(&self) -> Vec<Organe> {
+        let mut vus = Vec::new();
+        for cible in &self.cibles {
+            let organe = Organe::de(*cible);
+            if !vus.contains(&organe) {
+                vus.push(organe);
+            }
+        }
+        vus.sort_by_key(Organe::rang);
+        vus
+    }
+
+    /// Cet organe est-il **entièrement** dans la sélection ?
+    fn est_entier(&self, organe: Organe) -> bool {
+        organe
+            .cibles()
+            .into_iter()
+            .all(|cible| self.contient(cible))
+    }
+}
+
+/// Un ventilateur ou une barrette : ce qu'une commande du protocole sait viser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Organe {
+    Ventilateur(Position),
+    Reglette(usize),
+}
+
+impl Organe {
+    fn de(cible: Cible) -> Organe {
+        match cible {
+            Cible::Led { position, .. } => Organe::Ventilateur(position),
+            Cible::Barrette { slot, .. } => Organe::Reglette(slot),
+        }
+    }
+
+    fn rang(&self) -> usize {
         match self {
-            Selection::Groupe(LightTarget::All) => "tout le boîtier".to_owned(),
-            Selection::Groupe(LightTarget::Fans) => "les dix ventilateurs".to_owned(),
-            Selection::Groupe(LightTarget::Ram) => "les quatre barrettes".to_owned(),
-            Selection::Groupe(LightTarget::Fan(position)) => {
-                format!("le ventilateur {}", position.name())
-            }
-            Selection::Groupe(LightTarget::RamSlot(slot)) => format!("la barrette {slot}"),
-            Selection::Led(Cible::Led { position, led }) => {
-                format!("la LED {} de {}", led + 1, position.name())
-            }
-            Selection::Led(Cible::Barrette { slot, led }) => {
-                format!("la LED {} de la barrette {slot}", led + 1)
-            }
+            Organe::Ventilateur(position) => position.index(),
+            Organe::Reglette(slot) => 10 + slot,
+        }
+    }
+
+    fn cibles(self) -> Vec<Cible> {
+        match self {
+            Organe::Ventilateur(position) => (0..LEDS_PER_FAN as usize)
+                .map(|led| Cible::Led { position, led })
+                .collect(),
+            Organe::Reglette(slot) => (0..LEDS_PER_STICK)
+                .map(|led| Cible::Barrette { slot, led })
+                .collect(),
+        }
+    }
+
+    fn groupe(self) -> LightTarget {
+        match self {
+            Organe::Ventilateur(position) => LightTarget::Fan(position),
+            Organe::Reglette(slot) => LightTarget::RamSlot(slot),
         }
     }
 }
@@ -134,16 +270,43 @@ impl Tableau {
             }
         }
     }
+
+    fn couleur(&self, cible: Cible) -> Rgb {
+        match cible {
+            Cible::Led { position, led } => self.ventilateurs[position.index()][led],
+            Cible::Barrette { slot, led } => self.barrettes[slot][led],
+        }
+    }
+
+    /// La couleur d'un organe entier : la moyenne de ses LED.
+    ///
+    /// C'est ce qui rend une animation lisible au détail « ventilateur » — une
+    /// LED prise au hasard clignoterait au rythme du motif, la moyenne respire.
+    fn moyenne(&self, organe: Organe) -> Rgb {
+        let cibles = organe.cibles();
+        let compte = cibles.len() as u32;
+        let (mut r, mut v, mut b) = (0u32, 0u32, 0u32);
+        for cible in cibles {
+            let couleur = self.couleur(cible);
+            r += u32::from(couleur.r);
+            v += u32::from(couleur.g);
+            b += u32::from(couleur.b);
+        }
+        Rgb::new((r / compte) as u8, (v / compte) as u8, (b / compte) as u8)
+    }
 }
 
 /// Ce que la fenêtre garde entre deux gestes.
 ///
 /// Tout y vit dans le fil de l'interface — d'où `RefCell` et non `Mutex` : les
-/// deux autres fils passent par la boucle d'événements de Slint pour y toucher,
-/// et ne partagent donc jamais un emprunt.
+/// deux autres fils lui parlent par un canal, et ne partagent donc jamais un
+/// emprunt.
 struct Pupitre {
     tableau: RefCell<Tableau>,
-    selection: std::cell::Cell<Selection>,
+    selection: RefCell<Selection>,
+    /// La projection en cours. Changer de vue la reconstruit.
+    plan: RefCell<Plan>,
+    detail: Cell<Detail>,
     /// Les réglages d'animation tels qu'ils sont affichés.
     reglage: RefCell<Reglage>,
     /// Une poignée par canal de ventilateur, jamais partagée entre canaux.
@@ -161,7 +324,9 @@ impl Pupitre {
     fn nouveau() -> Pupitre {
         Pupitre {
             tableau: RefCell::new(Tableau::noir()),
-            selection: std::cell::Cell::new(Selection::Groupe(LightTarget::All)),
+            selection: RefCell::new(Selection::tout()),
+            plan: RefCell::new(Plan::nouveau(&reverb_anim::Geometrie::mesuree())),
+            detail: Cell::new(Detail::Led),
             reglage: RefCell::new(Reglage {
                 animation: None,
                 couleur: Rgb::new(0xff, 0x40, 0xff),
@@ -192,28 +357,21 @@ fn main() -> ExitCode {
     };
 
     let socket = chemin_du_socket();
-    let plan = Plan::nouveau(&reverb_anim::Geometrie::mesuree());
     let pupitre = Rc::new(Pupitre::nouveau());
 
     fenetre.set_familles(familles());
-    fenetre.set_cible(SharedString::from(pupitre.selection.get().nom()));
     fenetre.set_ventilateurs(ModelRc::from(pupitre.canaux.clone()));
-    dessiner(
-        &fenetre,
-        &plan,
-        &pupitre.tableau.borrow(),
-        pupitre.selection.get(),
-    );
+    dessiner(&fenetre, &pupitre);
 
     let (ordres, file) = channel::<Request>();
     // Les réponses reviennent par un canal plutôt que par la boucle
     // d'événements : ce qu'elles mettent à jour vit dans le `Pupitre`, qui est
     // au fil de l'interface et ne traverse donc aucune frontière de fil.
     let (retours, arrivees) = channel::<Retour>();
-    lancer_le_fil_des_ordres(socket.clone(), file, fenetre.as_weak(), retours);
-    lancer_le_fil_des_images(socket, fenetre.as_weak(), plan.clone());
+    lancer_le_fil_des_ordres(socket.clone(), file, fenetre.as_weak(), retours.clone());
+    lancer_le_fil_des_images(socket, fenetre.as_weak(), retours);
 
-    brancher(&fenetre, &plan, &pupitre, ordres.clone());
+    brancher(&fenetre, &pupitre, ordres.clone());
 
     // La télémétrie n'a pas de flux : on la redemande, doucement. Une seconde
     // suffit pour des tours par minute, et n'ajoute rien de mesurable au démon.
@@ -226,21 +384,25 @@ fn main() -> ExitCode {
         },
     );
 
-    // Les réponses se vident plus vite qu'elles n'arrivent : une mesure affichée
-    // avec une seconde de retard serait une seconde de retard sur tout.
+    // Les arrivées se vident plus vite que le démon ne les produit : il pousse
+    // vingt images par seconde, ce qui ne doit pas s'accumuler dans le canal.
     let vidange = slint::Timer::default();
     {
         let pupitre = pupitre.clone();
         let faible = fenetre.as_weak();
         vidange.start(
             slint::TimerMode::Repeated,
-            Duration::from_millis(200),
+            Duration::from_millis(30),
             move || {
                 let Some(fenetre) = faible.upgrade() else {
                     return;
                 };
+                let mut redessiner = false;
                 while let Ok(retour) = arrivees.try_recv() {
-                    ranger(&fenetre, &pupitre, retour);
+                    redessiner |= ranger(&fenetre, &pupitre, retour);
+                }
+                if redessiner {
+                    dessiner(&fenetre, &pupitre);
                 }
             },
         );
@@ -257,6 +419,7 @@ fn main() -> ExitCode {
 enum Retour {
     Telemetrie(Vec<ResponseLine>),
     Eclairage(Vec<ResponseLine>),
+    Image(Vec<(String, Vec<Rgb>)>),
 }
 
 /// Le fil qui agit : il attend les réponses du démon à la place de l'interface.
@@ -300,7 +463,7 @@ fn lancer_le_fil_des_ordres(
 }
 
 /// Le fil qui regarde : une image, une mise à jour de la maquette.
-fn lancer_le_fil_des_images(socket: PathBuf, fenetre: Weak<Fenetre>, plan: Plan) {
+fn lancer_le_fil_des_images(socket: PathBuf, fenetre: Weak<Fenetre>, retours: Sender<Retour>) {
     thread::spawn(move || {
         loop {
             match Abonnement::ouvrir(&socket) {
@@ -317,10 +480,9 @@ fn lancer_le_fil_des_images(socket: PathBuf, fenetre: Weak<Fenetre>, plan: Plan)
                         if cadres.is_empty() {
                             continue;
                         }
-                        let plan = plan.clone();
-                        let _ = fenetre.upgrade_in_event_loop(move |fenetre| {
-                            appliquer_image(&fenetre, &plan, &cadres);
-                        });
+                        if retours.send(Retour::Image(cadres)).is_err() {
+                            return;
+                        }
                     }
                     dire(&fenetre, false, "le démon a fermé le flux".to_owned());
                 }
@@ -339,125 +501,206 @@ fn lancer_le_fil_des_images(socket: PathBuf, fenetre: Weak<Fenetre>, plan: Plan)
     });
 }
 
-/// Range une image reçue et redessine.
-///
-/// Le tableau et la sélection vivent dans la fenêtre : c'est le seul endroit où
-/// le fil de l'interface et les images se croisent, et ils s'y croisent sans
-/// verrou puisque tout se passe dans la boucle d'événements.
-fn appliquer_image(fenetre: &Fenetre, plan: &Plan, cadres: &[(String, Vec<Rgb>)]) {
-    let mut tableau = Tableau::noir();
-    // Reprendre ce qui est déjà affiché : une image ne porte que les cibles
-    // qu'elle réécrit.
-    for (index, led) in fenetre.get_leds().iter().enumerate() {
-        if let Some((position, rang)) = index_ventilateur(index) {
-            tableau.ventilateurs[position][rang] = depuis_slint(led.couleur);
-        } else if let Some((slot, rang)) = index_barrette(index) {
-            tableau.barrettes[slot][rang] = depuis_slint(led.couleur);
-        }
-    }
-    for (cible, couleurs) in cadres {
-        tableau.poser(cible, couleurs);
-    }
-    fenetre.set_leds(modele_leds(plan, &tableau, choix(fenetre)));
+/// Redessine la maquette et ce qui la décrit.
+fn dessiner(fenetre: &Fenetre, pupitre: &Pupitre) {
+    let plan = pupitre.plan.borrow();
+    let tableau = pupitre.tableau.borrow();
+    let selection = pupitre.selection.borrow();
+    let detail = pupitre.detail.get();
+
+    fenetre.set_leds(modele_leds(&plan, &tableau, &selection, detail));
+    fenetre.set_aretes(SharedString::from(
+        plan.aretes()
+            .iter()
+            .map(|(debut, fin)| format!("M {} {} L {} {} ", debut.x, debut.y, fin.x, fin.y))
+            .collect::<String>(),
+    ));
+    fenetre.set_cible(SharedString::from(selection.nom()));
+    fenetre.set_detail_led(detail == Detail::Led);
+    fenetre.set_vue_face(plan.vue() == Vue::Face);
+    fenetre.set_titre_maquette(SharedString::from(match plan.vue() {
+        Vue::Face => "LE BOÎTIER — ARRIÈRE À GAUCHE, VU DU PANNEAU LATÉRAL",
+        Vue::Isometrique => "LE BOÎTIER — DE TROIS-QUARTS, AUX POSITIONS RÉELLES",
+    }));
 }
 
-/// Redessine la maquette entière.
-fn dessiner(fenetre: &Fenetre, plan: &Plan, tableau: &Tableau, selection: Selection) {
-    fenetre.set_leds(modele_leds(plan, tableau, Some(selection)));
-}
-
-fn modele_leds(plan: &Plan, tableau: &Tableau, selection: Option<Selection>) -> ModelRc<PointLed> {
+fn modele_leds(
+    plan: &Plan,
+    tableau: &Tableau,
+    selection: &Selection,
+    detail: Detail,
+) -> ModelRc<PointLed> {
+    let rayon = plan.rayon_anneau();
     let mut points = Vec::with_capacity(124);
-    for position in Position::ALL {
-        for led in 0..LEDS_PER_FAN as usize {
-            let place = plan
-                .led_ventilateur(position, led)
-                .unwrap_or(Place { x: 0.0, y: 0.0 });
-            points.push(point(
-                place,
-                plan,
-                tableau.ventilateurs[position.index()][led],
-                choisie(selection, Cible::Led { position, led }),
-            ));
+    match detail {
+        Detail::Led => {
+            for cible in Selection::tout().cibles {
+                let place = match cible {
+                    Cible::Led { position, led } => plan.led_ventilateur(position, led),
+                    Cible::Barrette { slot, led } => plan.led_barrette(slot, led),
+                };
+                let choisie = selection.contient(cible);
+                points.push(PointLed {
+                    x: place.map_or(0.0, |place| place.x),
+                    y: place.map_or(0.0, |place| place.y),
+                    // Le huitième du rayon de l'anneau, soit la moitié du
+                    // diamètre que la projection s'est donné. Une pastille visée
+                    // grossit : sur cent vingt-quatre points, une nuance de
+                    // bordure ne se verrait pas.
+                    rayon: rayon / 8.0 * if choisie { 1.7 } else { 1.0 },
+                    hauteur: 0.0,
+                    couleur: en_slint(tableau.couleur(cible)),
+                    choisie,
+                });
+            }
         }
-    }
-    for slot in 0..SLOT_COUNT {
-        for led in 0..LEDS_PER_STICK {
-            let place = plan
-                .led_barrette(slot, led)
-                .unwrap_or(Place { x: 0.0, y: 0.0 });
-            points.push(point(
-                place,
-                plan,
-                tableau.barrettes[slot][led],
-                choisie(selection, Cible::Barrette { slot, led }),
-            ));
+        Detail::Ventilateur => {
+            for position in Position::ALL {
+                let organe = Organe::Ventilateur(position);
+                let centre = plan.centre_ventilateur(position);
+                points.push(PointLed {
+                    x: centre.x,
+                    y: centre.y,
+                    rayon,
+                    hauteur: 0.0,
+                    couleur: en_slint(tableau.moyenne(organe)),
+                    choisie: selection.est_entier(organe),
+                });
+            }
+            for slot in 0..SLOT_COUNT {
+                let organe = Organe::Reglette(slot);
+                let Some(centre) = plan.centre_barrette(slot) else {
+                    continue;
+                };
+                // La gélule couvre la réglette d'un bout à l'autre : c'est ce
+                // qui la distingue d'un ventilateur au premier coup d'œil.
+                let hauteur = match (
+                    plan.led_barrette(slot, 0),
+                    plan.led_barrette(slot, LEDS_PER_STICK - 1),
+                ) {
+                    (Some(bas), Some(haut)) => (haut.y - bas.y).abs(),
+                    _ => 0.0,
+                };
+                points.push(PointLed {
+                    x: centre.x,
+                    y: centre.y,
+                    rayon: rayon / 3.0,
+                    hauteur,
+                    couleur: en_slint(tableau.moyenne(organe)),
+                    choisie: selection.est_entier(organe),
+                });
+            }
         }
     }
     ModelRc::new(VecModel::from(points))
 }
 
-fn point(place: Place, plan: &Plan, couleur: Rgb, choisie: bool) -> PointLed {
-    PointLed {
-        x: place.x,
-        y: place.y,
-        // Le rayon d'une LED : le huitième de celui de l'anneau, soit la moitié
-        // du diamètre que la projection s'est donné.
-        rayon: plan.rayon_anneau() / 8.0,
-        couleur: Color::from_rgb_u8(couleur.r, couleur.g, couleur.b),
-        choisie,
-    }
-}
+/// En deçà de cette fraction du cadre, un glissement est un clic.
+///
+/// Aucune souris ne reste immobile pendant un clic : sans ce seuil, tout clic
+/// serait un rectangle minuscule qui n'attrape rien, et la maquette paraîtrait
+/// morte.
+const SEUIL_GLISSEMENT: f32 = 0.012;
 
-/// La LED désignée est-elle celle qu'on vise ?
-fn choisie(selection: Option<Selection>, cible: Cible) -> bool {
-    match selection {
-        Some(Selection::Led(visee)) => visee == cible,
-        Some(Selection::Groupe(groupe)) => match (groupe, cible) {
-            (LightTarget::All, _) => true,
-            (LightTarget::Fans, Cible::Led { .. }) => true,
-            (LightTarget::Ram, Cible::Barrette { .. }) => true,
-            (LightTarget::Fan(vise), Cible::Led { position, .. }) => vise == position,
-            (LightTarget::RamSlot(vise), Cible::Barrette { slot, .. }) => vise == slot,
-            _ => false,
-        },
-        None => false,
-    }
-}
-
-fn brancher(fenetre: &Fenetre, plan: &Plan, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
-    // ── Cliquer une LED ────────────────────────────────────────────────────
+fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
+    // ── Le geste sur la maquette : clic ou rectangle ───────────────────────
     {
-        let plan = plan.clone();
         let pupitre = pupitre.clone();
         let faible = fenetre.as_weak();
-        fenetre.on_clic_maquette(move |x, y| {
+        fenetre.on_geste_maquette(move |x1, y1, x2, y2, ajout| {
             let Some(fenetre) = faible.upgrade() else {
                 return;
             };
-            if let Some(cible) = plan.sous(Place { x, y }) {
-                pupitre.selection.set(Selection::Led(cible));
-                rafraichir_selection(&fenetre, &plan, pupitre.selection.get());
+            let plan = pupitre.plan.borrow();
+            let detail = pupitre.detail.get();
+            let debut = Place { x: x1, y: y1 };
+            let fin = Place { x: x2, y: y2 };
+
+            let attrapees =
+                if (x2 - x1).abs() < SEUIL_GLISSEMENT && (y2 - y1).abs() < SEUIL_GLISSEMENT {
+                    plan.sous(fin).into_iter().collect()
+                } else {
+                    plan.dans(debut, fin)
+                };
+            // Au détail « ventilateur », toucher une LED, c'est toucher son
+            // organe : c'est là toute la différence entre les deux niveaux.
+            let attrapees = match detail {
+                Detail::Led => attrapees,
+                Detail::Ventilateur => {
+                    let mut tout = Vec::new();
+                    for cible in attrapees {
+                        for compagne in plan.groupe(cible) {
+                            if !tout.contains(&compagne) {
+                                tout.push(compagne);
+                            }
+                        }
+                    }
+                    tout
+                }
+            };
+            drop(plan);
+
+            let mut selection = pupitre.selection.borrow_mut();
+            if ajout {
+                selection.ajouter(attrapees);
+            } else {
+                // Un rectangle qui ne touche rien **vide** la sélection : c'est
+                // le seul geste par lequel on peut ne plus rien viser.
+                *selection = Selection { cibles: attrapees };
             }
+            drop(selection);
+            dessiner(&fenetre, &pupitre);
         });
     }
 
-    // ── Choisir un groupe ──────────────────────────────────────────────────
+    // ── Les deux bascules ──────────────────────────────────────────────────
     {
-        let plan = plan.clone();
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_basculer_detail(move || {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            pupitre.detail.set(match pupitre.detail.get() {
+                Detail::Led => Detail::Ventilateur,
+                Detail::Ventilateur => Detail::Led,
+            });
+            dessiner(&fenetre, &pupitre);
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_basculer_vue(move || {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            // La sélection ne bouge pas : une `Cible` ne porte pas de vue, elle
+            // désigne une LED du boîtier.
+            let geometrie = reverb_anim::Geometrie::mesuree();
+            let suivante = match pupitre.plan.borrow().vue() {
+                Vue::Face => Plan::isometrique(&geometrie),
+                Vue::Isometrique => Plan::nouveau(&geometrie),
+            };
+            *pupitre.plan.borrow_mut() = suivante;
+            dessiner(&fenetre, &pupitre);
+        });
+    }
+
+    // ── Choisir une famille ────────────────────────────────────────────────
+    {
         let pupitre = pupitre.clone();
         let faible = fenetre.as_weak();
         fenetre.on_choisir_cible(move |nom| {
             let Some(fenetre) = faible.upgrade() else {
                 return;
             };
-            let groupe = match nom.as_str() {
-                "fans" => LightTarget::Fans,
-                "ram" => LightTarget::Ram,
-                _ => LightTarget::All,
+            *pupitre.selection.borrow_mut() = match nom.as_str() {
+                "fans" => Selection::famille(true),
+                "ram" => Selection::famille(false),
+                _ => Selection::tout(),
             };
-            pupitre.selection.set(Selection::Groupe(groupe));
-            rafraichir_selection(&fenetre, &plan, pupitre.selection.get());
+            dessiner(&fenetre, &pupitre);
         });
     }
 
@@ -466,7 +709,7 @@ fn brancher(fenetre: &Fenetre, plan: &Plan, pupitre: &Rc<Pupitre>, ordres: Sende
         let faible = fenetre.as_weak();
         fenetre.on_couleur_saisie(move |texte| {
             if let (Some(fenetre), Some(couleur)) = (faible.upgrade(), lire_couleur(&texte)) {
-                fenetre.set_apercu(Color::from_rgb_u8(couleur.r, couleur.g, couleur.b));
+                fenetre.set_apercu(en_slint(couleur));
             }
         });
     }
@@ -486,20 +729,13 @@ fn brancher(fenetre: &Fenetre, plan: &Plan, pupitre: &Rc<Pupitre>, ordres: Sende
                 ));
                 return;
             };
-            let requete = match pupitre.selection.get() {
-                Selection::Groupe(target) => Request::Light {
-                    target,
-                    color: couleur,
-                },
-                // Une seule LED : le protocole n'a pas de cible « une LED », et
-                // c'est voulu — `paint` réécrit la cible entière, en gardant
-                // les couleurs affichées pour les autres LED. C'est aussi ce
-                // qui rend le geste réversible : la LED voisine ne bouge pas.
-                Selection::Led(cible) => {
-                    peinture(&fenetre, &pupitre.tableau.borrow(), cible, couleur)
-                }
-            };
-            let _ = envoi.send(requete);
+            for requete in commandes_de_couleur(
+                &pupitre.tableau.borrow(),
+                &pupitre.selection.borrow(),
+                couleur,
+            ) {
+                let _ = envoi.send(requete);
+            }
         });
     }
 
@@ -627,118 +863,49 @@ fn relever(fenetre: &Fenetre, reglage: &mut Reglage) {
     reglage.direction = usize::try_from(fenetre.get_direction()).unwrap_or(0);
 }
 
-/// Réécrit la cible d'une LED en n'y changeant qu'elle.
-fn peinture(fenetre: &Fenetre, _tableau: &Tableau, cible: Cible, couleur: Rgb) -> Request {
-    // Les couleurs affichées font foi : ce sont celles que le démon vient
-    // d'envoyer au matériel.
-    let mut couleurs = Vec::new();
-    let (target, base, rang) = match cible {
-        Cible::Led { position, led } => (
-            LightTarget::Fan(position),
-            position.index() * LEDS_PER_FAN as usize,
-            led,
-        ),
-        Cible::Barrette { slot, led } => (
-            LightTarget::RamSlot(slot),
-            10 * LEDS_PER_FAN as usize + slot * LEDS_PER_STICK,
-            led,
-        ),
-    };
-    let combien = match cible {
-        Cible::Led { .. } => LEDS_PER_FAN as usize,
-        Cible::Barrette { .. } => LEDS_PER_STICK,
-    };
-    let leds = fenetre.get_leds();
-    for index in 0..combien {
-        let actuelle = leds
-            .row_data(base + index)
-            .map_or(Rgb::BLACK, |point| depuis_slint(point.couleur));
-        couleurs.push(if index == rang { couleur } else { actuelle });
+/// Les commandes qui donnent cette couleur à la sélection, organe par organe.
+///
+/// ⚠️ **`light` quand l'organe est entier, `paint` sinon.** Ce n'est pas une
+/// économie de trafic : `light` est ce que le démon **conserve** (#21), `paint`
+/// non. Peindre les huit LED d'un ventilateur une par une donnerait le même
+/// éclairage et ne survivrait pas au redémarrage.
+fn commandes_de_couleur(tableau: &Tableau, selection: &Selection, couleur: Rgb) -> Vec<Request> {
+    if *selection == Selection::tout() {
+        return vec![Request::Light {
+            target: LightTarget::All,
+            color: couleur,
+        }];
     }
-    Request::Paint { target, couleurs }
-}
-
-fn rafraichir_selection(fenetre: &Fenetre, plan: &Plan, selection: Selection) {
-    fenetre.set_cible(SharedString::from(selection.nom()));
-    let mut tableau = Tableau::noir();
-    for (index, led) in fenetre.get_leds().iter().enumerate() {
-        if let Some((position, rang)) = index_ventilateur(index) {
-            tableau.ventilateurs[position][rang] = depuis_slint(led.couleur);
-        } else if let Some((slot, rang)) = index_barrette(index) {
-            tableau.barrettes[slot][rang] = depuis_slint(led.couleur);
-        }
-    }
-    fenetre.set_leds(modele_leds(plan, &tableau, Some(selection)));
-}
-
-/// La sélection courante, relue depuis ce que la fenêtre affiche.
-fn choix(fenetre: &Fenetre) -> Option<Selection> {
-    // La bordure blanche est le seul état de sélection que la fenêtre porte :
-    // le relire évite de partager une cellule entre deux fils pour une
-    // information que le dessin contient déjà.
-    let leds = fenetre.get_leds();
-    let choisies: Vec<usize> = (0..leds.row_count())
-        .filter(|index| leds.row_data(*index).is_some_and(|point| point.choisie))
-        .collect();
-    match choisies.len() {
-        0 => None,
-        1 => {
-            let index = choisies[0];
-            index_ventilateur(index)
-                .map(|(position, led)| {
-                    Selection::Led(Cible::Led {
-                        position: Position::ALL[position],
-                        led,
+    selection
+        .organes()
+        .into_iter()
+        .map(|organe| {
+            if selection.est_entier(organe) {
+                Request::Light {
+                    target: organe.groupe(),
+                    color: couleur,
+                }
+            } else {
+                // Les couleurs affichées font foi pour le reste de l'organe :
+                // ce sont celles que le démon vient d'envoyer au matériel.
+                let couleurs = organe
+                    .cibles()
+                    .into_iter()
+                    .map(|cible| {
+                        if selection.contient(cible) {
+                            couleur
+                        } else {
+                            tableau.couleur(cible)
+                        }
                     })
-                })
-                .or_else(|| {
-                    index_barrette(index)
-                        .map(|(slot, led)| Selection::Led(Cible::Barrette { slot, led }))
-                })
-        }
-        _ => Some(Selection::Groupe(LightTarget::All)),
-    }
-}
-
-fn index_ventilateur(index: usize) -> Option<(usize, usize)> {
-    (index < 10 * LEDS_PER_FAN as usize)
-        .then(|| (index / LEDS_PER_FAN as usize, index % LEDS_PER_FAN as usize))
-}
-
-fn index_barrette(index: usize) -> Option<(usize, usize)> {
-    let debut = 10 * LEDS_PER_FAN as usize;
-    (index >= debut && index < debut + SLOT_COUNT * LEDS_PER_STICK).then(|| {
-        (
-            (index - debut) / LEDS_PER_STICK,
-            (index - debut) % LEDS_PER_STICK,
-        )
-    })
-}
-
-fn depuis_slint(couleur: Color) -> Rgb {
-    Rgb::new(couleur.red(), couleur.green(), couleur.blue())
-}
-
-fn lire_couleur(texte: &str) -> Option<Rgb> {
-    Rgb::from_hex(texte.trim()).ok()
-}
-
-fn familles() -> ModelRc<FamilleAnimation> {
-    let familles: Vec<FamilleAnimation> = CATALOGUE
-        .iter()
-        .map(|nom| FamilleAnimation {
-            nom: SharedString::from(*nom),
-            effet: SharedString::from(
-                EFFETS
-                    .iter()
-                    .find(|(famille, _)| famille == nom)
-                    .map_or("", |(_, effet)| effet),
-            ),
-            accepte_couleur: Animation::par_nom(nom)
-                .is_ok_and(|animation| animation.parametres_acceptes().contains(&"couleur")),
+                    .collect();
+                Request::Paint {
+                    target: organe.groupe(),
+                    couleurs,
+                }
+            }
         })
-        .collect();
-    ModelRc::new(VecModel::from(familles))
+        .collect()
 }
 
 /// Range une réponse du démon : soit dans la fenêtre, soit dans le canal de
@@ -769,10 +936,13 @@ fn repondre(
     }
 }
 
-/// Applique une réponse arrivée par le canal de retour. Fil de l'interface.
-fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) {
+/// Applique une arrivée. Rend vrai s'il faut redessiner la maquette.
+fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
     match retour {
-        Retour::Telemetrie(lignes) => poser_telemetrie(fenetre, pupitre, &lignes),
+        Retour::Telemetrie(lignes) => {
+            poser_telemetrie(fenetre, pupitre, &lignes);
+            false
+        }
         Retour::Eclairage(lignes) => {
             let mut anime = None;
             for ligne in &lignes {
@@ -784,6 +954,14 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) {
                 anime.clone().unwrap_or_else(|| "aucune".to_owned()),
             ));
             pupitre.reglage.borrow_mut().animation = anime;
+            false
+        }
+        Retour::Image(cadres) => {
+            let mut tableau = pupitre.tableau.borrow_mut();
+            for (cible, couleurs) in &cadres {
+                tableau.poser(cible, couleurs);
+            }
+            true
         }
     }
 }
@@ -836,6 +1014,7 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
             _ => {}
         }
     }
+
     // ⚠️ **Les lignes se modifient en place.** Remplacer le modèle recrée les
     // curseurs à chaque seconde, et un curseur recréé sous les doigts perd le
     // geste en cours : c'est la moitié de la barre « un peu buggée » que Nico a
@@ -860,4 +1039,30 @@ fn dire(fenetre: &Weak<Fenetre>, connecte: bool, message: String) {
             fenetre.set_message(SharedString::from(message));
         }
     });
+}
+
+fn en_slint(couleur: Rgb) -> Color {
+    Color::from_rgb_u8(couleur.r, couleur.g, couleur.b)
+}
+
+fn lire_couleur(texte: &str) -> Option<Rgb> {
+    Rgb::from_hex(texte.trim()).ok()
+}
+
+fn familles() -> ModelRc<FamilleAnimation> {
+    let familles: Vec<FamilleAnimation> = CATALOGUE
+        .iter()
+        .map(|nom| FamilleAnimation {
+            nom: SharedString::from(*nom),
+            effet: SharedString::from(
+                EFFETS
+                    .iter()
+                    .find(|(famille, _)| famille == nom)
+                    .map_or("", |(_, effet)| effet),
+            ),
+            accepte_couleur: Animation::par_nom(nom)
+                .is_ok_and(|animation| animation.parametres_acceptes().contains(&"couleur")),
+        })
+        .collect();
+    ModelRc::new(VecModel::from(familles))
 }

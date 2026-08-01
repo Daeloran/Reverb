@@ -85,7 +85,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// dégradé y rend chaque LED discernable de ses voisines — ce qu'une couleur
 /// unie cacherait.
 fn garnir(interface: &Fenetre, socket: Option<String>) {
-    let plan = Plan::nouveau(&Geometrie::mesuree());
+    // `REVERB_VUE=iso` dessine la vue de trois-quarts. C'est le seul moyen de
+    // la regarder sans ouvrir de session graphique.
+    let geometrie = Geometrie::mesuree();
+    let plan = if std::env::var("REVERB_VUE").as_deref() == Ok("iso") {
+        Plan::isometrique(&geometrie)
+    } else {
+        Plan::nouveau(&geometrie)
+    };
     let mut points = Vec::new();
 
     // Avec un socket, les couleurs viennent du démon ; sans, d'un dégradé.
@@ -97,7 +104,13 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             points.push(PointLed {
                 x: place.x,
                 y: place.y,
-                rayon: plan.rayon_anneau() / 8.0,
+                rayon: plan.rayon_anneau() / 8.0
+                    * if position == Position::Arriere {
+                        1.7
+                    } else {
+                        1.0
+                    },
+                hauteur: 0.0,
                 couleur: vraies.as_ref().map_or_else(
                     || teinte(rang as f32 / 10.0 + led as f32 / 8.0 / 3.0),
                     |image| couleur_de(image, &format!("fan:{}", position.slug()), led),
@@ -113,6 +126,7 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
                 x: place.x,
                 y: place.y,
                 rayon: plan.rayon_anneau() / 8.0,
+                hauteur: 0.0,
                 couleur: vraies.as_ref().map_or_else(
                     || teinte(0.55 + slot as f32 / 20.0 + led as f32 / 11.0 / 6.0),
                     |image| couleur_de(image, &format!("slot:{slot}"), led),
@@ -121,7 +135,45 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             });
         }
     }
+    // `REVERB_DETAIL=ventilo` montre les quatorze organes au lieu des cent
+    // vingt-quatre LED : la seconde mise en page que la fenêtre sait dessiner.
+    if std::env::var("REVERB_DETAIL").as_deref() == Ok("ventilo") {
+        points.clear();
+        for (rang, position) in Position::ALL.into_iter().enumerate() {
+            let centre = plan.centre_ventilateur(position);
+            points.push(PointLed {
+                x: centre.x,
+                y: centre.y,
+                rayon: plan.rayon_anneau(),
+                hauteur: 0.0,
+                couleur: teinte(rang as f32 / 10.0),
+                choisie: position == Position::Arriere,
+            });
+        }
+        for slot in 0..SLOT_COUNT {
+            let centre = plan.centre_barrette(slot).expect("quatre barrettes");
+            let bas = plan.led_barrette(slot, 0).expect("onze LED");
+            let haut = plan
+                .led_barrette(slot, LEDS_PER_STICK - 1)
+                .expect("onze LED");
+            points.push(PointLed {
+                x: centre.x,
+                y: centre.y,
+                rayon: plan.rayon_anneau() / 3.0,
+                hauteur: (haut.y - bas.y).abs(),
+                couleur: teinte(0.55 + slot as f32 / 20.0),
+                choisie: false,
+            });
+        }
+    }
+
     interface.set_leds(ModelRc::new(VecModel::from(points)));
+    interface.set_aretes(SharedString::from(
+        plan.aretes()
+            .iter()
+            .map(|(debut, fin)| format!("M {} {} L {} {} ", debut.x, debut.y, fin.x, fin.y))
+            .collect::<String>(),
+    ));
 
     interface.set_familles(ModelRc::new(VecModel::from(
         CATALOGUE
