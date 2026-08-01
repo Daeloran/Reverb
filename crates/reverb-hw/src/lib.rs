@@ -18,6 +18,7 @@
 //! la ligne de commande, qui écrit une fois puis rend la main.
 
 pub mod hidraw;
+pub mod gpu;
 pub mod hwmon;
 pub mod i2c;
 pub mod usbfs;

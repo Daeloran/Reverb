@@ -559,3 +559,53 @@ mod tests {
         assert_eq!(canal.tach, None, "aucun fichier n'existe sous ce chemin");
     }
 }
+
+/// Une sonde de température de la machine.
+///
+/// Toutes les sondes, pas seulement celles qui portent un ventilateur de
+/// Reverb : le CPU, les NVMe, le chipset, les barrettes de RAM et la carte
+/// réseau en ont, et ce sont elles que l'utilisateur regarde.
+///
+/// ⚠️ **Lecture seule, et par `sysfs` uniquement.** Aucune sonde ne s'interroge
+/// sur un bus I²C : un scan en lecture seule a déjà altéré l'éclairage par
+/// défaut de la RAM sur cette machine. Les sondes `spd5118` des barrettes se
+/// lisent ici par le pilote du noyau, qui détient le bus — pas un octet n'est
+/// émis par Reverb.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sonde {
+    /// Identifiant stable : `<nom du hwmon>:<libellé>`.
+    ///
+    /// Le nom porte la source parce que deux pilotes nomment volontiers leur
+    /// capteur `temp1`, et qu'un nom ambigu vaut moins que pas de nom du tout.
+    pub slug: String,
+    /// Ce qu'on affiche : le libellé du noyau, ou `tempN` à défaut.
+    pub libelle: String,
+    /// D'où elle vient : le nom du `hwmon`.
+    pub origine: String,
+    /// Le fichier à relire à chaque tour.
+    pub chemin: PathBuf,
+}
+
+impl Sonde {
+    /// La température du moment, en millidegrés.
+    ///
+    /// `Err` quand le fichier a disparu — un périphérique débranché — ce qui
+    /// doit se dire plutôt que de figer la dernière valeur lue.
+    pub fn lire(&self) -> io::Result<i32> {
+        todo!("issue #31")
+    }
+}
+
+/// Toutes les sondes d'une arborescence `sys/class/hwmon`.
+///
+/// Triées par `slug`, sans doublon. Un `hwmon` sans sonde de température ne
+/// produit rien et n'est pas une erreur ; un fichier illisible n'empêche pas les
+/// autres d'être rendus.
+pub fn sondes_dans(_sys_class: &Path) -> io::Result<Vec<Sonde>> {
+    todo!("issue #31")
+}
+
+/// Les sondes de la machine.
+pub fn sondes() -> io::Result<Vec<Sonde>> {
+    sondes_dans(Path::new("/sys/class/hwmon"))
+}
