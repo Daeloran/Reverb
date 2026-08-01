@@ -60,17 +60,38 @@ Les trois du **bas** et les trois du **dessus** s'alignent d'**avant en arrière
 à l'autre. Dans les deux cas, « gauche » est le plus proche de l'**arrière** du boîtier.
 
 Les trois du **radiateur** sont empilés verticalement sur le **flanc du plateau de carte mère**,
-« radiateur bas » étant bien le plus bas.
+« radiateur bas » étant bien le plus bas, et **à l'avant du boîtier** — devant les deux rangées
+couchées, qui commencent derrière eux.
 
-> ⚠️ **Corrigé le 2026-08-01.** `SPEC-PROTOCOLE-NZXT.md` §3 se contredit sur ce point : « 3 sur
-> l'avant » et, dans la même phrase, « plaqué contre la face de la carte mère ». La première
-> version de la table les avait placés sur la face avant, ce qui faisait traverser la direction
-> `avant-arriere` de travers et ne laissait aucun ventilateur sur le chemin que décrit
-> l'écoulement. Le boîtier n'a donc **rien** sur sa face avant.
+```
+vue du panneau latéral gauche, arrière ← → avant
+
+   ○   ○   ○         plafond
+                 ○
+ ○         ▮▮▮▮  ○   ← la colonne du radiateur
+(arrière)  RAM   ○
+   ○   ○   ○         plancher
+```
+
+> ⚠️ **Deux corrections, le même jour, sur deux axes différents.**
+>
+> **Le plan, corrigé le 2026-08-01.** `SPEC-PROTOCOLE-NZXT.md` §3 se contredit : « 3 sur l'avant »
+> et, dans la même phrase, « plaqué contre la face de la carte mère ». La première version de la
+> table les avait mis sur la **face** avant, ce qui faisait traverser la direction `avant-arriere`
+> de travers. Le boîtier n'a **rien** sur sa face avant : la colonne est dans le plan du flanc.
+>
+> **La profondeur, corrigée le 2026-08-01 également**, après le schéma que Nico a dessiné : la
+> table les avait ensuite placés à **mi-profondeur**, entre les deux rangées couchées. Ils sont à
+> l'avant. Une onde `avant-arriere` les atteignait au milieu du parcours au lieu de commencer par
+> eux, et la maquette dessinait la colonne par-dessus la RAM — c'est ce qui la rendait illisible.
+>
+> Les deux énoncés ne se contredisent pas : « sur le flanc » dit le **plan**, « à l'avant » dit la
+> **profondeur**.
 
 La **RAM** se situe entre le plancher et le plafond, un peu plus près du plafond, et à mi-chemin
-entre le plan du radiateur et le ventilateur arrière. L'écran du Kraken est immédiatement du côté
-arrière des barrettes.
+entre le plan du radiateur et le ventilateur arrière — c'est-à-dire dans le vide que le
+déplacement de la colonne a ouvert au milieu du boîtier. L'écran du Kraken est immédiatement du
+côté arrière des barrettes.
 
 > Ce dernier point recoupe la disposition ATX : sur une carte mère, le socket CPU est du côté du
 > panneau d'E/S arrière par rapport aux slots DIMM. Deux observations indépendantes concordent sur
