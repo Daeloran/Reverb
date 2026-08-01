@@ -14,6 +14,7 @@
 //! ça se vérifie sur la machine, avec les critères d'acceptation de l'issue.
 
 pub mod cadence;
+pub mod ecran;
 pub mod peripheriques;
 pub mod persistance;
 pub mod serveur;

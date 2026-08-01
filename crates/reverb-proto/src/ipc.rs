@@ -157,6 +157,14 @@ pub enum Request {
         animation: Option<String>,
         reglages: Vec<(String, String)>,
     },
+    /// `screen <action>` — l'écran du Kraken.
+    ///
+    /// ⚠️ Le démon **détient** désormais l'écran. `peripheriques.rs` disait
+    /// « il rejoindra le démon quand la fenêtre en aura besoin » : on y est. La
+    /// fenêtre n'ouvre aucun périphérique (ADR-002), elle envoie donc un
+    /// **chemin de fichier** et le démon lit lui-même — jamais 1,2 Mo de pixels
+    /// sur un protocole texte.
+    Screen(ScreenAction),
     /// `watch` — le démon pousse l'image courante, puis chaque nouvelle.
     ///
     /// Quatorze lignes `frame` puis `end`, et ainsi de suite tant que le client
@@ -183,6 +191,27 @@ pub enum LightTarget {
     Ram,
     /// `slot:<0-3>` — une barrette.
     RamSlot(usize),
+}
+
+/// Ce qu'une commande `screen` demande.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScreenAction {
+    /// `screen state` — luminosité et contenu courants.
+    State,
+    /// `screen brightness <0-100>` — zéro éteint la dalle sans perdre ce qu'elle
+    /// affichait.
+    Brightness(u8),
+    /// `screen off` — la dalle est rendue au firmware.
+    Off,
+    /// `screen image <chemin>` — une image fixe, PNG ou JPEG.
+    ///
+    /// Le chemin doit être **absolu** : le démon lit sous son propre répertoire
+    /// courant, qui n'est pas celui du client.
+    Image(String),
+    /// `screen gauge <sonde>` — un cadran sur une sonde, rafraîchi par le démon.
+    Gauge(String),
+    /// `screen gif <chemin>` — une animation, jouée en boucle.
+    Gif(String),
 }
 
 /// Ce qu'on demande à un canal de vitesse.
@@ -358,6 +387,8 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
             }
         }
 
+        "screen" => todo!("issue #33"),
+
         "paint" => {
             let [cible, couleurs] = arguments[..] else {
                 return Err(mauvais(
@@ -494,6 +525,7 @@ pub fn encode_request(request: &Request) -> String {
                 .join(",")
         ),
         Request::Lighting => "lighting".to_owned(),
+        Request::Screen(_) => todo!("issue #33"),
         Request::ZoneList => "zone list".to_owned(),
         Request::ZoneSet { nom, cibles } => format!(
             "zone set {} {}",
@@ -715,6 +747,11 @@ pub enum ResponseLine {
         animation: String,
         reglages: Vec<(String, String)>,
     },
+    /// `screen <0-100> <affichage>` — l'état de la dalle.
+    ///
+    /// L'affichage s'écrit `rien`, `gauge:<sonde>`, `image:<chemin>` ou
+    /// `gif:<chemin>`.
+    Screen { luminosite: u8, affichage: String },
     /// `end` — succès, fin de réponse.
     End,
     /// `err <message>` — échec, fin de réponse.
@@ -834,6 +871,7 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
             }
             ligne
         }
+        ResponseLine::Screen { .. } => todo!("issue #33"),
         ResponseLine::End => "end".to_owned(),
         ResponseLine::Error { message } => format!("err {}", reste(message)),
     }

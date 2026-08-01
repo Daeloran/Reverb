@@ -397,6 +397,8 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
         abonnement,
     } = ordre;
     let lignes = match requete {
+        Request::Screen(_) => todo!("issue #33"),
+
         Request::ZoneList => lignes_zones(etat),
 
         Request::ZoneSet { nom, cibles } => {
