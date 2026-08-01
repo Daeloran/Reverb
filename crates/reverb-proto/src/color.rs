@@ -110,3 +110,67 @@ impl Default for Brightness {
         Brightness::FULL
     }
 }
+
+/// Une couleur en teinte, saturation et luminosité.
+///
+/// C'est le repère dans lequel on **choisit** une couleur : trois axes qu'on
+/// comprend en les bougeant, là où trois octets de rouge, vert et bleu ne se
+/// devinent pas. `Rgb` reste le repère dans lequel on l'**écrit** sur un bus.
+///
+/// # Pourquoi des flottants
+///
+/// Un tour de teinte à l'entier près ne compte que 360 valeurs, la saturation et
+/// la luminosité 101 chacune : trois millions sept cent mille triplets pour
+/// seize millions sept cent mille couleurs. Des entiers ne peuvent donc **pas**
+/// rendre l'aller-retour exact, et un curseur qui perd la couleur qu'on vient de
+/// saisir est un curseur qu'on ne peut pas utiliser. La fenêtre arrondit pour
+/// **afficher** ; elle ne calcule jamais sur l'arrondi.
+///
+/// # Pas de canal alpha
+///
+/// Une LED n'a pas de transparence, et le modèle de zones ne superpose jamais
+/// deux couches sur une même LED : un alpha n'y aurait aucun effet observable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tsl {
+    /// Degrés sur le tour, `0..360`. Rouge à 0, vert à 120, bleu à 240.
+    pub teinte: f32,
+    /// Pourcents, `0..=100`. Zéro donne un gris.
+    pub saturation: f32,
+    /// Pourcents, `0..=100`. Zéro donne le noir.
+    pub luminosite: f32,
+}
+
+/// Erreur rendue par [`Rgb::depuis_tsl`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TslInvalide {
+    pub champ: &'static str,
+    pub raison: String,
+}
+
+impl fmt::Display for TslInvalide {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "champ « {} » : {}", self.champ, self.raison)
+    }
+}
+
+impl std::error::Error for TslInvalide {}
+
+impl Rgb {
+    /// La même couleur, en teinte, saturation et luminosité.
+    ///
+    /// ⚠️ **Un gris n'a pas de teinte** et **le noir n'a pas de saturation** :
+    /// la conversion rend zéro, faute de mieux. C'est pourquoi la fenêtre garde
+    /// un [`Tsl`] comme état et non un `Rgb` — sinon la teinte se perdrait en
+    /// passant par le gris, et il faudrait la retrouver au jugé.
+    pub fn en_tsl(self) -> Tsl {
+        todo!("issue #30")
+    }
+
+    /// La couleur que ces trois axes désignent.
+    ///
+    /// L'aller-retour est **exact** : `Rgb::depuis_tsl(couleur.en_tsl())` rend
+    /// `couleur`, pour les seize millions sept cent mille.
+    pub fn depuis_tsl(_tsl: Tsl) -> Result<Rgb, TslInvalide> {
+        todo!("issue #30")
+    }
+}
