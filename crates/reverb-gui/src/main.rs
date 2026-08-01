@@ -30,6 +30,7 @@ use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
 use reverb_gui::plan::{Cible, Place, Plan, Vue};
 use reverb_gui::reglages::{Poignee, Reglage};
+use reverb_gui::sondes::{Historique, Releve};
 use reverb_gui::{FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, PointLed};
 use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine};
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
@@ -317,6 +318,8 @@ struct Pupitre {
     couleur: Cell<Tsl>,
     /// Une poignée par canal de ventilateur, jamais partagée entre canaux.
     poignees: RefCell<HashMap<String, Poignee>>,
+    /// Deux minutes glissantes de relevés, pour tracer les courbes.
+    historique: RefCell<Historique>,
     /// Le modèle des lignes de ventilateur, **gardé vivant** : le reconstruire
     /// à chaque seconde recrée les curseurs, et un curseur recréé sous les
     /// doigts perd le geste en cours.
@@ -341,6 +344,7 @@ impl Pupitre {
             }),
             couleur: Cell::new(Rgb::new(0xff, 0x40, 0xff).en_tsl()),
             poignees: RefCell::new(HashMap::new()),
+            historique: RefCell::new(Historique::nouvel()),
             canaux: Rc::new(VecModel::default()),
             depart: Instant::now(),
         }
@@ -1065,6 +1069,7 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
 fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine]) {
     let mut canaux = Vec::new();
     let mut temperatures = Vec::new();
+    let mut releves: Vec<(String, Releve)> = Vec::new();
     let maintenant = pupitre.maintenant();
     let mut poignees = pupitre.poignees.borrow_mut();
     for ligne in lignes {
@@ -1099,15 +1104,43 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
             ResponseLine::Temp {
                 sensor,
                 millidegrees,
-            } => temperatures.push(LigneTemperature {
-                capteur: SharedString::from(sensor.clone()),
-                valeur: SharedString::from(format!("{:.1} °C", f64::from(*millidegrees) / 1000.0)),
-            }),
-            ResponseLine::Unreadable { subject, reason } => temperatures.push(LigneTemperature {
-                capteur: SharedString::from(subject.clone()),
-                valeur: SharedString::from(reason.clone()),
-            }),
+            } => releves.push((sensor.clone(), Releve::Valeur(*millidegrees))),
+            ResponseLine::Unreadable { subject, reason } => {
+                // Une sonde débranchée le dit, et sa courbe garde la trace du
+                // trou : figer sa dernière valeur ferait croire qu'on la lit
+                // encore.
+                releves.push((subject.clone(), Releve::Illisible));
+                let _ = reason;
+            }
             _ => {}
+        }
+    }
+
+    {
+        let mut historique = pupitre.historique.borrow_mut();
+        for (sonde, releve) in releves {
+            historique.noter(&sonde, releve);
+        }
+        for sonde in historique.sondes() {
+            let lisible = matches!(historique.dernier(&sonde), Some(Releve::Valeur(_)));
+            // Découpé par le DERNIER deux-points : un nom de `hwmon` en
+            // contient — `r8169_0_e00:00` — et couper au premier ferait passer
+            // la moitié de l'origine pour un libellé.
+            let (origine, capteur) = sonde
+                .rsplit_once(':')
+                .map_or((sonde.as_str(), ""), |(origine, reste)| (origine, reste));
+            temperatures.push(LigneTemperature {
+                origine: SharedString::from(origine),
+                capteur: SharedString::from(if capteur.is_empty() { origine } else { capteur }),
+                valeur: SharedString::from(match historique.dernier(&sonde) {
+                    Some(Releve::Valeur(millidegres)) => {
+                        format!("{:.1} °C", f64::from(millidegres) / 1000.0)
+                    }
+                    _ => "illisible".to_owned(),
+                }),
+                courbe: SharedString::from(courbe(&historique, &sonde)),
+                lisible,
+            });
         }
     }
 
@@ -1125,6 +1158,49 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
         pupitre.canaux.set_vec(canaux);
     }
     fenetre.set_temperatures(ModelRc::new(VecModel::from(temperatures)));
+}
+
+/// La courbe d'une sonde, en commandes SVG dans le carré unité.
+///
+/// Vide tant qu'il n'y a qu'un relevé : un point n'est pas une courbe, et le
+/// tracer en ferait un trait horizontal qui suggère une mesure stable qu'on n'a
+/// pas encore faite.
+///
+/// Les relevés `Illisible` **coupent** le trait au lieu d'être sautés : une
+/// ligne qui enjambe le trou dirait qu'on a mesuré pendant qu'on ne mesurait
+/// pas.
+fn courbe(historique: &Historique, sonde: &str) -> String {
+    let releves = historique.courbe(sonde);
+    if releves.len() < 2 {
+        return String::new();
+    }
+    let Some((bas, haut)) = historique.bornes(sonde) else {
+        return String::new();
+    };
+    // Une courbe plate se dessine au milieu : la mettre en haut ou en bas ferait
+    // croire à un extrême.
+    let etendue = f64::from(haut - bas);
+    let dernier = (releves.len() - 1) as f64;
+    let mut commandes = String::new();
+    let mut pose = false;
+    for (rang, releve) in releves.iter().enumerate() {
+        let Releve::Valeur(valeur) = releve else {
+            pose = false;
+            continue;
+        };
+        let x = rang as f64 / dernier;
+        let y = if etendue > 0.0 {
+            1.0 - f64::from(valeur - bas) / etendue
+        } else {
+            0.5
+        };
+        // Une marge d'un vingtième en haut et en bas : un trait collé au bord se
+        // fait rogner par l'épaisseur du trait.
+        let y = 0.05 + y * 0.9;
+        commandes.push_str(&format!("{} {x:.4} {y:.4} ", if pose { "L" } else { "M" }));
+        pose = true;
+    }
+    commandes
 }
 
 /// Écrit un état de connexion dans la fenêtre, depuis n'importe quel fil.

@@ -74,7 +74,21 @@ fn main() -> ExitCode {
     if let Some(souci) = souci {
         eprintln!("attention : {souci}");
     }
-    let etat = Etat::nouveau(eclairage, geometrie, fichier_geometrie, fichier_eclairage);
+    // Découvertes une fois : un `hwmon` n'apparaît pas en cours de route, et
+    // relire l'arborescence chaque seconde coûterait plus que la lecture.
+    let sondes = reverb_hw::hwmon::sondes().unwrap_or_else(|erreur| {
+        eprintln!("attention : sondes de température illisibles : {erreur}");
+        Vec::new()
+    });
+    eprintln!("sondes de température : {}", sondes.len());
+    let etat = Etat::nouveau(
+        eclairage,
+        geometrie,
+        fichier_geometrie,
+        fichier_eclairage,
+        sondes,
+        lancer_le_fil_du_gpu(),
+    );
 
     let annonce = socket.display().to_string();
     thread::spawn(move || {
@@ -94,6 +108,30 @@ fn main() -> ExitCode {
 }
 
 /// L'état d'éclairage courant.
+/// Ce que le fil du GPU a lu en dernier.
+///
+/// Le pilote propriétaire NVIDIA n'enregistre aucun `hwmon` : la RTX 5070 se lit
+/// par `nvidia-smi`, mesuré à 16 ms — un tiers d'image de rendu. Un fil à part
+/// et un cache, pour que la boucle qui écrit sur les bus n'attende jamais un
+/// processus externe.
+type CacheGpu = std::sync::Arc<std::sync::Mutex<Option<(String, i32)>>>;
+
+/// Interroge `nvidia-smi` une fois par seconde, à côté.
+fn lancer_le_fil_du_gpu() -> CacheGpu {
+    let cache: CacheGpu = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let sien = cache.clone();
+    std::thread::spawn(move || {
+        loop {
+            let lu = reverb_hw::gpu::nvidia();
+            if let Ok(mut place) = sien.lock() {
+                *place = lu;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    });
+    cache
+}
+
 struct Etat {
     ventilateurs: [Rgb; 10],
     barrettes: [Rgb; ram::SLOT_COUNT],
@@ -109,6 +147,10 @@ struct Etat {
     a_ecrire: bool,
     /// Les fenêtres abonnées aux images, s'il y en a.
     abonnes: Vec<SyncSender<Vec<ResponseLine>>>,
+    /// Toutes les sondes de température de la machine, découvertes au démarrage.
+    sondes: Vec<reverb_hw::hwmon::Sonde>,
+    /// La dernière température du GPU discret, lue par un fil à part.
+    gpu: CacheGpu,
     /// Ce que chaque LED affiche vraiment, hors animation.
     ///
     /// ⚠️ **Plus fin que ce qui est conservé sur disque.** `eclairage.conf`
@@ -125,6 +167,8 @@ impl Etat {
         geometrie: Geometrie,
         fichier_geometrie: PathBuf,
         fichier_eclairage: PathBuf,
+        sondes: Vec<reverb_hw::hwmon::Sonde>,
+        gpu: CacheGpu,
     ) -> Etat {
         Etat {
             ventilateurs: eclairage.ventilateurs,
@@ -137,6 +181,8 @@ impl Etat {
             // connu au boot, sans qu'aucune fenêtre soit ouverte.
             a_ecrire: true,
             abonnes: Vec::new(),
+            sondes,
+            gpu,
             leds_ventilateurs: eclairage
                 .ventilateurs
                 .map(|couleur| [couleur; LEDS_PER_FAN as usize]),
@@ -293,7 +339,11 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
     } = ordre;
     let lignes = match requete {
         Request::Status => {
-            let mut lignes = telemetrie::releve(peripheriques.canaux());
+            let mut lignes = telemetrie::releve(
+                peripheriques.canaux(),
+                &etat.sondes,
+                etat.gpu.lock().ok().and_then(|lu| lu.clone()),
+            );
             lignes.push(ResponseLine::End);
             lignes
         }
