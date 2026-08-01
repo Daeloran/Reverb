@@ -89,10 +89,33 @@ pub struct Place {
 }
 
 /// Ce qu'on désigne en cliquant sur la maquette.
+///
+/// Toujours **une LED**, quel que soit le niveau de détail affiché : viser un
+/// ventilateur entier rend ses huit LED, pas un objet d'un autre genre. C'est ce
+/// qui permet à une sélection d'être un simple ensemble de LED, et donc à une
+/// zone d'en être un aussi.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cible {
     Led { position: Position, led: usize },
     Barrette { slot: usize, led: usize },
+}
+
+/// Le point de vue depuis lequel la maquette est dessinée.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vue {
+    /// De face, depuis le panneau latéral gauche.
+    ///
+    /// La largeur du boîtier est **écrasée** : deux organes qui ne diffèrent que
+    /// par elle se retrouvent au même endroit. Sept ventilateurs sur dix sont
+    /// vus par la tranche et dessinés en cercles quand même — c'est un schéma,
+    /// pas une photographie.
+    Face,
+    /// De trois-quarts.
+    ///
+    /// La seule vue **honnête** : les quatre plans occupés s'y distinguent, et
+    /// aucun ventilateur n'y est vu par la tranche. Le prix est que les anneaux
+    /// y sont des ellipses, et non des cercles.
+    Isometrique,
 }
 
 /// Où dessiner chaque LED du boîtier.
@@ -109,6 +132,16 @@ impl Plan {
     /// La géométrie donne des points en trois dimensions ; le plan n'en garde
     /// que deux. La profondeur — l'axe qui va du panneau vers la carte mère —
     /// n'est pas dessinée : elle ne distingue rien que l'utilisateur cherche.
+    /// Le même boîtier, vu de trois-quarts.
+    ///
+    /// Contrairement à la vue de face, celle-ci **projette les positions
+    /// réelles** des cent vingt-quatre LED : aucune n'est replacée à la main.
+    /// C'est ce qui la rend honnête, et ce qui fait qu'aucun ventilateur n'y est
+    /// vu par la tranche.
+    pub fn isometrique(_geometrie: &Geometrie) -> Plan {
+        todo!("issue #28")
+    }
+
     pub fn nouveau(geometrie: &Geometrie) -> Plan {
         // Les centres et les barrettes, encore en millimètres du boîtier :
         // (profondeur, hauteur). La profondeur croît vers l'arrière, donc vers
@@ -200,6 +233,41 @@ impl Plan {
     /// Une des onze LED d'une barrette, `None` au-delà.
     pub fn led_barrette(&self, slot: usize, led: usize) -> Option<Place> {
         self.barrettes.get(slot)?.get(led).copied()
+    }
+
+    /// Le milieu d'une barrette, `None` au-delà du quatrième slot.
+    ///
+    /// Ce qu'il faut pour dessiner une réglette d'un trait, sans passer par ses
+    /// onze LED, quand la maquette est au détail « ventilateur ».
+    pub fn centre_barrette(&self, _slot: usize) -> Option<Place> {
+        todo!("issue #28")
+    }
+
+    /// Depuis quel point de vue ce plan a été construit.
+    pub fn vue(&self) -> Vue {
+        todo!("issue #28")
+    }
+
+    /// Toutes les LED de l'organe qui porte cette cible.
+    ///
+    /// Les huit d'un ventilateur, les onze d'une barrette. C'est ce qui fait le
+    /// détail « ventilateur » : le geste reste un clic sur une LED, et c'est le
+    /// niveau de détail qui décide s'il en entraîne sept autres.
+    pub fn groupe(&self, _cible: Cible) -> Vec<Cible> {
+        todo!("issue #28")
+    }
+
+    /// Tout ce que le rectangle de deux coins attrape.
+    ///
+    /// Les deux coins sont donnés dans n'importe quel ordre — un glissement va
+    /// dans les quatre sens. Une cible est retenue si **son centre** est dans le
+    /// rectangle : un critère de recouvrement partiel attraperait des LED qu'on
+    /// ne voit pas dedans.
+    ///
+    /// L'ordre du résultat est celui de la maquette, pas celui du geste : deux
+    /// glissements qui couvrent la même zone rendent la même liste.
+    pub fn dans(&self, _coin: Place, _oppose: Place) -> Vec<Cible> {
+        todo!("issue #28")
     }
 
     /// Le rayon d'un anneau de ventilateur, dans la même unité que [`Place`].
