@@ -1,0 +1,32 @@
+// Une fenêtre vide, et rien d'autre.
+//
+// Ce fichier ne prouve qu'une chose, mais c'est la seule qui bloquait tout le
+// reste : Slint s'ouvre sur cette machine — Wayland, pilote NVIDIA
+// propriétaire, bureau immuable — sans rien installer à côté du binaire.
+
+export component Fenetre inherits Window {
+    title: "Reverb";
+    preferred-width: 760px;
+    preferred-height: 480px;
+    background: #0e0e13;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 12px;
+
+        Text {
+            text: "Reverb";
+            font-size: 40px;
+            font-weight: 700;
+            color: #4d7cff;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: "La fenêtre s'ouvre. C'est tout ce que ce commit prouve —\net c'est ce qui bloquait le reste.";
+            font-size: 15px;
+            color: #7d7d8c;
+            horizontal-alignment: center;
+        }
+    }
+}
