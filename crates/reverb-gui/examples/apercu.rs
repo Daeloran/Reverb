@@ -7,7 +7,12 @@
 //!
 //! ```bash
 //! cargo run --release --example apercu -p reverb-gui -- /tmp/reverb.ppm
+//! cargo run --release --example apercu -p reverb-gui -- /tmp/reverb.ppm /run/reverb/reverbd.sock
 //! ```
+//!
+//! Avec un socket, il montre **le vrai boîtier** : il s'abonne, prend la
+//! première image que le démon pousse, et la dessine. C'est la chaîne complète
+//! — `watch`, décodage, projection, rendu — vérifiée d'un seul coup.
 //!
 //! Le format est du **PPM binaire** (P6), que tout visualiseur ouvre et que
 //! `magick reverb.ppm reverb.png` convertit — écrire un PNG demanderait un
@@ -55,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fenetre.set_size(PhysicalSize::new(LARGEUR, HAUTEUR));
 
     let interface = Fenetre::new()?;
-    garnir(&interface);
+    garnir(&interface, std::env::args().nth(2));
     interface.show()?;
 
     // Une passe suffit : rien n'anime, tout est posé avant le rendu.
@@ -79,9 +84,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Pas de socket, pas de démon : cet aperçu montre la **mise en page**, et un
 /// dégradé y rend chaque LED discernable de ses voisines — ce qu'une couleur
 /// unie cacherait.
-fn garnir(interface: &Fenetre) {
+fn garnir(interface: &Fenetre, socket: Option<String>) {
     let plan = Plan::nouveau(&Geometrie::mesuree());
     let mut points = Vec::new();
+
+    // Avec un socket, les couleurs viennent du démon ; sans, d'un dégradé.
+    let vraies = socket.and_then(|chemin| premiere_image(&chemin));
 
     for (rang, position) in Position::ALL.into_iter().enumerate() {
         for led in 0..LEDS_PER_FAN as usize {
@@ -90,7 +98,10 @@ fn garnir(interface: &Fenetre) {
                 x: place.x,
                 y: place.y,
                 rayon: plan.rayon_anneau() / 8.0,
-                couleur: teinte(rang as f32 / 10.0 + led as f32 / 8.0 / 3.0),
+                couleur: vraies.as_ref().map_or_else(
+                    || teinte(rang as f32 / 10.0 + led as f32 / 8.0 / 3.0),
+                    |image| couleur_de(image, &format!("fan:{}", position.slug()), led),
+                ),
                 choisie: position == Position::Arriere,
             });
         }
@@ -102,7 +113,10 @@ fn garnir(interface: &Fenetre) {
                 x: place.x,
                 y: place.y,
                 rayon: plan.rayon_anneau() / 8.0,
-                couleur: teinte(0.55 + slot as f32 / 20.0 + led as f32 / 11.0 / 6.0),
+                couleur: vraies.as_ref().map_or_else(
+                    || teinte(0.55 + slot as f32 / 20.0 + led as f32 / 11.0 / 6.0),
+                    |image| couleur_de(image, &format!("slot:{slot}"), led),
+                ),
                 choisie: false,
             });
         }
@@ -143,10 +157,42 @@ fn garnir(interface: &Fenetre) {
     }])));
     interface.set_cible(SharedString::from("le ventilateur arriere"));
     interface.set_animation_courante(SharedString::from("comete"));
-    interface.set_message(SharedString::from(
-        "aperçu hors ligne — aucun démon interrogé",
-    ));
+    interface.set_message(SharedString::from(if vraies.is_some() {
+        "aperçu de la vraie image, prise sur le socket"
+    } else {
+        "aperçu hors ligne — aucun démon interrogé"
+    }));
     interface.set_connecte(true);
+}
+
+/// La première image que le démon pousse, s'il y en a un.
+fn premiere_image(chemin: &str) -> Option<Vec<(String, Vec<reverb_proto::Rgb>)>> {
+    let mut abonnement = reverb_gui::client::Abonnement::ouvrir(std::path::Path::new(chemin))
+        .map_err(|erreur| eprintln!("attention : {chemin} : {erreur}"))
+        .ok()?;
+    let image = abonnement.image_suivante()?;
+    Some(
+        image
+            .into_iter()
+            .filter_map(|ligne| match ligne {
+                reverb_proto::ipc::ResponseLine::Frame { cible, couleurs } => {
+                    Some((cible, couleurs))
+                }
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// La couleur d'une LED dans une image reçue, noire si la cible manque.
+fn couleur_de(image: &[(String, Vec<reverb_proto::Rgb>)], cible: &str, led: usize) -> Color {
+    image
+        .iter()
+        .find(|(nom, _)| nom == cible)
+        .and_then(|(_, couleurs)| couleurs.get(led))
+        .map_or(Color::from_rgb_u8(0, 0, 0), |couleur| {
+            Color::from_rgb_u8(couleur.r, couleur.g, couleur.b)
+        })
 }
 
 /// Une teinte de l'arc-en-ciel, pour rendre chaque LED discernable.
