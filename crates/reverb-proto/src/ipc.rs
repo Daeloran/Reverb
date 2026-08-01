@@ -46,9 +46,10 @@
 
 use std::fmt;
 
+use crate::LEDS_PER_FAN;
 use crate::color::Rgb;
 use crate::position::Position;
-use crate::ram::SLOT_COUNT;
+use crate::ram::{self, SLOT_COUNT};
 
 /// Longueur maximale d'une ligne acceptée, en octets. `1024` passe, `1025` non.
 ///
@@ -102,6 +103,45 @@ pub enum Request {
         cible: Option<String>,
         reglages: Vec<(String, String)>,
     },
+    /// `paint <cible> <rrggbb>,<rrggbb>,…` — une couleur par LED.
+    ///
+    /// La cible est **une seule** : `fan:<position>` ou `slot:<0-3>`. `all`,
+    /// `fans` et `ram` n'ont pas de sens ici — une liste de couleurs appliquée
+    /// à dix ventilateurs ne dit pas laquelle va où.
+    ///
+    /// Le compte est vérifié à la lecture, contre le matériel : huit pour un
+    /// ventilateur, onze pour une barrette. Une liste trop courte complétée par
+    /// du noir donnerait des LED éteintes sans un message.
+    ///
+    /// ⚠️ **Cet état ne survit pas à un redémarrage** : `/var/lib/reverb/
+    /// eclairage.conf` conserve une couleur par cible (#21), pas une par LED.
+    /// Ce qui est peint à la main revient à la couleur de sa cible au
+    /// redémarrage suivant.
+    Paint {
+        target: LightTarget,
+        couleurs: Vec<Rgb>,
+    },
+    /// `lighting` — rend l'état d'éclairage courant, sans rien changer.
+    ///
+    /// Quatorze lignes `light` — les couleurs fixes, celles que `animate off`
+    /// rendrait — plus une ligne `anim` s'il y a une animation, puis `end`.
+    ///
+    /// **Un verbe à part, et non un `light` sans argument** comme `geometry`
+    /// sans argument : un test d'intention de #17 exige que `light` seul soit
+    /// refusé en nommant le verbe, et un test d'intention ne se réécrit pas
+    /// pour arranger un design venu après lui.
+    Lighting,
+    /// `watch` — le démon pousse l'image courante, puis chaque nouvelle.
+    ///
+    /// Quatorze lignes `frame` puis `end`, et ainsi de suite tant que le client
+    /// écoute. La première image part **à l'abonnement**, sans attendre un
+    /// changement : une fenêtre qui vient de s'ouvrir doit montrer le boîtier
+    /// tel qu'il est, pas un cadre vide jusqu'à la prochaine animation.
+    ///
+    /// C'est ce qui rend « l'aperçu montre ce que le boîtier reçoit » vrai par
+    /// construction : la fenêtre affiche les images calculées par le code même
+    /// qui écrit sur les bus, au lieu de les recalculer de son côté.
+    Watch,
 }
 
 /// Ce que vise une commande d'éclairage.
@@ -190,6 +230,56 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
             }
         }
 
+        "lighting" => {
+            if arguments.is_empty() {
+                Ok(Request::Lighting)
+            } else {
+                Err(mauvais("n'attend aucun argument"))
+            }
+        }
+
+        "watch" => {
+            if arguments.is_empty() {
+                Ok(Request::Watch)
+            } else {
+                Err(mauvais("n'attend aucun argument"))
+            }
+        }
+
+        "paint" => {
+            let [cible, couleurs] = arguments[..] else {
+                return Err(mauvais(
+                    "attend une cible et des couleurs séparées par des virgules, par exemple \
+                     « paint slot:0 ff0000,00ff00,… »",
+                ));
+            };
+            let target = cible_eclairage(cible).map_err(|raison| mauvais(&raison))?;
+            let attendues = match target {
+                LightTarget::Fan(_) => LEDS_PER_FAN as usize,
+                LightTarget::RamSlot(_) => ram::LEDS_PER_STICK,
+                LightTarget::All | LightTarget::Fans | LightTarget::Ram => {
+                    return Err(mauvais(
+                        "vise une seule cible : « fan:<position> » ou « slot:<0-3> ». Une liste de \
+                         couleurs ne dit pas laquelle va où",
+                    ));
+                }
+            };
+            let mut liste = Vec::with_capacity(attendues);
+            for brut in couleurs.split(',') {
+                liste.push(couleur_hex(brut).map_err(|raison| mauvais(&raison))?);
+            }
+            if liste.len() != attendues {
+                return Err(mauvais(&format!(
+                    "« {cible} » a {attendues} LED, et {} couleur(s) ont été données",
+                    liste.len()
+                )));
+            }
+            Ok(Request::Paint {
+                target,
+                couleurs: liste,
+            })
+        }
+
         "light" => {
             let [cible, couleur] = arguments[..] else {
                 return Err(mauvais(
@@ -262,17 +352,7 @@ pub fn encode_request(request: &Request) -> String {
     match request {
         Request::Status => "status".to_owned(),
         Request::Light { target, color } => {
-            let cible = match target {
-                LightTarget::All => "all".to_owned(),
-                LightTarget::Fans => "fans".to_owned(),
-                LightTarget::Fan(position) => format!("fan:{}", position.slug()),
-                LightTarget::Ram => "ram".to_owned(),
-                LightTarget::RamSlot(slot) => format!("slot:{slot}"),
-            };
-            format!(
-                "light {cible} {:02x}{:02x}{:02x}",
-                color.r, color.g, color.b
-            )
+            format!("light {} {}", cible_ecrite(*target), hexa(*color))
         }
         Request::Animate { name, reglages } => ecrire_paires(
             format!(
@@ -292,6 +372,17 @@ pub fn encode_request(request: &Request) -> String {
             },
             reglages,
         ),
+        Request::Paint { target, couleurs } => format!(
+            "paint {} {}",
+            cible_ecrite(*target),
+            couleurs
+                .iter()
+                .map(|couleur| hexa(*couleur))
+                .collect::<Vec<String>>()
+                .join(",")
+        ),
+        Request::Lighting => "lighting".to_owned(),
+        Request::Watch => "watch".to_owned(),
     }
 }
 
@@ -366,6 +457,17 @@ fn cible_eclairage(brut: &str) -> Result<LightTarget, String> {
     }
 }
 
+/// L'inverse de [`cible_eclairage`].
+fn cible_ecrite(target: LightTarget) -> String {
+    match target {
+        LightTarget::All => "all".to_owned(),
+        LightTarget::Fans => "fans".to_owned(),
+        LightTarget::Fan(position) => format!("fan:{}", position.slug()),
+        LightTarget::Ram => "ram".to_owned(),
+        LightTarget::RamSlot(slot) => format!("slot:{slot}"),
+    }
+}
+
 /// Analyse une couleur **strictement** : six chiffres hexadécimaux, rien d'autre.
 ///
 /// Plus strict que `Rgb::from_hex`, qui tolère le `#` de tête parce qu'un
@@ -424,6 +526,30 @@ pub enum ResponseLine {
         angle: u16,
         sens: String,
     },
+    /// `light <cible> <rrggbb>` — une couleur fixe de l'état courant.
+    ///
+    /// La cible s'écrit comme dans la requête : `fan:<position>` ou
+    /// `slot:<0-3>`. Les cibles collectives — `all`, `fans`, `ram` — n'y
+    /// paraissent jamais : l'état est ce que chaque cible porte, pas la
+    /// commande qui l'y a mise.
+    Light { cible: String, couleur: Rgb },
+    /// `anim <nom> [clé=valeur…]` — l'animation en cours.
+    ///
+    /// Absente quand l'éclairage est fixe. Les réglages sont transportés bruts,
+    /// comme dans `Request::Animate` : le protocole ne sait pas ce qu'une
+    /// animation accepte, et n'a pas à le savoir.
+    Anim {
+        nom: String,
+        reglages: Vec<(String, String)>,
+    },
+    /// `frame <cible> <rrggbb>,<rrggbb>,…` — les couleurs d'une cible dans
+    /// l'image courante.
+    ///
+    /// Huit couleurs pour un ventilateur, onze pour une barrette, dans l'ordre
+    /// du matériel. Séparées par des virgules et non par des espaces : une
+    /// ligne de onze champs se relit mal, et le découpage en jetons du reste du
+    /// protocole reste ainsi valable.
+    Frame { cible: String, couleurs: Vec<Rgb> },
     /// `end` — succès, fin de réponse.
     End,
     /// `err <message>` — échec, fin de réponse.
@@ -497,6 +623,21 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
             angle,
             sens,
         } => format!("geom {} {angle} {}", jeton(position), jeton(sens)),
+        ResponseLine::Light { cible, couleur } => {
+            format!("light {} {}", jeton(cible), hexa(*couleur))
+        }
+        ResponseLine::Anim { nom, reglages } => {
+            ecrire_paires(format!("anim {}", jeton(nom)), reglages)
+        }
+        ResponseLine::Frame { cible, couleurs } => format!(
+            "frame {} {}",
+            jeton(cible),
+            couleurs
+                .iter()
+                .map(|couleur| hexa(*couleur))
+                .collect::<Vec<String>>()
+                .join(",")
+        ),
         ResponseLine::End => "end".to_owned(),
         ResponseLine::Error { message } => format!("err {}", reste(message)),
     }
@@ -539,6 +680,56 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
         });
     }
 
+    // Les trois lignes de la fenêtre se découpent à part : `anim` porte un
+    // nombre libre de réglages, et `frame` une liste dont la longueur dépend de
+    // la cible. Les compter dans le `splitn` fixe ci-dessous les tronquerait.
+    if let Some(champs) = line.strip_prefix("light ") {
+        let [cible, couleur] = champs.split(' ').collect::<Vec<&str>>()[..] else {
+            return Err(illisible(
+                "« light » attend une cible et une couleur, et rien d'autre",
+            ));
+        };
+        if cible.is_empty() {
+            return Err(illisible("« light » attend une cible avant la couleur"));
+        }
+        return Ok(ResponseLine::Light {
+            cible: cible.to_owned(),
+            couleur: couleur_stricte(couleur).ok_or_else(|| illisible(HEXA))?,
+        });
+    }
+    if let Some(champs) = line.strip_prefix("frame ") {
+        let [cible, couleurs] = champs.split(' ').collect::<Vec<&str>>()[..] else {
+            return Err(illisible(
+                "« frame » attend une cible et des couleurs séparées par des virgules",
+            ));
+        };
+        if cible.is_empty() {
+            return Err(illisible("« frame » attend une cible avant ses couleurs"));
+        }
+        // Une couleur manquante n'est **jamais** complétée par du noir : ce
+        // serait une LED éteinte que personne ne saurait expliquer.
+        let mut liste = Vec::new();
+        for brut in couleurs.split(',') {
+            liste.push(couleur_stricte(brut).ok_or_else(|| illisible(HEXA))?);
+        }
+        return Ok(ResponseLine::Frame {
+            cible: cible.to_owned(),
+            couleurs: liste,
+        });
+    }
+    if let Some(champs) = line.strip_prefix("anim ") {
+        let mut mots = champs.split(' ');
+        let nom = mots.next().unwrap_or_default();
+        if nom.is_empty() {
+            return Err(illisible("« anim » attend un nom d'animation"));
+        }
+        let restants: Vec<&str> = mots.collect();
+        return Ok(ResponseLine::Anim {
+            nom: nom.to_owned(),
+            reglages: paires(&restants).map_err(|raison| illisible(&raison))?,
+        });
+    }
+
     // `chan` porte son mode en dernier, donc à espaces : on ne découpe que les
     // quatre champs qui précèdent, et le reste est le mode.
     let champs: Vec<&str> = line.splitn(6, ' ').collect();
@@ -566,6 +757,9 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
                 .map_err(|_| illisible("« geom » attend un angle entier en degrés"))?,
             sens: (*sens).to_owned(),
         }),
+        ["light", ..] => Err(illisible("« light » attend une cible et une couleur")),
+        ["frame", ..] => Err(illisible("« frame » attend une cible et des couleurs")),
+        ["anim", ..] => Err(illisible("« anim » attend un nom d'animation")),
         ["chan", ..] => Err(illisible("« chan » attend cinq champs")),
         ["geom", ..] => Err(illisible(
             "« geom » attend une position, un angle et un sens",
@@ -574,6 +768,28 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
         [prefixe, ..] => Err(illisible(&format!("préfixe « {prefixe} » inconnu"))),
         [] => Err(illisible("ligne vide")),
     }
+}
+
+/// Ce qu'on répond quand une couleur n'en est pas une.
+const HEXA: &str = "couleur invalide : attendu six chiffres hexadécimaux, par exemple ff2080";
+
+/// Une couleur en six chiffres hexadécimaux, telle qu'elle s'écrit sur le fil.
+fn hexa(couleur: Rgb) -> String {
+    format!("{:02x}{:02x}{:02x}", couleur.r, couleur.g, couleur.b)
+}
+
+/// L'inverse d'[`hexa`], **strict**.
+///
+/// Ni `#`, ni majuscules refusées — mais exactement six chiffres. Ces lignes-là
+/// sont écrites par le démon, pas tapées : y tolérer des variantes ferait passer
+/// une faute d'encodage pour une écriture valide, et le décodeur rattraperait sa
+/// propre erreur au lieu de la signaler.
+fn couleur_stricte(brut: &str) -> Option<Rgb> {
+    if brut.len() != 6 || !brut.bytes().all(|o| o.is_ascii_hexdigit()) {
+        return None;
+    }
+    let composante = |debut: usize| u8::from_str_radix(&brut[debut..debut + 2], 16).ok();
+    Some(Rgb::new(composante(0)?, composante(2)?, composante(4)?))
 }
 
 fn absent_ou<T: std::str::FromStr>(champ: &str) -> Result<Option<T>, String> {

@@ -188,25 +188,11 @@ impl Eclairage {
         }
 
         if let Some((animation, reglages)) = &self.animation {
-            // Déstructuration exhaustive, volontairement sans `..` : un réglage
-            // ajouté un jour à `Reglages` ne compilera plus ici tant qu'on ne
-            // lui aura pas donné sa place dans le fichier. Sans ça, il serait
-            // simplement perdu au redémarrage, sans un message.
-            let Reglages {
-                couleur,
-                vitesse,
-                direction,
-            } = *reglages;
-            let tous = [
-                ("couleur", hexa(couleur)),
-                ("vitesse", vitesse.to_string()),
-                ("direction", direction.slug().to_owned()),
-            ];
+            // Les clés écrites sont celles que l'animation accepte, et c'est
+            // elle qui le dit — le même point unique que le socket emploie.
             texte.push_str(&format!("animation {}", animation.nom()));
-            for (cle, valeur) in tous {
-                if animation.parametres_acceptes().contains(&cle) {
-                    texte.push_str(&format!(" {cle}={valeur}"));
-                }
+            for (cle, valeur) in animation.reglages_ecrits(reglages) {
+                texte.push_str(&format!(" {cle}={valeur}"));
             }
             texte.push('\n');
         }

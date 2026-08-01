@@ -1,0 +1,345 @@
+// La fenêtre Reverb.
+//
+// Le boîtier vu depuis le panneau latéral gauche, face à la carte mère :
+// l'arrière à gauche, l'avant à droite. Les places viennent de `plan.rs`, les
+// couleurs du démon — ce sont les images qu'il envoie vraiment au matériel.
+
+import { Button, Slider, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+
+export struct PointLed {
+    x: float,
+    y: float,
+    rayon: float,
+    couleur: color,
+    choisie: bool,
+}
+
+export struct LigneVentilateur {
+    canal: string,
+    position: string,
+    rpm: string,
+    pwm: int,
+    mode: string,
+    lisible: bool,
+}
+
+export struct LigneTemperature {
+    capteur: string,
+    valeur: string,
+}
+
+export struct FamilleAnimation {
+    nom: string,
+    effet: string,
+    accepte-couleur: bool,
+}
+
+component Titre inherits Text {
+    font-size: 12px;
+    font-weight: 700;
+    color: #6f7180;
+    letter-spacing: 0.8px;
+}
+
+component Carte inherits Rectangle {
+    background: #191920;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: #24242e;
+}
+
+export component Fenetre inherits Window {
+    title: "Reverb";
+    preferred-width: 1180px;
+    preferred-height: 720px;
+    min-width: 900px;
+    min-height: 600px;
+    background: #0e0e13;
+
+    in property <[PointLed]> leds;
+    in property <[LigneVentilateur]> ventilateurs;
+    in property <[LigneTemperature]> temperatures;
+    in property <[FamilleAnimation]> familles;
+    in property <string> cible: "tout le boîtier";
+    in property <string> animation-courante: "aucune";
+    in property <string> message;
+    in property <bool> connecte;
+    in-out property <string> couleur: "ff40ff";
+    in property <color> apercu: #ff40ff;
+    in-out property <int> vitesse: 3;
+    in-out property <int> direction: 4;
+
+    callback clic-maquette(float, float);
+    callback couleur-saisie(string);
+    callback choisir-cible(string);
+    callback appliquer-couleur();
+    callback lancer-animation(string);
+    callback arreter-animation();
+    callback regler-ventilateur(string, int);
+    callback rendre-au-firmware(string);
+
+    property <[string]> directions: [
+        "bas-haut", "haut-bas", "avant-arriere", "arriere-avant", "horaire", "antihoraire"
+    ];
+
+    VerticalLayout {
+        padding: 14px;
+        spacing: 12px;
+
+        // ── En-tête ────────────────────────────────────────────────────────
+        HorizontalLayout {
+            spacing: 10px;
+            Text {
+                text: "Reverb";
+                font-size: 22px;
+                font-weight: 800;
+                color: #4d7cff;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: 9px;
+                height: 9px;
+                border-radius: 4.5px;
+                background: root.connecte ? #35c46a : #d9534f;
+                y: (parent.height - self.height) / 2;
+            }
+            Text {
+                text: root.message;
+                font-size: 13px;
+                color: root.connecte ? #8a8c9b : #ffb3b0;
+                vertical-alignment: center;
+                horizontal-alignment: left;
+                overflow: elide;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+
+            // ── La maquette ────────────────────────────────────────────────
+            Carte {
+                horizontal-stretch: 1;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 6px;
+                    Titre { text: "LE BOÎTIER — ARRIÈRE À GAUCHE, VU DU PANNEAU LATÉRAL"; }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        carre := Rectangle {
+                            width: min(parent.width, parent.height);
+                            height: self.width;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+
+                            // Une LED visée est plus grosse et cerclée de blanc : sur
+                            // cent vingt-quatre points, une nuance de bordure ne se
+                            // verrait pas, et c'est pourtant ce qui dit ce qu'on va
+                            // changer.
+                            for led in root.leds: Rectangle {
+                                property <length> taille: led.rayon * 2 * parent.width * (led.choisie ? 1.7 : 1.0);
+                                width: taille;
+                                height: taille;
+                                border-radius: taille / 2;
+                                x: led.x * parent.width - taille / 2;
+                                y: led.y * parent.height - taille / 2;
+                                background: led.couleur;
+                                border-width: led.choisie ? 2px : 0px;
+                                border-color: #ffffff;
+                            }
+
+                            TouchArea {
+                                clicked => {
+                                    root.clic-maquette(
+                                        self.mouse-x / self.width,
+                                        self.mouse-y / self.height
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Les réglages ───────────────────────────────────────────────
+            Carte {
+                width: 340px;
+                ScrollView {
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 14px;
+
+                        // Cible
+                        VerticalLayout {
+                            spacing: 6px;
+                            Titre { text: "CIBLE"; }
+                            Text {
+                                text: root.cible;
+                                font-size: 14px;
+                                color: #e6e6ef;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                Button { text: "Tout"; clicked => { root.choisir-cible("all"); } }
+                                Button { text: "Ventilateurs"; clicked => { root.choisir-cible("fans"); } }
+                                Button { text: "RAM"; clicked => { root.choisir-cible("ram"); } }
+                            }
+                            Text {
+                                text: "Clique une LED sur la maquette pour la viser seule.";
+                                font-size: 11px;
+                                color: #6f7180;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        // Couleur
+                        VerticalLayout {
+                            spacing: 6px;
+                            Titre { text: "COULEUR"; }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                LineEdit {
+                                    text <=> root.couleur;
+                                    placeholder-text: "ff40ff";
+                                    edited => { root.couleur-saisie(self.text); }
+                                    accepted => { root.appliquer-couleur(); }
+                                }
+                                Rectangle {
+                                    width: 34px;
+                                    border-radius: 6px;
+                                    background: #000000;
+                                    Rectangle {
+                                        width: parent.width - 6px;
+                                        height: parent.height - 6px;
+                                        x: 3px;
+                                        y: 3px;
+                                        border-radius: 4px;
+                                        background: root.apercu;
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 5px;
+                                for teinte in ["ff0000", "ff8000", "ffff00", "00ff00", "00ffff", "0000ff", "ff00ff", "ffffff"]: Rectangle {
+                                    height: 24px;
+                                    border-radius: 5px;
+                                    background: teinte == "ff0000" ? #ff0000
+                                        : teinte == "ff8000" ? #ff8000
+                                        : teinte == "ffff00" ? #ffff00
+                                        : teinte == "00ff00" ? #00ff00
+                                        : teinte == "00ffff" ? #00ffff
+                                        : teinte == "0000ff" ? #0000ff
+                                        : teinte == "ff00ff" ? #ff00ff
+                                        : #ffffff;
+                                    TouchArea {
+                                        clicked => {
+                                            root.couleur = teinte;
+                                            root.couleur-saisie(teinte);
+                                            root.appliquer-couleur();
+                                        }
+                                    }
+                                }
+                            }
+                            Button {
+                                text: "Appliquer à " + root.cible;
+                                clicked => { root.appliquer-couleur(); }
+                            }
+                        }
+
+                        // Animations
+                        VerticalLayout {
+                            spacing: 6px;
+                            Titre { text: "ANIMATION — " + root.animation-courante; }
+                            for famille in root.familles: VerticalLayout {
+                                spacing: 2px;
+                                Button {
+                                    text: famille.nom;
+                                    clicked => { root.lancer-animation(famille.nom); }
+                                }
+                                Text {
+                                    text: famille.effet;
+                                    font-size: 11px;
+                                    color: #6f7180;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: "vitesse " + root.vitesse;
+                                    font-size: 12px;
+                                    color: #8a8c9b;
+                                    vertical-alignment: center;
+                                    width: 78px;
+                                }
+                                Slider {
+                                    minimum: 1;
+                                    maximum: 10;
+                                    value: root.vitesse;
+                                    changed(valeur) => { root.vitesse = Math.round(valeur); }
+                                }
+                            }
+                            ComboBox {
+                                model: root.directions;
+                                current-index <=> root.direction;
+                            }
+                            Button { text: "Arrêter"; clicked => { root.arreter-animation(); } }
+                        }
+
+                        // Ventilateurs
+                        VerticalLayout {
+                            spacing: 6px;
+                            Titre { text: "VENTILATEURS"; }
+                            for temperature in root.temperatures: HorizontalLayout {
+                                Text {
+                                    text: temperature.capteur;
+                                    font-size: 12px;
+                                    color: #8a8c9b;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: temperature.valeur;
+                                    font-size: 12px;
+                                    color: #e6e6ef;
+                                }
+                            }
+                            for canal in root.ventilateurs: VerticalLayout {
+                                spacing: 2px;
+                                HorizontalLayout {
+                                    Text {
+                                        text: canal.position == "" ? canal.canal : canal.position;
+                                        font-size: 12px;
+                                        color: #e6e6ef;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: canal.lisible ? canal.rpm + " tr/min · " + canal.mode : "illisible";
+                                        font-size: 11px;
+                                        color: canal.lisible ? #8a8c9b : #ffb3b0;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Slider {
+                                        minimum: 0;
+                                        maximum: 100;
+                                        value: canal.pwm;
+                                        released(valeur) => {
+                                            root.regler-ventilateur(canal.canal, Math.round(valeur));
+                                        }
+                                    }
+                                    Button {
+                                        text: "auto";
+                                        clicked => { root.rendre-au-firmware(canal.canal); }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

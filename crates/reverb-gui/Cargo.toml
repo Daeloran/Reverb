@@ -1,0 +1,35 @@
+[package]
+name = "reverb-gui"
+version = "0.1.0"
+description = "Fenêtre Reverb — cliente du démon, ne touche aucun bus"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "reverb_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "reverb-gui"
+path = "src/main.rs"
+
+[dependencies]
+reverb-anim = { path = "../reverb-anim" }
+reverb-proto = { path = "../reverb-proto" }
+slint = "1"
+# Dépendance de FEATURE, pas d'API : ce crate interne de Slint n'est jamais
+# importé par notre code. Il n'est là que pour activer « fontconfig-dlopen »,
+# qui fait charger libfontconfig au démarrage plutôt que de l'exiger à la
+# compilation. Sans ça, la construction réclame « fontconfig.pc » — un paquet
+# de développement qu'un OS immuable n'a pas, et que l'ADR-001 refuse
+# d'installer par surcouche.
+i-slint-common = { version = "1.16", default-features = false, features = ["fontconfig-dlopen"] }
+
+[build-dependencies]
+slint-build = "1"
+i-slint-common = { version = "1.16", default-features = false, features = ["fontconfig-dlopen"] }
+
+[lints]
+workspace = true

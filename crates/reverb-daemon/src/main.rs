@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -107,6 +107,16 @@ struct Etat {
     fichier_eclairage: PathBuf,
     /// Une couleur fixe a changé et n'a pas encore été écrite.
     a_ecrire: bool,
+    /// Les fenêtres abonnées aux images, s'il y en a.
+    abonnes: Vec<SyncSender<Vec<ResponseLine>>>,
+    /// Ce que chaque LED affiche vraiment, hors animation.
+    ///
+    /// ⚠️ **Plus fin que ce qui est conservé sur disque.** `eclairage.conf`
+    /// garde une couleur par cible (#21) ; une LED peinte à la main revient
+    /// donc à la couleur de son ventilateur au redémarrage suivant. Le
+    /// dire ici, parce que rien d'autre ne le dira.
+    leds_ventilateurs: [[Rgb; LEDS_PER_FAN as usize]; 10],
+    leds_barrettes: [[Rgb; ram::LEDS_PER_STICK]; ram::SLOT_COUNT],
 }
 
 impl Etat {
@@ -126,6 +136,13 @@ impl Etat {
             // Écrire l'état au démarrage : c'est ce qui donne un éclairage
             // connu au boot, sans qu'aucune fenêtre soit ouverte.
             a_ecrire: true,
+            abonnes: Vec::new(),
+            leds_ventilateurs: eclairage
+                .ventilateurs
+                .map(|couleur| [couleur; LEDS_PER_FAN as usize]),
+            leds_barrettes: eclairage
+                .barrettes
+                .map(|couleur| [couleur; ram::LEDS_PER_STICK]),
         }
     }
 
@@ -171,6 +188,10 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat:
                     let debut = Instant::now();
                     ecrire_image(peripheriques, &image);
                     compte.image(debut.elapsed(), sautees);
+                    if !etat.abonnes.is_empty() {
+                        let lignes = lignes_image(&image);
+                        serveur::diffuser(&mut etat.abonnes, &lignes);
+                    }
                     pas = pas.wrapping_add(1);
                     Duration::ZERO
                 }
@@ -181,6 +202,10 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat:
             if etat.a_ecrire {
                 ecrire_fixe(peripheriques, &etat);
                 etat.a_ecrire = false;
+                if !etat.abonnes.is_empty() {
+                    let lignes = lignes_fixe(&etat);
+                    serveur::diffuser(&mut etat.abonnes, &lignes);
+                }
             }
             REPOS
         };
@@ -261,7 +286,12 @@ impl Compteur {
 }
 
 fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
-    let lignes = match ordre.requete {
+    let Ordre {
+        requete,
+        reponse,
+        abonnement,
+    } = ordre;
+    let lignes = match requete {
         Request::Status => {
             let mut lignes = telemetrie::releve(peripheriques.canaux());
             lignes.push(ResponseLine::End);
@@ -295,6 +325,33 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
 
         Request::Geometry { cible, reglages } => geometrie(etat, cible.as_deref(), &reglages),
 
+        Request::Paint { target, couleurs } => {
+            peindre(etat, target, &couleurs);
+            // Une peinture arrête l'animation, comme une couleur fixe : les
+            // deux se disputeraient les mêmes LED.
+            etat.animation = None;
+            etat.a_ecrire = true;
+            conserver(etat)
+        }
+
+        Request::Lighting => etat_eclairage(etat),
+
+        Request::Watch => {
+            if let Some(canal) = abonnement {
+                // La première image part **tout de suite** quand rien n'est
+                // animé : sans elle, une fenêtre qui vient de s'ouvrir sur un
+                // boîtier en couleur fixe resterait vide jusqu'à la prochaine
+                // commande. Sous animation, la suivante arrive dans 50 ms.
+                if etat.animation.is_none() {
+                    let _ = canal.try_send(lignes_fixe(etat));
+                }
+                etat.abonnes.push(canal);
+            }
+            // Rien à répondre : le premier octet que l'abonné recevra est une
+            // image, pas un accusé de réception.
+            Vec::new()
+        }
+
         Request::Fan { channel, action } => {
             // `Percent::new` refait la vérification de bornes que `parse_request`
             // a déjà faite. Ce n'est pas redondant pour rien : le socket ne doit
@@ -317,7 +374,79 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
 
     // Le client peut être parti entre l'ordre et la réponse : ce n'est pas une
     // erreur du démon.
-    let _ = ordre.reponse.send(lignes);
+    let _ = reponse.send(lignes);
+}
+
+/// L'état d'éclairage courant, tel que `lighting` le rend.
+///
+/// Les couleurs **fixes**, celles que `animate off` rendrait, et non ce qui est
+/// affiché à l'instant : une fenêtre doit pouvoir montrer les réglages sous
+/// l'animation, sinon les arrêter ferait apparaître des couleurs qu'elle
+/// n'avait jamais montrées.
+fn etat_eclairage(etat: &Etat) -> Vec<ResponseLine> {
+    let mut lignes: Vec<ResponseLine> = Position::ALL
+        .into_iter()
+        .map(|position| ResponseLine::Light {
+            cible: format!("fan:{}", position.slug()),
+            couleur: etat.ventilateurs[position.index()],
+        })
+        .collect();
+    for (slot, couleur) in etat.barrettes.iter().enumerate() {
+        lignes.push(ResponseLine::Light {
+            cible: format!("slot:{slot}"),
+            couleur: *couleur,
+        });
+    }
+    if let Some((animation, reglages)) = &etat.animation {
+        lignes.push(ResponseLine::Anim {
+            nom: animation.nom().to_owned(),
+            reglages: animation.reglages_ecrits(reglages),
+        });
+    }
+    lignes.push(ResponseLine::End);
+    lignes
+}
+
+/// Une image d'animation, telle qu'un abonné la reçoit.
+fn lignes_image(image: &Image) -> Vec<ResponseLine> {
+    let mut lignes: Vec<ResponseLine> = image
+        .ventilateurs
+        .iter()
+        .map(|(position, couleurs)| ResponseLine::Frame {
+            cible: format!("fan:{}", position.slug()),
+            couleurs: couleurs.to_vec(),
+        })
+        .collect();
+    for (slot, couleurs) in image.barrettes.iter().enumerate() {
+        lignes.push(ResponseLine::Frame {
+            cible: format!("slot:{slot}"),
+            couleurs: couleurs.to_vec(),
+        });
+    }
+    lignes.push(ResponseLine::End);
+    lignes
+}
+
+/// L'éclairage fixe, sous la même forme qu'une image.
+///
+/// Un abonné ne connaît qu'un seul format : ce que le boîtier montre. Qu'il
+/// vienne d'une animation ou d'une couleur posée à la main ne le regarde pas.
+fn lignes_fixe(etat: &Etat) -> Vec<ResponseLine> {
+    let mut lignes: Vec<ResponseLine> = Position::ALL
+        .into_iter()
+        .map(|position| ResponseLine::Frame {
+            cible: format!("fan:{}", position.slug()),
+            couleurs: etat.leds_ventilateurs[position.index()].to_vec(),
+        })
+        .collect();
+    for (slot, couleurs) in etat.leds_barrettes.iter().enumerate() {
+        lignes.push(ResponseLine::Frame {
+            cible: format!("slot:{slot}"),
+            couleurs: couleurs.to_vec(),
+        });
+    }
+    lignes.push(ResponseLine::End);
+    lignes
 }
 
 /// Écrit l'éclairage courant sur disque, et répond.
@@ -469,20 +598,61 @@ fn appliquer_couleur(etat: &mut Etat, cible: LightTarget, couleur: Rgb) {
         LightTarget::Ram => etat.barrettes = [couleur; ram::SLOT_COUNT],
         LightTarget::RamSlot(slot) => etat.barrettes[slot] = couleur,
     }
+    // Une couleur de cible efface la peinture de ses LED : c'est ce qui rend
+    // « repose une couleur unie » possible après avoir peint LED par LED.
+    match cible {
+        LightTarget::All => {
+            etat.leds_ventilateurs = [[couleur; LEDS_PER_FAN as usize]; 10];
+            etat.leds_barrettes = [[couleur; ram::LEDS_PER_STICK]; ram::SLOT_COUNT];
+        }
+        LightTarget::Fans => etat.leds_ventilateurs = [[couleur; LEDS_PER_FAN as usize]; 10],
+        LightTarget::Fan(position) => {
+            etat.leds_ventilateurs[position.index()] = [couleur; LEDS_PER_FAN as usize];
+        }
+        LightTarget::Ram => {
+            etat.leds_barrettes = [[couleur; ram::LEDS_PER_STICK]; ram::SLOT_COUNT];
+        }
+        LightTarget::RamSlot(slot) => {
+            etat.leds_barrettes[slot] = [couleur; ram::LEDS_PER_STICK];
+        }
+    }
+}
+
+/// Pose une couleur par LED sur une cible unique.
+///
+/// Le protocole a déjà vérifié le compte contre le matériel ; ce qui arrive ici
+/// tient dans la cible.
+fn peindre(etat: &mut Etat, cible: LightTarget, couleurs: &[Rgb]) {
+    match cible {
+        LightTarget::Fan(position) => {
+            for (place, couleur) in etat.leds_ventilateurs[position.index()]
+                .iter_mut()
+                .zip(couleurs)
+            {
+                *place = *couleur;
+            }
+        }
+        LightTarget::RamSlot(slot) => {
+            for (place, couleur) in etat.leds_barrettes[slot].iter_mut().zip(couleurs) {
+                *place = *couleur;
+            }
+        }
+        // `parse_request` les refuse : une liste de couleurs ne dit pas
+        // laquelle va où sur dix ventilateurs.
+        LightTarget::All | LightTarget::Fans | LightTarget::Ram => {}
+    }
 }
 
 fn ecrire_fixe(peripheriques: &mut Peripheriques, etat: &Etat) {
     for position in Position::ALL {
-        let couleurs = [etat.ventilateurs[position.index()]; LEDS_PER_FAN as usize];
         signaler(
-            peripheriques.peindre_ventilateur(position, &couleurs),
+            peripheriques.peindre_ventilateur(position, &etat.leds_ventilateurs[position.index()]),
             &format!("ventilateur {}", position.name()),
         );
     }
     for slot in SlotAddress::ALL {
-        let couleurs = [etat.barrettes[slot.slot()]; ram::LEDS_PER_STICK];
         signaler(
-            peripheriques.peindre_barrette(slot, &couleurs),
+            peripheriques.peindre_barrette(slot, &etat.leds_barrettes[slot.slot()]),
             &format!("barrette {}", slot.slot()),
         );
     }
