@@ -46,9 +46,9 @@
 
 use std::fmt;
 
-use crate::led::Led;
 use crate::LEDS_PER_FAN;
 use crate::color::Rgb;
+use crate::led::Led;
 use crate::position::Position;
 use crate::ram::{self, SLOT_COUNT};
 
@@ -272,7 +272,91 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
             }
         }
 
-        "zone" => todo!("issue #29"),
+        "zone" => {
+            let [action, reste @ ..] = arguments.as_slice() else {
+                return Err(mauvais(
+                    "attend une action : list, set, drop, light ou anim",
+                ));
+            };
+            match *action {
+                "list" => {
+                    if reste.is_empty() {
+                        Ok(Request::ZoneList)
+                    } else {
+                        Err(mauvais("« zone list » n'attend aucun argument"))
+                    }
+                }
+                "set" => {
+                    let [nom, cibles] = reste else {
+                        return Err(mauvais(
+                            "« zone set » attend un nom et des cibles séparées par des virgules, \
+                             par exemple « zone set devant fan:arriere,slot:0:3 »",
+                        ));
+                    };
+                    let nom = nom_de_zone(nom).map_err(|raison| mauvais(&raison))?;
+                    let mut toutes = Vec::new();
+                    for brut in cibles.split(',') {
+                        toutes.extend(
+                            Led::depuis_slug(brut)
+                                .map_err(|erreur| mauvais(&erreur.to_string()))?,
+                        );
+                    }
+                    if toutes.is_empty() {
+                        return Err(mauvais("une zone sans aucune LED ne se désigne plus"));
+                    }
+                    Ok(Request::ZoneSet {
+                        nom,
+                        cibles: toutes,
+                    })
+                }
+                "drop" => {
+                    let [nom] = reste else {
+                        return Err(mauvais("« zone drop » attend un nom, et lui seul"));
+                    };
+                    Ok(Request::ZoneDrop {
+                        nom: nom_de_zone(nom).map_err(|raison| mauvais(&raison))?,
+                    })
+                }
+                "light" => {
+                    let [nom, couleur] = reste else {
+                        return Err(mauvais("« zone light » attend un nom et une couleur"));
+                    };
+                    Ok(Request::ZoneLight {
+                        nom: nom_de_zone(nom).map_err(|raison| mauvais(&raison))?,
+                        couleur: couleur_stricte(couleur).ok_or_else(|| mauvais(HEXA))?,
+                    })
+                }
+                "anim" => {
+                    let [nom, animation, reglages @ ..] = reste else {
+                        return Err(mauvais(
+                            "« zone anim » attend un nom et une animation, ou « off »",
+                        ));
+                    };
+                    let nom = nom_de_zone(nom).map_err(|raison| mauvais(&raison))?;
+                    if *animation == "off" {
+                        if !reglages.is_empty() {
+                            return Err(mauvais(
+                                "« zone anim <nom> off » n'attend aucun réglage : il n'y a plus \
+                                 d'animation à régler",
+                            ));
+                        }
+                        return Ok(Request::ZoneAnim {
+                            nom,
+                            animation: None,
+                            reglages: Vec::new(),
+                        });
+                    }
+                    Ok(Request::ZoneAnim {
+                        nom,
+                        animation: Some((*animation).to_owned()),
+                        reglages: paires(reglages).map_err(|raison| mauvais(&raison))?,
+                    })
+                }
+                autre => Err(mauvais(&format!(
+                    "action « {autre} » inconnue : list, set, drop, light ou anim"
+                ))),
+            }
+        }
 
         "paint" => {
             let [cible, couleurs] = arguments[..] else {
@@ -410,11 +494,42 @@ pub fn encode_request(request: &Request) -> String {
                 .join(",")
         ),
         Request::Lighting => "lighting".to_owned(),
-        Request::ZoneList
-        | Request::ZoneSet { .. }
-        | Request::ZoneDrop { .. }
-        | Request::ZoneLight { .. }
-        | Request::ZoneAnim { .. } => todo!("issue #29"),
+        Request::ZoneList => "zone list".to_owned(),
+        Request::ZoneSet { nom, cibles } => format!(
+            "zone set {} {}",
+            sur_une_ligne(nom),
+            cibles
+                .iter()
+                .map(|cible| cible.slug())
+                .collect::<Vec<String>>()
+                .join(",")
+        ),
+        Request::ZoneDrop { nom } => format!("zone drop {}", sur_une_ligne(nom)),
+        Request::ZoneLight { nom, couleur } => {
+            format!("zone light {} {}", sur_une_ligne(nom), hexa(*couleur))
+        }
+        Request::ZoneAnim {
+            nom,
+            animation,
+            reglages,
+        } => match animation {
+            None => format!("zone anim {} off", sur_une_ligne(nom)),
+            Some(animation) => {
+                let mut ligne = format!(
+                    "zone anim {} {}",
+                    sur_une_ligne(nom),
+                    sur_une_ligne(animation)
+                );
+                for (cle, valeur) in reglages {
+                    ligne.push_str(&format!(
+                        " {}={}",
+                        sur_une_ligne(cle),
+                        sur_une_ligne(valeur)
+                    ));
+                }
+                ligne
+            }
+        },
         Request::Watch => "watch".to_owned(),
     }
 }
@@ -688,9 +803,37 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
                 .collect::<Vec<String>>()
                 .join(",")
         ),
-        ResponseLine::Zone { .. }
-        | ResponseLine::ZoneLight { .. }
-        | ResponseLine::ZoneAnim { .. } => todo!("issue #29"),
+        ResponseLine::Zone { nom, cibles } => format!(
+            "zone {} {}",
+            sur_une_ligne(nom),
+            cibles
+                .iter()
+                .map(|cible| cible.slug())
+                .collect::<Vec<String>>()
+                .join(",")
+        ),
+        ResponseLine::ZoneLight { nom, couleur } => {
+            format!("zone-light {} {}", sur_une_ligne(nom), hexa(*couleur))
+        }
+        ResponseLine::ZoneAnim {
+            nom,
+            animation,
+            reglages,
+        } => {
+            let mut ligne = format!(
+                "zone-anim {} {}",
+                sur_une_ligne(nom),
+                sur_une_ligne(animation)
+            );
+            for (cle, valeur) in reglages {
+                ligne.push_str(&format!(
+                    " {}={}",
+                    sur_une_ligne(cle),
+                    sur_une_ligne(valeur)
+                ));
+            }
+            ligne
+        }
         ResponseLine::End => "end".to_owned(),
         ResponseLine::Error { message } => format!("err {}", reste(message)),
     }
@@ -736,6 +879,61 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
     // Les trois lignes de la fenêtre se découpent à part : `anim` porte un
     // nombre libre de réglages, et `frame` une liste dont la longueur dépend de
     // la cible. Les compter dans le `splitn` fixe ci-dessous les tronquerait.
+    if let Some(champs) = line.strip_prefix("zone ") {
+        let [nom, cibles] = champs.split(' ').collect::<Vec<&str>>()[..] else {
+            return Err(illisible(
+                "« zone » attend un nom et des cibles séparées par des virgules",
+            ));
+        };
+        if nom.is_empty() {
+            return Err(illisible("« zone » attend un nom avant ses cibles"));
+        }
+        let mut toutes = Vec::new();
+        for brut in cibles.split(',') {
+            // ⚠️ Une ligne de réponse ne porte que des LED précises : accepter
+            // ici la forme courte « fan:arriere » ferait relire huit LED là où
+            // le démon n'en avait peut-être écrit qu'une.
+            match Led::depuis_slug(brut) {
+                Ok(cibles) if cibles.len() == 1 => toutes.push(cibles[0]),
+                Ok(_) => {
+                    return Err(illisible(
+                        "une ligne « zone » écrit ses cibles LED par LED, jamais par organe",
+                    ));
+                }
+                Err(erreur) => return Err(illisible(&erreur.to_string())),
+            }
+        }
+        return Ok(ResponseLine::Zone {
+            nom: nom.to_owned(),
+            cibles: toutes,
+        });
+    }
+    if let Some(champs) = line.strip_prefix("zone-light ") {
+        let [nom, couleur] = champs.split(' ').collect::<Vec<&str>>()[..] else {
+            return Err(illisible("« zone-light » attend un nom et une couleur"));
+        };
+        if nom.is_empty() {
+            return Err(illisible("« zone-light » attend un nom avant la couleur"));
+        }
+        return Ok(ResponseLine::ZoneLight {
+            nom: nom.to_owned(),
+            couleur: couleur_stricte(couleur).ok_or_else(|| illisible(HEXA))?,
+        });
+    }
+    if let Some(champs) = line.strip_prefix("zone-anim ") {
+        let mots: Vec<&str> = champs.split(' ').collect();
+        let [nom, animation, reglages @ ..] = mots.as_slice() else {
+            return Err(illisible("« zone-anim » attend un nom et une animation"));
+        };
+        if nom.is_empty() || animation.is_empty() {
+            return Err(illisible("« zone-anim » attend un nom et une animation"));
+        }
+        return Ok(ResponseLine::ZoneAnim {
+            nom: (*nom).to_owned(),
+            animation: (*animation).to_owned(),
+            reglages: paires(reglages).map_err(|raison| illisible(&raison))?,
+        });
+    }
     if let Some(champs) = line.strip_prefix("light ") {
         let [cible, couleur] = champs.split(' ').collect::<Vec<&str>>()[..] else {
             return Err(illisible(
@@ -844,6 +1042,67 @@ fn couleur_stricte(brut: &str) -> Option<Rgb> {
     let composante = |debut: usize| u8::from_str_radix(&brut[debut..debut + 2], 16).ok();
     Some(Rgb::new(composante(0)?, composante(2)?, composante(4)?))
 }
+
+/// Un nom de zone : un seul jeton non vide, tel qu'il est écrit.
+///
+/// Un seul jeton, parce que le protocole se découpe aux espaces : `zone drop ma
+/// zone` supprimerait une zone nommée `ma` sans un mot. Et tel qu'il est écrit,
+/// parce que la casse compte partout ailleurs dans ce protocole.
+fn nom_de_zone(brut: &str) -> Result<String, String> {
+    if brut.is_empty() {
+        return Err("un nom de zone ne peut pas être vide".to_owned());
+    }
+    if brut.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "« {brut} » : un nom de zone est un seul mot, sans espace"
+        ));
+    }
+    if brut.len() > NOM_ZONE_MAX {
+        return Err(format!(
+            "nom de {} octets, maximum {NOM_ZONE_MAX}",
+            brut.len()
+        ));
+    }
+    Ok(brut.to_owned())
+}
+
+/// Rend un champ écrivable au milieu d'une ligne, quoi qu'il porte.
+///
+/// [`nom_de_zone`] refuse déjà les blancs à la lecture, mais une `Request` se
+/// construit aussi **dans le processus**, sans passer par l'analyseur. Trois
+/// façons de casser une ligne, fermées ici plutôt que chez chaque appelant :
+///
+/// - un **saut de ligne** couperait la commande en deux, et la seconde moitié
+///   serait lue comme une commande à part entière ;
+/// - une **espace** en ferait deux champs, décalant tous les suivants ;
+/// - un champ **vide** disparaîtrait entre deux espaces, avec le même décalage —
+///   d'où le blanc souligné qui le remplace, plutôt que rien.
+///
+/// Les caractères de contrôle passent par la même porte : un `NUL` au milieu
+/// d'un nom ne coupe rien ici, mais il coupe chez qui lit la ligne ensuite.
+fn sur_une_ligne(brut: &str) -> String {
+    let propre: String = brut
+        .chars()
+        .map(|c| {
+            if c.is_whitespace() || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if propre.is_empty() {
+        "_".to_owned()
+    } else {
+        propre
+    }
+}
+
+/// Longueur maximale d'un nom de zone, en octets.
+///
+/// Assez pour « radiateur-et-plafond », court assez pour qu'une zone couvrant
+/// tout le boîtier tienne dans plusieurs lignes de réponse sans que le nom pèse.
+const NOM_ZONE_MAX: usize = 48;
 
 fn absent_ou<T: std::str::FromStr>(champ: &str) -> Result<Option<T>, String> {
     if champ == ABSENT {

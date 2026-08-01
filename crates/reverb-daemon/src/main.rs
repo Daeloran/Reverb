@@ -10,12 +10,13 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use reverb_anim::{Animation, Geometrie, Image, Orientation, Reglages, Sens};
+use reverb_anim::{Animation, Geometrie, Orientation, Reglages, Sens};
 use reverb_daemon::cadence::{Cadence, Tick};
 use reverb_daemon::peripheriques::{Consigne, Peripheriques};
 use reverb_daemon::persistance::{self, Eclairage};
 use reverb_daemon::serveur::{self, Ordre};
 use reverb_daemon::telemetrie;
+use reverb_daemon::zones::{self, Rendu, Tampon, Zones};
 use reverb_hw::hwmon::Percent;
 use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine};
 use reverb_proto::ram::{self, SlotAddress};
@@ -81,11 +82,23 @@ fn main() -> ExitCode {
         Vec::new()
     });
     eprintln!("sondes de température : {}", sondes.len());
+    let fichier_zones = std::env::args()
+        .nth(4)
+        .map_or_else(|| PathBuf::from(zones::CHEMIN_ZONES), PathBuf::from);
+    let (couches, souci) = zones::charger(&fichier_zones);
+    if let Some(souci) = souci {
+        eprintln!("attention : {souci}");
+    }
+
     let etat = Etat::nouveau(
         eclairage,
         geometrie,
-        fichier_geometrie,
-        fichier_eclairage,
+        Fichiers {
+            geometrie: fichier_geometrie,
+            eclairage: fichier_eclairage,
+            zones: fichier_zones,
+        },
+        couches,
         sondes,
         lancer_le_fil_du_gpu(),
     );
@@ -132,6 +145,17 @@ fn lancer_le_fil_du_gpu() -> CacheGpu {
     cache
 }
 
+/// Les trois fichiers que le démon conserve, et leur nature.
+///
+/// `geometrie.conf` décrit la **machine** — un montage, qu'un administrateur
+/// peut corriger — d'où `/etc`. Les deux autres décrivent l'**état du service**,
+/// écrit par le démon, d'où `/var/lib`.
+struct Fichiers {
+    geometrie: PathBuf,
+    eclairage: PathBuf,
+    zones: PathBuf,
+}
+
 struct Etat {
     ventilateurs: [Rgb; 10],
     barrettes: [Rgb; ram::SLOT_COUNT],
@@ -139,10 +163,8 @@ struct Etat {
     /// Où se trouve physiquement chaque LED, et comment chaque ventilateur est
     /// monté. Réglable par le socket, conservée sur disque.
     geometrie: Geometrie,
-    /// Le fichier qui conserve la géométrie d'un démarrage à l'autre.
-    fichier_geometrie: PathBuf,
-    /// Le fichier qui conserve l'éclairage d'un démarrage à l'autre.
-    fichier_eclairage: PathBuf,
+    /// Les trois fichiers qui conservent l'état d'un démarrage à l'autre.
+    fichiers: Fichiers,
     /// Une couleur fixe a changé et n'a pas encore été écrite.
     a_ecrire: bool,
     /// Les fenêtres abonnées aux images, s'il y en a.
@@ -157,16 +179,19 @@ struct Etat {
     /// garde une couleur par cible (#21) ; une LED peinte à la main revient
     /// donc à la couleur de son ventilateur au redémarrage suivant. Le
     /// dire ici, parce que rien d'autre ne le dira.
-    leds_ventilateurs: [[Rgb; LEDS_PER_FAN as usize]; 10],
-    leds_barrettes: [[Rgb; ram::LEDS_PER_STICK]; ram::SLOT_COUNT],
+    /// L'éclairage fixe, LED par LED. C'est la **couche globale** : ce que les
+    /// zones recouvrent, et ce qui reste là où aucune ne passe.
+    fixe: Tampon,
+    /// Les couches nommées.
+    zones: Zones,
 }
 
 impl Etat {
     fn nouveau(
         eclairage: Eclairage,
         geometrie: Geometrie,
-        fichier_geometrie: PathBuf,
-        fichier_eclairage: PathBuf,
+        fichiers: Fichiers,
+        zones: Zones,
         sondes: Vec<reverb_hw::hwmon::Sonde>,
         gpu: CacheGpu,
     ) -> Etat {
@@ -175,21 +200,51 @@ impl Etat {
             barrettes: eclairage.barrettes,
             animation: eclairage.animation,
             geometrie,
-            fichier_geometrie,
-            fichier_eclairage,
+            fichiers,
             // Écrire l'état au démarrage : c'est ce qui donne un éclairage
             // connu au boot, sans qu'aucune fenêtre soit ouverte.
             a_ecrire: true,
             abonnes: Vec::new(),
             sondes,
             gpu,
-            leds_ventilateurs: eclairage
-                .ventilateurs
-                .map(|couleur| [couleur; LEDS_PER_FAN as usize]),
-            leds_barrettes: eclairage
-                .barrettes
-                .map(|couleur| [couleur; ram::LEDS_PER_STICK]),
+            fixe: Tampon {
+                ventilateurs: eclairage
+                    .ventilateurs
+                    .map(|couleur| [couleur; LEDS_PER_FAN as usize]),
+                barrettes: eclairage
+                    .barrettes
+                    .map(|couleur| [couleur; ram::LEDS_PER_STICK]),
+            },
+            zones,
         }
+    }
+
+    /// Une zone au moins tourne : le boîtier doit être redessiné à la cadence,
+    /// même si la couche globale est fixe.
+    fn zone_animee(&self) -> bool {
+        self.zones
+            .liste()
+            .iter()
+            .any(|zone| matches!(zone.rendu, Rendu::Animee(..)))
+    }
+
+    /// Ce que le boîtier montre à ce pas : la couche globale, puis les zones
+    /// par-dessus.
+    fn tampon(&self, pas: u32) -> Tampon {
+        let mut tampon = match self.animation {
+            Some((animation, reglages)) => {
+                let image = animation.image(&self.geometrie, &reglages, pas);
+                let mut tampon = Tampon::noir();
+                for (position, couleurs) in &image.ventilateurs {
+                    tampon.ventilateurs[position.index()] = *couleurs;
+                }
+                tampon.barrettes = image.barrettes;
+                tampon
+            }
+            None => self.fixe.clone(),
+        };
+        self.zones.composer(&self.geometrie, pas, &mut tampon);
+        tampon
     }
 
     /// L'état à conserver sur disque.
@@ -218,8 +273,11 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat:
         // Sans ce recalage, la première image d'une animation lancée dix
         // secondes après le démarrage compterait trois cents échéances
         // manquées — un décrochage annoncé qui n'a jamais eu lieu.
-        if etat.animation.is_some() != animait {
-            animait = etat.animation.is_some();
+        // Une zone animée suffit à faire tourner la boucle : la couche globale
+        // peut être fixe pendant que la colonne du radiateur couve.
+        let anime = etat.animation.is_some() || etat.zone_animee();
+        if anime != animait {
+            animait = anime;
             if animait {
                 cadence = Cadence::new(IMAGES_PAR_SECONDE);
                 depart = Instant::now();
@@ -227,15 +285,15 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat:
             }
         }
 
-        let attente = if let Some((animation, reglages)) = etat.animation {
+        let attente = if anime {
             match cadence.tick(depart.elapsed()) {
                 Tick::Produire { sautees } => {
-                    let image = animation.image(&etat.geometrie, &reglages, pas);
+                    let tampon = etat.tampon(pas);
                     let debut = Instant::now();
-                    ecrire_image(peripheriques, &image);
+                    ecrire_tampon(peripheriques, &tampon);
                     compte.image(debut.elapsed(), sautees);
                     if !etat.abonnes.is_empty() {
-                        let lignes = lignes_image(&image);
+                        let lignes = lignes_tampon(&tampon);
                         serveur::diffuser(&mut etat.abonnes, &lignes);
                     }
                     pas = pas.wrapping_add(1);
@@ -246,10 +304,11 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat:
         } else {
             compte.repos();
             if etat.a_ecrire {
-                ecrire_fixe(peripheriques, &etat);
+                let tampon = etat.tampon(pas);
+                ecrire_tampon(peripheriques, &tampon);
                 etat.a_ecrire = false;
                 if !etat.abonnes.is_empty() {
-                    let lignes = lignes_fixe(&etat);
+                    let lignes = lignes_tampon(&tampon);
                     serveur::diffuser(&mut etat.abonnes, &lignes);
                 }
             }
@@ -338,11 +397,53 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
         abonnement,
     } = ordre;
     let lignes = match requete {
-        Request::ZoneList
-        | Request::ZoneSet { .. }
-        | Request::ZoneDrop { .. }
-        | Request::ZoneLight { .. }
-        | Request::ZoneAnim { .. } => todo!("issue #29"),
+        Request::ZoneList => lignes_zones(etat),
+
+        Request::ZoneSet { nom, cibles } => {
+            etat.zones.poser(&nom, &cibles);
+            etat.a_ecrire = true;
+            conserver_zones(etat)
+        }
+        Request::ZoneDrop { nom } => {
+            if etat.zones.retirer(&nom) {
+                etat.a_ecrire = true;
+                conserver_zones(etat)
+            } else {
+                vec![zone_inconnue(&nom)]
+            }
+        }
+        Request::ZoneLight { nom, couleur } => {
+            if etat.zones.eclairer(&nom, couleur) {
+                etat.a_ecrire = true;
+                conserver_zones(etat)
+            } else {
+                vec![zone_inconnue(&nom)]
+            }
+        }
+        Request::ZoneAnim {
+            nom,
+            animation,
+            reglages,
+        } => {
+            // Le refus d'une animation inconnue passe avant tout : la zone ne
+            // doit pas perdre le rendu qu'elle avait parce qu'on a mal tapé le
+            // nom de celui qu'on voulait.
+            let rendu = match animation {
+                None => Ok(None),
+                Some(anime) => lancer(&anime, &reglages).map(Some),
+            };
+            match rendu {
+                Err(message) => vec![ResponseLine::Error { message }],
+                Ok(rendu) => {
+                    if etat.zones.animer(&nom, rendu) {
+                        etat.a_ecrire = true;
+                        conserver_zones(etat)
+                    } else {
+                        vec![zone_inconnue(&nom)]
+                    }
+                }
+            }
+        }
         Request::Status => {
             let mut lignes = telemetrie::releve(
                 peripheriques.canaux(),
@@ -398,7 +499,7 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
                 // boîtier en couleur fixe resterait vide jusqu'à la prochaine
                 // commande. Sous animation, la suivante arrive dans 50 ms.
                 if etat.animation.is_none() {
-                    let _ = canal.try_send(lignes_fixe(etat));
+                    let _ = canal.try_send(lignes_tampon(&etat.tampon(0)));
                 }
                 etat.abonnes.push(canal);
             }
@@ -462,17 +563,20 @@ fn etat_eclairage(etat: &Etat) -> Vec<ResponseLine> {
     lignes
 }
 
-/// Une image d'animation, telle qu'un abonné la reçoit.
-fn lignes_image(image: &Image) -> Vec<ResponseLine> {
-    let mut lignes: Vec<ResponseLine> = image
-        .ventilateurs
-        .iter()
-        .map(|(position, couleurs)| ResponseLine::Frame {
+/// Ce que le boîtier montre, sous la forme qu'un abonné attend.
+///
+/// Un abonné ne connaît qu'un seul format : les couleurs du moment. Qu'elles
+/// viennent d'une animation, d'une couleur posée à la main ou d'une zone ne le
+/// regarde pas.
+fn lignes_tampon(tampon: &Tampon) -> Vec<ResponseLine> {
+    let mut lignes: Vec<ResponseLine> = Position::ALL
+        .into_iter()
+        .map(|position| ResponseLine::Frame {
             cible: format!("fan:{}", position.slug()),
-            couleurs: couleurs.to_vec(),
+            couleurs: tampon.ventilateurs[position.index()].to_vec(),
         })
         .collect();
-    for (slot, couleurs) in image.barrettes.iter().enumerate() {
+    for (slot, couleurs) in tampon.barrettes.iter().enumerate() {
         lignes.push(ResponseLine::Frame {
             cible: format!("slot:{slot}"),
             couleurs: couleurs.to_vec(),
@@ -482,27 +586,43 @@ fn lignes_image(image: &Image) -> Vec<ResponseLine> {
     lignes
 }
 
-/// L'éclairage fixe, sous la même forme qu'une image.
+/// Les zones, telles que `zone list` les rend.
 ///
-/// Un abonné ne connaît qu'un seul format : ce que le boîtier montre. Qu'il
-/// vienne d'une animation ou d'une couleur posée à la main ne le regarde pas.
-fn lignes_fixe(etat: &Etat) -> Vec<ResponseLine> {
-    let mut lignes: Vec<ResponseLine> = Position::ALL
-        .into_iter()
-        .map(|position| ResponseLine::Frame {
-            cible: format!("fan:{}", position.slug()),
-            couleurs: etat.leds_ventilateurs[position.index()].to_vec(),
-        })
-        .collect();
-    for (slot, couleurs) in etat.leds_barrettes.iter().enumerate() {
-        lignes.push(ResponseLine::Frame {
-            cible: format!("slot:{slot}"),
-            couleurs: couleurs.to_vec(),
-        });
+/// ⚠️ Les cibles d'une zone sont réparties sur **plusieurs lignes** quand il le
+/// faut : une zone couvrant les cent vingt-quatre LED pèse près de deux mille
+/// octets, contre `MAX_LINE_LEN = 1024`. Le client accumule par nom.
+fn lignes_zones(etat: &Etat) -> Vec<ResponseLine> {
+    let mut lignes = Vec::new();
+    for zone in etat.zones.liste() {
+        for paquet in zone.cibles.chunks(CIBLES_PAR_LIGNE) {
+            lignes.push(ResponseLine::Zone {
+                nom: zone.nom.clone(),
+                cibles: paquet.to_vec(),
+            });
+        }
+        match &zone.rendu {
+            Rendu::Transparente => {}
+            Rendu::Fixe(couleur) => lignes.push(ResponseLine::ZoneLight {
+                nom: zone.nom.clone(),
+                couleur: *couleur,
+            }),
+            Rendu::Animee(animation, reglages) => lignes.push(ResponseLine::ZoneAnim {
+                nom: zone.nom.clone(),
+                animation: animation.nom().to_owned(),
+                reglages: animation.reglages_ecrits(reglages),
+            }),
+        }
     }
     lignes.push(ResponseLine::End);
     lignes
 }
+
+/// Combien de cibles tiennent sur une ligne `zone`.
+///
+/// La plus longue cible fait vingt-quatre octets (`fan:radiateur-milieu:7`), le
+/// nom au plus quarante-huit : quarante cibles laissent une marge confortable
+/// sous les 1024 octets que le protocole s'impose.
+const CIBLES_PAR_LIGNE: usize = 40;
 
 /// Écrit l'éclairage courant sur disque, et répond.
 ///
@@ -516,12 +636,38 @@ fn lignes_fixe(etat: &Etat) -> Vec<ResponseLine> {
 /// appliquée, mais elle ne survivra pas au redémarrage, et c'est exactement la
 /// panne que cette issue corrige.
 fn conserver(etat: &Etat) -> Vec<ResponseLine> {
-    match persistance::enregistrer_eclairage(&etat.fichier_eclairage, &etat.eclairage()) {
+    match persistance::enregistrer_eclairage(&etat.fichiers.eclairage, &etat.eclairage()) {
         Ok(()) => vec![ResponseLine::End],
         Err(erreur) => vec![ResponseLine::Error {
             message: format!(
                 "éclairage appliqué mais non conservé : {} ({erreur})",
-                etat.fichier_eclairage.display()
+                etat.fichiers.eclairage.display()
+            ),
+        }],
+    }
+}
+
+/// Le refus d'une zone qu'on n'a jamais créée.
+///
+/// Nommer la zone plutôt que dire « inconnue » : sur un fichier qui en porte
+/// plusieurs, la faute de frappe se voit tout de suite.
+fn zone_inconnue(nom: &str) -> ResponseLine {
+    ResponseLine::Error {
+        message: format!("zone « {nom} » inconnue — « zone list » les donne toutes"),
+    }
+}
+
+/// Écrit les zones sur disque, et répond.
+///
+/// Même règle que pour l'éclairage : à **chaque** changement, et un échec est
+/// dit au client plutôt qu'avalé.
+fn conserver_zones(etat: &Etat) -> Vec<ResponseLine> {
+    match zones::enregistrer(&etat.fichiers.zones, &etat.zones) {
+        Ok(()) => vec![ResponseLine::End],
+        Err(erreur) => vec![ResponseLine::Error {
+            message: format!(
+                "zone appliquée mais non conservée : {} ({erreur})",
+                etat.fichiers.zones.display()
             ),
         }],
     }
@@ -621,13 +767,13 @@ fn geometrie(
     etat.geometrie.definir(position, orientation);
 
     if let Err(erreur) =
-        persistance::enregistrer_geometrie(&etat.fichier_geometrie, &etat.geometrie)
+        persistance::enregistrer_geometrie(&etat.fichiers.geometrie, &etat.geometrie)
     {
         // L'orientation est appliquée en mémoire mais ne survivra pas : le dire
         // plutôt que de laisser croire à un réglage acquis.
         return echec(format!(
             "orientation appliquée mais non conservée : {} ({erreur})",
-            etat.fichier_geometrie.display()
+            etat.fichiers.geometrie.display()
         ));
     }
     vec![ResponseLine::End]
@@ -657,18 +803,18 @@ fn appliquer_couleur(etat: &mut Etat, cible: LightTarget, couleur: Rgb) {
     // « repose une couleur unie » possible après avoir peint LED par LED.
     match cible {
         LightTarget::All => {
-            etat.leds_ventilateurs = [[couleur; LEDS_PER_FAN as usize]; 10];
-            etat.leds_barrettes = [[couleur; ram::LEDS_PER_STICK]; ram::SLOT_COUNT];
+            etat.fixe.ventilateurs = [[couleur; LEDS_PER_FAN as usize]; 10];
+            etat.fixe.barrettes = [[couleur; ram::LEDS_PER_STICK]; ram::SLOT_COUNT];
         }
-        LightTarget::Fans => etat.leds_ventilateurs = [[couleur; LEDS_PER_FAN as usize]; 10],
+        LightTarget::Fans => etat.fixe.ventilateurs = [[couleur; LEDS_PER_FAN as usize]; 10],
         LightTarget::Fan(position) => {
-            etat.leds_ventilateurs[position.index()] = [couleur; LEDS_PER_FAN as usize];
+            etat.fixe.ventilateurs[position.index()] = [couleur; LEDS_PER_FAN as usize];
         }
         LightTarget::Ram => {
-            etat.leds_barrettes = [[couleur; ram::LEDS_PER_STICK]; ram::SLOT_COUNT];
+            etat.fixe.barrettes = [[couleur; ram::LEDS_PER_STICK]; ram::SLOT_COUNT];
         }
         LightTarget::RamSlot(slot) => {
-            etat.leds_barrettes[slot] = [couleur; ram::LEDS_PER_STICK];
+            etat.fixe.barrettes[slot] = [couleur; ram::LEDS_PER_STICK];
         }
     }
 }
@@ -680,7 +826,7 @@ fn appliquer_couleur(etat: &mut Etat, cible: LightTarget, couleur: Rgb) {
 fn peindre(etat: &mut Etat, cible: LightTarget, couleurs: &[Rgb]) {
     match cible {
         LightTarget::Fan(position) => {
-            for (place, couleur) in etat.leds_ventilateurs[position.index()]
+            for (place, couleur) in etat.fixe.ventilateurs[position.index()]
                 .iter_mut()
                 .zip(couleurs)
             {
@@ -688,7 +834,7 @@ fn peindre(etat: &mut Etat, cible: LightTarget, couleurs: &[Rgb]) {
             }
         }
         LightTarget::RamSlot(slot) => {
-            for (place, couleur) in etat.leds_barrettes[slot].iter_mut().zip(couleurs) {
+            for (place, couleur) in etat.fixe.barrettes[slot].iter_mut().zip(couleurs) {
                 *place = *couleur;
             }
         }
@@ -698,31 +844,16 @@ fn peindre(etat: &mut Etat, cible: LightTarget, couleurs: &[Rgb]) {
     }
 }
 
-fn ecrire_fixe(peripheriques: &mut Peripheriques, etat: &Etat) {
+fn ecrire_tampon(peripheriques: &mut Peripheriques, tampon: &Tampon) {
     for position in Position::ALL {
         signaler(
-            peripheriques.peindre_ventilateur(position, &etat.leds_ventilateurs[position.index()]),
+            peripheriques.peindre_ventilateur(position, &tampon.ventilateurs[position.index()]),
             &format!("ventilateur {}", position.name()),
         );
     }
     for slot in SlotAddress::ALL {
         signaler(
-            peripheriques.peindre_barrette(slot, &etat.leds_barrettes[slot.slot()]),
-            &format!("barrette {}", slot.slot()),
-        );
-    }
-}
-
-fn ecrire_image(peripheriques: &mut Peripheriques, image: &Image) {
-    for (position, couleurs) in &image.ventilateurs {
-        signaler(
-            peripheriques.peindre_ventilateur(*position, couleurs),
-            &format!("ventilateur {}", position.name()),
-        );
-    }
-    for (slot, couleurs) in SlotAddress::ALL.into_iter().zip(&image.barrettes) {
-        signaler(
-            peripheriques.peindre_barrette(slot, couleurs),
+            peripheriques.peindre_barrette(slot, &tampon.barrettes[slot.slot()]),
             &format!("barrette {}", slot.slot()),
         );
     }

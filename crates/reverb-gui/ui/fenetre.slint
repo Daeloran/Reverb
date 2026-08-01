@@ -39,6 +39,15 @@ export struct LigneTemperature {
     lisible: bool,
 }
 
+export struct LigneZone {
+    nom: string,
+    // Ce qu'elle affiche, en clair : « transparente », « #ff0000 », « braise ».
+    rendu: string,
+    // Combien de LED elle tient.
+    combien: int,
+    visee: bool,
+}
+
 export struct FamilleAnimation {
     nom: string,
     effet: string,
@@ -122,6 +131,8 @@ export component Fenetre inherits Window {
     in property <[LigneVentilateur]> ventilateurs;
     in property <[LigneTemperature]> temperatures;
     in property <[FamilleAnimation]> familles;
+    in property <[LigneZone]> zones;
+    in-out property <string> nouvelle-zone;
     in property <string> cible: "tout le boîtier";
     in property <string> titre-maquette: "LE BOÎTIER";
     in property <bool> detail-led: true;
@@ -153,6 +164,9 @@ export component Fenetre inherits Window {
     callback saturation-changee(float);
     callback luminosite-changee(float);
     callback choisir-cible(string);
+    callback creer-zone(string);
+    callback viser-zone(string);
+    callback supprimer-zone(string);
     callback appliquer-couleur();
     callback lancer-animation(string);
     // Un réglage a bougé pendant que l'animation tourne. Sans ce rappel, le
@@ -398,6 +412,67 @@ export component Fenetre inherits Window {
                         spacing: 14px;
 
                         // Cible
+                        // Les zones. En tête du panneau : quand une zone est
+                        // visée, la couleur et les animations lui vont, et il
+                        // faut le voir avant de cliquer.
+                        VerticalLayout {
+                            spacing: 5px;
+                            Titre { text: "ZONES"; }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                LineEdit {
+                                    text <=> root.nouvelle-zone;
+                                    placeholder-text: "nom de la zone";
+                                    accepted => { root.creer-zone(self.text); }
+                                }
+                                Button {
+                                    text: "de la sélection";
+                                    clicked => { root.creer-zone(root.nouvelle-zone); }
+                                }
+                            }
+                            for couche in root.zones: HorizontalLayout {
+                                spacing: 5px;
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                    height: 26px;
+                                    border-radius: 6px;
+                                    background: couche.visee ? #2a3352 : #191920;
+                                    border-width: 1px;
+                                    border-color: couche.visee ? #4d7cff : #24242e;
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 8px;
+                                        spacing: 6px;
+                                        Text {
+                                            text: couche.nom;
+                                            font-size: 12px;
+                                            color: #e6e6ef;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: couche.rendu + " · " + couche.combien + " LED";
+                                            font-size: 10px;
+                                            color: #8a8c9b;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    TouchArea { clicked => { root.viser-zone(couche.nom); } }
+                                }
+                                Button {
+                                    text: "×";
+                                    clicked => { root.supprimer-zone(couche.nom); }
+                                }
+                            }
+                            if root.zones.length == 0: Text {
+                                text: "Aucune zone. Sélectionne des LED sur la maquette, nomme-la, et elle prendra sa propre couleur ou sa propre animation sans toucher au reste.";
+                                font-size: 11px;
+                                color: #6f7180;
+                                wrap: word-wrap;
+                            }
+                        }
+
                         VerticalLayout {
                             spacing: 6px;
                             Titre { text: "CIBLE"; }

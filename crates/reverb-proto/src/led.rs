@@ -107,12 +107,26 @@ impl std::error::Error for LedInconnue {}
 impl Led {
     /// Toutes les LED du boîtier, dans l'ordre du matériel.
     pub fn toutes() -> Vec<Led> {
-        todo!("issue #29")
+        let mut toutes = Vec::with_capacity(124);
+        for position in Position::ALL {
+            for led in 0..LEDS_PER_FAN as usize {
+                toutes.push(Led::Ventilateur { position, led });
+            }
+        }
+        for slot in 0..crate::ram::SLOT_COUNT {
+            for led in 0..crate::ram::LEDS_PER_STICK {
+                toutes.push(Led::Barrette { slot, led });
+            }
+        }
+        toutes
     }
 
     /// Comment cette LED s'écrit sur le socket et dans les fichiers.
     pub fn slug(self) -> String {
-        todo!("issue #29")
+        match self {
+            Led::Ventilateur { position, led } => format!("fan:{}:{led}", position.slug()),
+            Led::Barrette { slot, led } => format!("slot:{slot}:{led}"),
+        }
     }
 
     /// L'inverse de [`Led::slug`], strict.
@@ -120,7 +134,59 @@ impl Led {
     /// Accepte aussi un **organe entier** — `fan:arriere`, `slot:0` — auquel cas
     /// toutes ses LED sont rendues : c'est la forme courte qu'on écrit à la
     /// main, et celle qui rend `zone set maZone fan:arriere` lisible.
-    pub fn depuis_slug(_brut: &str) -> Result<Vec<Led>, LedInconnue> {
-        todo!("issue #29")
+    pub fn depuis_slug(brut: &str) -> Result<Vec<Led>, LedInconnue> {
+        let refus = |raison: String| LedInconnue {
+            donne: brut.to_owned(),
+            raison,
+        };
+        let morceaux: Vec<&str> = brut.split(':').collect();
+        match morceaux.as_slice() {
+            ["fan", position] => {
+                let position =
+                    Position::from_slug(position).map_err(|erreur| refus(erreur.to_string()))?;
+                Ok((0..LEDS_PER_FAN as usize)
+                    .map(|led| Led::Ventilateur { position, led })
+                    .collect())
+            }
+            ["fan", position, rang] => {
+                let position =
+                    Position::from_slug(position).map_err(|erreur| refus(erreur.to_string()))?;
+                let led =
+                    rang_borne(rang, LEDS_PER_FAN as usize, "LED de ventilateur").map_err(refus)?;
+                Ok(vec![Led::Ventilateur { position, led }])
+            }
+            ["slot", numero] => {
+                let slot = rang_borne(numero, crate::ram::SLOT_COUNT, "barrette").map_err(refus)?;
+                Ok((0..crate::ram::LEDS_PER_STICK)
+                    .map(|led| Led::Barrette { slot, led })
+                    .collect())
+            }
+            ["slot", numero, rang] => {
+                let slot = rang_borne(numero, crate::ram::SLOT_COUNT, "barrette").map_err(refus)?;
+                let led = rang_borne(rang, crate::ram::LEDS_PER_STICK, "LED de barrette")
+                    .map_err(refus)?;
+                Ok(vec![Led::Barrette { slot, led }])
+            }
+            _ => Err(refus(
+                "attendu « fan:<position>[:<0-7>] » ou « slot:<0-3>[:<0-10>] »".to_owned(),
+            )),
+        }
     }
+}
+
+/// Un rang décimal strictement inférieur à `combien`.
+///
+/// Refuse en **nommant la borne** : « 8 » sur un anneau de huit LED est l'erreur
+/// de celui qui compte à partir de un, et le message doit le lui dire.
+fn rang_borne(brut: &str, combien: usize, quoi: &str) -> Result<usize, String> {
+    let rang: usize = brut
+        .parse()
+        .map_err(|_| format!("« {brut} » n'est pas un rang de {quoi}"))?;
+    if rang >= combien {
+        return Err(format!(
+            "rang {rang} hors bornes : une {quoi} va de 0 à {}",
+            combien - 1
+        ));
+    }
+    Ok(rang)
 }
