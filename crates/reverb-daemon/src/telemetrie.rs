@@ -9,11 +9,20 @@
 use std::fs;
 use std::path::Path;
 
-use reverb_hw::hwmon::{FanChannel, Percent};
+use reverb_hw::hwmon::{FanChannel, Percent, Sonde};
 use reverb_proto::ipc::ResponseLine;
 
-/// Relève l'état de tous les canaux.
-pub fn releve(canaux: &[FanChannel]) -> Vec<ResponseLine> {
+/// Relève l'état de tous les canaux et de toutes les sondes.
+///
+/// ⚠️ **Toutes les sondes de la machine**, et non seulement celles voisines d'un
+/// canal de ventilateur. La fenêtre ne montrait jusqu'ici que le coolant du
+/// Kraken, alors que SHYNAEL en expose quinze : le CPU, cinq NVMe, les quatre
+/// barrettes de RAM, le GPU intégré, le wifi et la carte réseau.
+pub fn releve(
+    canaux: &[FanChannel],
+    sondes: &[Sonde],
+    gpu: Option<(String, i32)>,
+) -> Vec<ResponseLine> {
     let mut lignes = Vec::new();
 
     for canal in canaux {
@@ -52,61 +61,33 @@ pub fn releve(canaux: &[FanChannel]) -> Vec<ResponseLine> {
         });
     }
 
-    for (nom, chemin) in capteurs(canaux) {
-        match entier::<i32>(&chemin) {
-            Some(millidegres) => lignes.push(ResponseLine::Temp {
-                sensor: nom,
+    for sonde in sondes {
+        match sonde.lire() {
+            Ok(millidegres) => lignes.push(ResponseLine::Temp {
+                sensor: sonde.slug.clone(),
                 millidegrees: millidegres,
             }),
-            None => lignes.push(ResponseLine::Unreadable {
-                subject: nom,
-                reason: format!("{} illisible", chemin.display()),
+            // Le fichier a disparu — un périphérique débranché. Le dire, plutôt
+            // que d'omettre la sonde et de laisser croire qu'elle n'a jamais
+            // existé.
+            Err(erreur) => lignes.push(ResponseLine::Unreadable {
+                subject: sonde.slug.clone(),
+                reason: erreur.to_string(),
             }),
         }
+    }
+
+    // Le GPU discret arrive déjà lu : le pilote propriétaire n'enregistre aucun
+    // `hwmon`, et `nvidia-smi` coûte 16 ms — un tiers d'image de rendu, donc
+    // jamais dans cette boucle.
+    if let Some((nom, millidegres)) = gpu {
+        lignes.push(ResponseLine::Temp {
+            sensor: format!("nvidia:{nom}"),
+            millidegrees: millidegres,
+        });
     }
 
     lignes
-}
-
-/// Les capteurs de température, voisins des canaux dans le même `hwmon`.
-///
-/// Le nom porte la source, comme les canaux : deux pilotes nomment volontiers
-/// leur capteur `temp1`, et un nom ambigu vaut moins que pas de nom du tout.
-fn capteurs(canaux: &[FanChannel]) -> Vec<(String, std::path::PathBuf)> {
-    let mut trouves: Vec<(String, std::path::PathBuf)> = Vec::new();
-
-    for canal in canaux {
-        let Some(dossier) = canal.pwm.parent() else {
-            continue;
-        };
-        let Ok(entrees) = fs::read_dir(dossier) else {
-            continue;
-        };
-        for entree in entrees.flatten() {
-            let fichier = entree.file_name();
-            let Some(fichier) = fichier.to_str() else {
-                continue;
-            };
-            let Some(numero) = fichier
-                .strip_prefix("temp")
-                .and_then(|reste| reste.strip_suffix("_input"))
-            else {
-                continue;
-            };
-
-            let libelle = lire(&dossier.join(format!("temp{numero}_label")))
-                .map(|brut| reverb_hw::hwmon::slug(brut.trim()))
-                .unwrap_or_else(|| format!("temp{numero}"));
-            let nom = format!("{}:{libelle}", canal.source);
-
-            if !trouves.iter().any(|(deja, _)| deja == &nom) {
-                trouves.push((nom, entree.path()));
-            }
-        }
-    }
-
-    trouves.sort_by(|a, b| a.0.cmp(&b.0));
-    trouves
 }
 
 fn lire(chemin: &Path) -> Option<String> {

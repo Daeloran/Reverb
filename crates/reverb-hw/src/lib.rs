@@ -17,6 +17,7 @@
 //! crate qui prennent un chemin plutôt qu'un descripteur ouvert sont là pour
 //! la ligne de commande, qui écrit une fois puis rend la main.
 
+pub mod gpu;
 pub mod hidraw;
 pub mod hwmon;
 pub mod i2c;

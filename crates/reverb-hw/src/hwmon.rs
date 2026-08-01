@@ -8,6 +8,7 @@
 //! Écrire la même chose en HID brut donnerait **deux écrivains** sur le même
 //! registre, chacun réémettant sa consigne périodiquement.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -558,4 +559,174 @@ mod tests {
         assert_eq!(canal.name, "nzxtsmart2:fan2");
         assert_eq!(canal.tach, None, "aucun fichier n'existe sous ce chemin");
     }
+}
+
+/// Une sonde de température de la machine.
+///
+/// Toutes les sondes, pas seulement celles qui portent un ventilateur de
+/// Reverb : le CPU, les NVMe, le chipset, les barrettes de RAM et la carte
+/// réseau en ont, et ce sont elles que l'utilisateur regarde.
+///
+/// ⚠️ **Lecture seule, et par `sysfs` uniquement.** Aucune sonde ne s'interroge
+/// sur un bus I²C : un scan en lecture seule a déjà altéré l'éclairage par
+/// défaut de la RAM sur cette machine. Les sondes `spd5118` des barrettes se
+/// lisent ici par le pilote du noyau, qui détient le bus — pas un octet n'est
+/// émis par Reverb.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sonde {
+    /// Identifiant stable : `<nom du hwmon>:<libellé>`.
+    ///
+    /// Le nom porte la source parce que deux pilotes nomment volontiers leur
+    /// capteur `temp1`, et qu'un nom ambigu vaut moins que pas de nom du tout.
+    pub slug: String,
+    /// Ce qu'on affiche : le libellé du noyau, ou `tempN` à défaut.
+    pub libelle: String,
+    /// D'où elle vient : le nom du `hwmon`.
+    pub origine: String,
+    /// Le fichier à relire à chaque tour.
+    pub chemin: PathBuf,
+}
+
+impl Sonde {
+    /// La température du moment, en millidegrés.
+    ///
+    /// `Err` quand le fichier a disparu — un périphérique débranché — ce qui
+    /// doit se dire plutôt que de figer la dernière valeur lue.
+    pub fn lire(&self) -> io::Result<i32> {
+        let brut = fs::read_to_string(&self.chemin)?;
+        // ⚠️ Jamais zéro en repli. Zéro est une température plausible : un repli
+        // silencieux se lirait comme une chute, pas comme une panne.
+        brut.trim().parse::<i32>().map_err(|erreur| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("« {} » : {erreur}", self.chemin.display()),
+            )
+        })
+    }
+}
+
+/// Toutes les sondes d'une arborescence `sys/class/hwmon`.
+///
+/// Triées par `slug`, sans doublon. Un `hwmon` sans sonde de température ne
+/// produit rien et n'est pas une erreur ; un fichier illisible n'empêche pas les
+/// autres d'être rendus.
+pub fn sondes_dans(sys_class: &Path) -> io::Result<Vec<Sonde>> {
+    let mut brutes = Vec::new();
+    for entree in fs::read_dir(sys_class)? {
+        let Ok(entree) = entree else {
+            continue;
+        };
+        // Le chemin est suivi, pas inspecté : dans un vrai `sysfs`, chaque
+        // `hwmonN` est lui-même un lien symbolique. Filtrer sur `file_type()`
+        // ne rendrait aucune sonde sur la machine.
+        let dossier = entree.path();
+        let Some(origine) = texte(&dossier.join("name")) else {
+            continue;
+        };
+        let Ok(fichiers) = fs::read_dir(&dossier) else {
+            continue;
+        };
+        for fichier in fichiers.flatten() {
+            let nom = fichier.file_name();
+            let Some(rang) = nom.to_str().and_then(rang_de_sonde) else {
+                continue;
+            };
+            let libelle = texte(&dossier.join(format!("temp{rang}_label")))
+                .unwrap_or_else(|| format!("temp{rang}"));
+            brutes.push(Brute {
+                origine: origine.clone(),
+                // Ce qui départage deux `hwmon` homonymes. L'adresse du
+                // périphérique d'abord — `8-0050` pour une barrette — parce
+                // qu'elle survit au redémarrage ; le nom du répertoire à
+                // défaut, faute de mieux.
+                adresse: adresse(&dossier)
+                    .or_else(|| nom_de_dossier(&dossier))
+                    .unwrap_or_default(),
+                libelle,
+                chemin: fichier.path(),
+            });
+        }
+    }
+
+    // Un `slug` porte l'adresse **seulement** quand elle est nécessaire : les
+    // numéros de `hwmon` changent au redémarrage, et un identifiant qui les
+    // porte sans raison n'est pas stable.
+    let mut compte: HashMap<String, usize> = HashMap::new();
+    for brute in &brutes {
+        *compte.entry(brute.court()).or_default() += 1;
+    }
+    let mut sondes: Vec<Sonde> = brutes
+        .iter()
+        .map(|brute| Sonde {
+            slug: if compte.get(&brute.court()) == Some(&1) {
+                brute.court()
+            } else {
+                format!(
+                    "{}:{}:{}",
+                    brute.origine,
+                    brute.adresse,
+                    slug(&brute.libelle)
+                )
+            },
+            libelle: brute.libelle.clone(),
+            origine: brute.origine.clone(),
+            chemin: brute.chemin.clone(),
+        })
+        .collect();
+    // Trié par `slug` et non par ses morceaux : c'est le `slug` qui nomme la
+    // sonde partout ailleurs, et une liste triée autrement se lirait de travers.
+    sondes.sort_by(|a, b| a.slug.cmp(&b.slug));
+    Ok(sondes)
+}
+
+/// Une sonde avant que son identifiant ne soit tranché.
+struct Brute {
+    origine: String,
+    adresse: String,
+    libelle: String,
+    chemin: PathBuf,
+}
+
+impl Brute {
+    /// L'identifiant tant qu'aucun homonyme ne le dispute.
+    ///
+    /// ⚠️ L'origine est gardée **telle quelle** — `mt7921_phy0`, pas
+    /// `mt7921-phy0` — comme le fait déjà le nom d'un canal de ventilateur. Seul
+    /// le libellé est mis en forme, parce que lui vient d'un humain : « Coolant
+    /// temp » devient `coolant-temp`.
+    fn court(&self) -> String {
+        format!("{}:{}", self.origine, slug(&self.libelle))
+    }
+}
+
+/// Le rang d'un `tempN_input`, et rien d'autre.
+///
+/// `temp1_crit`, `temp1_max` et `temperature_input` sont des voisins de nom qui
+/// ne sont pas des sondes ; les prendre pour telles ferait apparaître des
+/// courbes de seuils constants.
+fn rang_de_sonde(fichier: &str) -> Option<&str> {
+    let rang = fichier.strip_prefix("temp")?.strip_suffix("_input")?;
+    (!rang.is_empty() && rang.bytes().all(|octet| octet.is_ascii_digit())).then_some(rang)
+}
+
+/// Le contenu d'un attribut `sysfs`, ébarbé, `None` s'il est absent ou vide.
+fn texte(chemin: &Path) -> Option<String> {
+    let brut = fs::read_to_string(chemin).ok()?;
+    let propre = brut.trim();
+    (!propre.is_empty()).then(|| propre.to_owned())
+}
+
+/// L'adresse du périphérique derrière un `hwmon` — `8-0050` pour une barrette.
+fn adresse(dossier: &Path) -> Option<String> {
+    let cible = fs::read_link(dossier.join("device")).ok()?;
+    Some(cible.file_name()?.to_str()?.to_owned())
+}
+
+fn nom_de_dossier(dossier: &Path) -> Option<String> {
+    Some(dossier.file_name()?.to_str()?.to_owned())
+}
+
+/// Les sondes de la machine.
+pub fn sondes() -> io::Result<Vec<Sonde>> {
+    sondes_dans(Path::new("/sys/class/hwmon"))
 }
