@@ -10,6 +10,9 @@ export struct PointLed {
     x: float,
     y: float,
     rayon: float,
+    // Hauteur ajoutee au disque, en fraction du cadre. Zero pour une LED ; une
+    // reglette de RAM vue au detail « ventilateur » est une gelule, pas un rond.
+    hauteur: float,
     couleur: color,
     choisie: bool,
 }
@@ -57,10 +60,17 @@ export component Fenetre inherits Window {
     background: #0e0e13;
 
     in property <[PointLed]> leds;
+    // Les aretes du boitier, en commandes SVG dans le carre unite. Vide de face.
+    in property <string> aretes;
     in property <[LigneVentilateur]> ventilateurs;
     in property <[LigneTemperature]> temperatures;
     in property <[FamilleAnimation]> familles;
     in property <string> cible: "tout le boîtier";
+    in property <string> titre-maquette: "LE BOÎTIER";
+    in property <bool> detail-led: true;
+    in property <bool> vue-face: true;
+    // Vrai tant que Ctrl est enfonce : le rectangle ajoute au lieu de remplacer.
+    in-out property <bool> ajout: false;
     in property <string> animation-courante: "aucune";
     in property <string> message;
     in property <bool> connecte;
@@ -69,7 +79,12 @@ export component Fenetre inherits Window {
     in-out property <int> vitesse: 3;
     in-out property <int> direction: 4;
 
-    callback clic-maquette(float, float);
+    // Le geste sur la maquette : deux coins et « faut-il ajouter a la selection ».
+    // Un clic est un rectangle de cote nul — c'est le meme geste, et les
+    // distinguer dans le Slint dupliquerait la regle des deux cotes.
+    callback geste-maquette(float, float, float, float, bool);
+    callback basculer-detail();
+    callback basculer-vue();
     callback couleur-saisie(string);
     callback choisir-cible(string);
     callback appliquer-couleur();
@@ -129,7 +144,22 @@ export component Fenetre inherits Window {
                 VerticalLayout {
                     padding: 12px;
                     spacing: 6px;
-                    Titre { text: "LE BOÎTIER — ARRIÈRE À GAUCHE, VU DU PANNEAU LATÉRAL"; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Titre {
+                            text: root.titre-maquette;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: root.detail-led ? "LED" : "ventilateur";
+                            clicked => { root.basculer-detail(); }
+                        }
+                        Button {
+                            text: root.vue-face ? "de face" : "isométrique";
+                            clicked => { root.basculer-vue(); }
+                        }
+                    }
 
                     Rectangle {
                         vertical-stretch: 1;
@@ -139,28 +169,84 @@ export component Fenetre inherits Window {
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
 
-                            // Une LED visée est plus grosse et cerclée de blanc : sur
-                            // cent vingt-quatre points, une nuance de bordure ne se
-                            // verrait pas, et c'est pourtant ce qui dit ce qu'on va
-                            // changer.
+                            // Les arêtes du boîtier, derrière tout le reste :
+                            // sans elles, la vue de trois-quarts n'est qu'un
+                            // nuage de points penché.
+                            if root.aretes != "": Path {
+                                width: parent.width;
+                                height: parent.height;
+                                viewbox-width: 1;
+                                viewbox-height: 1;
+                                commands: root.aretes;
+                                stroke: #2f3040;
+                                stroke-width: 1px;
+                            }
+
+                            // Une cible visée est plus grosse et cerclée de blanc :
+                            // sur cent vingt-quatre points, une nuance de bordure ne
+                            // se verrait pas, et c'est pourtant ce qui dit ce qu'on
+                            // va changer.
                             for led in root.leds: Rectangle {
-                                property <length> taille: led.rayon * 2 * parent.width * (led.choisie ? 1.7 : 1.0);
+                                // Le grossissement d'une cible visee est deja
+                                // dans `rayon` : un disque de ventilateur n'a
+                                // pas besoin de grandir, une pastille de LED si.
+                                property <length> taille: led.rayon * 2 * parent.width;
                                 width: taille;
-                                height: taille;
+                                height: taille + led.hauteur * parent.height;
                                 border-radius: taille / 2;
-                                x: led.x * parent.width - taille / 2;
-                                y: led.y * parent.height - taille / 2;
+                                x: led.x * parent.width - self.width / 2;
+                                y: led.y * parent.height - self.height / 2;
                                 background: led.couleur;
                                 border-width: led.choisie ? 2px : 0px;
                                 border-color: #ffffff;
                             }
 
-                            TouchArea {
-                                clicked => {
-                                    root.clic-maquette(
-                                        self.mouse-x / self.width,
-                                        self.mouse-y / self.height
-                                    );
+                            // Le rectangle en cours de tracé. Il ne vit que pendant
+                            // le geste : ce qu'il attrape n'est décidé qu'au
+                            // relâchement, par `plan.rs`.
+                            if zone.trace: Rectangle {
+                                x: min(zone.depart-x, zone.pressed-x);
+                                y: min(zone.depart-y, zone.pressed-y);
+                                width: abs(zone.pressed-x - zone.depart-x);
+                                height: abs(zone.pressed-y - zone.depart-y);
+                                background: #4d7cff20;
+                                border-width: 1px;
+                                border-color: #4d7cff;
+                            }
+
+                            clavier := FocusScope {
+                                key-pressed(evenement) => {
+                                    if (evenement.text == Key.Control) { root.ajout = true; }
+                                    return EventResult.reject;
+                                }
+                                key-released(evenement) => {
+                                    if (evenement.text == Key.Control) { root.ajout = false; }
+                                    return EventResult.reject;
+                                }
+
+                                zone := TouchArea {
+                                    property <length> depart-x;
+                                    property <length> depart-y;
+                                    property <bool> trace: false;
+
+                                    pointer-event(evenement) => {
+                                        clavier.focus();
+                                        if (evenement.kind == PointerEventKind.down) {
+                                            self.depart-x = self.mouse-x;
+                                            self.depart-y = self.mouse-y;
+                                            self.trace = true;
+                                        }
+                                        if (evenement.kind == PointerEventKind.up) {
+                                            self.trace = false;
+                                            root.geste-maquette(
+                                                self.depart-x / self.width,
+                                                self.depart-y / self.height,
+                                                self.mouse-x / self.width,
+                                                self.mouse-y / self.height,
+                                                root.ajout
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }
