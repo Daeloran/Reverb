@@ -16,6 +16,7 @@ name = "reverbd"
 path = "src/main.rs"
 
 [dependencies]
+reverb-anim = { path = "../reverb-anim" }
 reverb-proto = { path = "../reverb-proto" }
 reverb-hw = { path = "../reverb-hw" }
 

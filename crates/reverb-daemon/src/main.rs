@@ -10,9 +10,10 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use reverb_daemon::animation;
+use reverb_anim::{Animation, Geometrie, Image, Orientation, Reglages, Sens};
 use reverb_daemon::cadence::{Cadence, Tick};
 use reverb_daemon::peripheriques::{Consigne, Peripheriques};
+use reverb_daemon::persistance;
 use reverb_daemon::serveur::{self, Ordre};
 use reverb_daemon::telemetrie;
 use reverb_hw::hwmon::Percent;
@@ -56,6 +57,15 @@ fn main() -> ExitCode {
     let socket = std::env::args()
         .nth(1)
         .map_or_else(|| PathBuf::from(SOCKET), PathBuf::from);
+    let fichier_geometrie = std::env::args()
+        .nth(2)
+        .map_or_else(|| PathBuf::from(persistance::CHEMIN), PathBuf::from);
+
+    let (geometrie, souci) = persistance::charger(&fichier_geometrie);
+    if let Some(souci) = souci {
+        eprintln!("attention : {souci}");
+    }
+
     let annonce = socket.display().to_string();
     thread::spawn(move || {
         if let Err(erreur) = serveur::servir(&socket, envoi) {
@@ -69,7 +79,7 @@ fn main() -> ExitCode {
     signaler_pret();
     println!("reverbd écoute sur {annonce}");
 
-    boucle(&mut peripheriques, &reception);
+    boucle(&mut peripheriques, &reception, geometrie, fichier_geometrie);
     ExitCode::SUCCESS
 }
 
@@ -77,17 +87,24 @@ fn main() -> ExitCode {
 struct Etat {
     ventilateurs: [Rgb; 10],
     barrettes: [Rgb; ram::SLOT_COUNT],
-    animation: Option<String>,
+    animation: Option<(Animation, Reglages)>,
+    /// Où se trouve physiquement chaque LED, et comment chaque ventilateur est
+    /// monté. Réglable par le socket, conservée sur disque.
+    geometrie: Geometrie,
+    /// Le fichier qui conserve la géométrie d'un démarrage à l'autre.
+    fichier_geometrie: PathBuf,
     /// Une couleur fixe a changé et n'a pas encore été écrite.
     a_ecrire: bool,
 }
 
-impl Default for Etat {
-    fn default() -> Self {
+impl Etat {
+    fn nouveau(geometrie: Geometrie, fichier_geometrie: PathBuf) -> Etat {
         Etat {
             ventilateurs: [Rgb::BLACK; 10],
             barrettes: [Rgb::BLACK; ram::SLOT_COUNT],
             animation: None,
+            geometrie,
+            fichier_geometrie,
             // Écrire l'état au démarrage : c'est ce qui donne un éclairage
             // connu au boot, sans qu'aucune fenêtre soit ouverte.
             a_ecrire: true,
@@ -95,8 +112,13 @@ impl Default for Etat {
     }
 }
 
-fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>) {
-    let mut etat = Etat::default();
+fn boucle(
+    peripheriques: &mut Peripheriques,
+    ordres: &Receiver<Ordre>,
+    geometrie: Geometrie,
+    fichier_geometrie: PathBuf,
+) {
+    let mut etat = Etat::nouveau(geometrie, fichier_geometrie);
     let mut cadence = Cadence::new(IMAGES_PAR_SECONDE);
     let mut depart = Instant::now();
     let mut animait = false;
@@ -121,14 +143,13 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>) {
             }
         }
 
-        let attente = if let Some(nom) = etat.animation.clone() {
+        let attente = if let Some((animation, reglages)) = etat.animation {
             match cadence.tick(depart.elapsed()) {
                 Tick::Produire { sautees } => {
-                    if let Some(image) = animation::image(&nom, pas) {
-                        let debut = Instant::now();
-                        ecrire_image(peripheriques, &image);
-                        compte.image(debut.elapsed(), sautees);
-                    }
+                    let image = animation.image(&etat.geometrie, &reglages, pas);
+                    let debut = Instant::now();
+                    ecrire_image(peripheriques, &image);
+                    compte.image(debut.elapsed(), sautees);
                     pas = pas.wrapping_add(1);
                     Duration::ZERO
                 }
@@ -235,24 +256,23 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
             vec![ResponseLine::End]
         }
 
-        Request::Animate { name } => match name {
+        Request::Animate { name, reglages } => match name {
             None => {
                 etat.animation = None;
                 // L'éclairage fixe reprend la main là où l'animation l'a laissé.
                 etat.a_ecrire = true;
                 vec![ResponseLine::End]
             }
-            Some(nom) if animation::CATALOGUE.contains(&nom.as_str()) => {
-                etat.animation = Some(nom);
-                vec![ResponseLine::End]
-            }
-            Some(nom) => vec![ResponseLine::Error {
-                message: format!(
-                    "animation « {nom} » inconnue : {}",
-                    animation::CATALOGUE.join(", ")
-                ),
-            }],
+            Some(nom) => match lancer(&nom, &reglages) {
+                Ok(anime) => {
+                    etat.animation = Some(anime);
+                    vec![ResponseLine::End]
+                }
+                Err(message) => vec![ResponseLine::Error { message }],
+            },
         },
+
+        Request::Geometry { cible, reglages } => geometrie(etat, cible.as_deref(), &reglages),
 
         Request::Fan { channel, action } => {
             // `Percent::new` refait la vérification de bornes que `parse_request`
@@ -277,6 +297,119 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
     // Le client peut être parti entre l'ordre et la réponse : ce n'est pas une
     // erreur du démon.
     let _ = ordre.reponse.send(lignes);
+}
+
+/// Ouvre une animation du catalogue et valide ses réglages.
+///
+/// Les deux refus portent leur propre message : `reverb-anim` cite le
+/// catalogue pour un nom inconnu, et les clés acceptées pour un réglage
+/// fautif. Le démon n'a rien à y ajouter — il les répète tels quels, ce qui
+/// garantit que le socket et la ligne de commande disent la même chose.
+fn lancer(nom: &str, reglages: &[(String, String)]) -> Result<(Animation, Reglages), String> {
+    let animation = Animation::par_nom(nom).map_err(|erreur| erreur.to_string())?;
+    let reglages = animation
+        .reglages(reglages)
+        .map_err(|erreur| erreur.to_string())?;
+    Ok((animation, reglages))
+}
+
+/// Lit ou modifie la géométrie.
+///
+/// Sans cible, c'est une lecture — dix lignes puis `end`. Avec une cible et
+/// des réglages, c'est une écriture, immédiatement persistée : « elle survit à
+/// `systemctl restart reverbd` » est un critère d'acceptation, pas un effet de
+/// bord souhaitable.
+fn geometrie(
+    etat: &mut Etat,
+    cible: Option<&str>,
+    reglages: &[(String, String)],
+) -> Vec<ResponseLine> {
+    let echec = |message: String| vec![ResponseLine::Error { message }];
+
+    let Some(cible) = cible else {
+        if !reglages.is_empty() {
+            // Un réglage sans cible ne désigne rien : l'appliquer aux dix
+            // ventilateurs effacerait d'un coup une mesure qui a coûté un
+            // passage sous le bureau.
+            return echec(
+                "« geometry » attend un ventilateur avant ses réglages, par exemple « geometry \
+                 radiateur-haut angle=90 »"
+                    .to_owned(),
+            );
+        }
+        let mut lignes: Vec<ResponseLine> = Position::ALL
+            .into_iter()
+            .map(|position| ligne_geom(etat, position))
+            .collect();
+        lignes.push(ResponseLine::End);
+        return lignes;
+    };
+
+    let position = match Position::from_slug(cible) {
+        Ok(position) => position,
+        Err(erreur) => return echec(erreur.to_string()),
+    };
+
+    if reglages.is_empty() {
+        return vec![ligne_geom(etat, position), ResponseLine::End];
+    }
+
+    // Les deux champs se règlent séparément : corriger un angle ne doit pas
+    // obliger à retaper un sens qui n'a pas changé.
+    let courante = etat.geometrie.orientation(position);
+    let mut angle = courante.angle;
+    let mut sens = courante.sens;
+    for (cle, valeur) in reglages {
+        match cle.as_str() {
+            "angle" => match valeur.parse() {
+                Ok(degres) => angle = degres,
+                Err(_) => {
+                    return echec(format!(
+                        "réglage « angle » : « {valeur} » n'est pas un nombre entier de degrés"
+                    ));
+                }
+            },
+            "sens" => match valeur.as_str() {
+                "horaire" => sens = Sens::Horaire,
+                "antihoraire" => sens = Sens::Antihoraire,
+                _ => {
+                    return echec(format!(
+                        "réglage « sens » : « {valeur} » n'est ni « horaire » ni « antihoraire »"
+                    ));
+                }
+            },
+            autre => {
+                return echec(format!(
+                    "réglage « {autre} » inconnu. Réglages de « geometry » : angle, sens"
+                ));
+            }
+        }
+    }
+
+    let orientation = match Orientation::new(angle, sens) {
+        Ok(orientation) => orientation,
+        Err(erreur) => return echec(erreur.to_string()),
+    };
+    etat.geometrie.definir(position, orientation);
+
+    if let Err(erreur) = persistance::enregistrer(&etat.fichier_geometrie, &etat.geometrie) {
+        // L'orientation est appliquée en mémoire mais ne survivra pas : le dire
+        // plutôt que de laisser croire à un réglage acquis.
+        return echec(format!(
+            "orientation appliquée mais non conservée : {} ({erreur})",
+            etat.fichier_geometrie.display()
+        ));
+    }
+    vec![ResponseLine::End]
+}
+
+fn ligne_geom(etat: &Etat, position: Position) -> ResponseLine {
+    let orientation = etat.geometrie.orientation(position);
+    ResponseLine::Geom {
+        position: position.slug(),
+        angle: orientation.angle,
+        sens: orientation.sens.slug().to_owned(),
+    }
 }
 
 fn appliquer_couleur(etat: &mut Etat, cible: LightTarget, couleur: Rgb) {
@@ -309,7 +442,7 @@ fn ecrire_fixe(peripheriques: &mut Peripheriques, etat: &Etat) {
     }
 }
 
-fn ecrire_image(peripheriques: &mut Peripheriques, image: &animation::Image) {
+fn ecrire_image(peripheriques: &mut Peripheriques, image: &Image) {
     for (position, couleurs) in &image.ventilateurs {
         signaler(
             peripheriques.peindre_ventilateur(*position, couleurs),

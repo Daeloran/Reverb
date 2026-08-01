@@ -121,8 +121,13 @@ intervertit rouge et vert sur toute l'installation.
 > raisonnement indirect — « celui qui n'a qu'un canal utilisé » — qui casserait silencieusement
 > si un ventilateur était ajouté.
 
-Disposition réelle : **3 en bas**, **3 sur l'avant** — le radiateur du Kraken, plaqué contre la
-face de la carte mère —, **3 sur le dessus**, **1 à l'arrière**.
+Disposition réelle : **3 en bas**, **3 sur le flanc de la carte mère** — le radiateur du Kraken —,
+**3 sur le dessus**, **1 à l'arrière**. La face avant ne porte aucun ventilateur.
+
+> ⚠️ **Corrigé le 2026-08-01.** Cette phrase disait « 3 sur l'avant » tout en précisant, dans le
+> même souffle, « plaqué contre la face de la carte mère » — deux parois différentes. La
+> contradiction est passée inaperçue jusqu'à ce qu'une animation traverse le boîtier et n'ait
+> rien à grimper. Voir [`GEOMETRIE.md`](GEOMETRIE.md).
 
 ⚠️ Les trois ventilateurs du radiateur sont sur le device **7**, pas sur le Kraken. La pompe n'a
 aucune LED.
@@ -395,6 +400,11 @@ constant, `1 → 8` puis retour à `1`.
 > physique du ventilateur dans le boîtier. Un motif qui suppose « la LED 1 est en haut » sera faux
 > sur un ventilateur monté autrement. Seul l'**ordre** est une donnée du protocole ; l'origine et
 > le sens apparent sont une donnée de montage, et devront être configurables par ventilateur.
+>
+> ✅ **Mesuré le 2026-07-31 sur SHYNAEL** — voir [`GEOMETRIE.md`](GEOMETRIE.md). Le pas s'est
+> révélé régulier (45°), et deux ventilateurs voisins du même groupe montés à un quart de tour
+> l'un de l'autre. Ces valeurs appartiennent à **une machine** et non au protocole : elles vivent
+> donc hors de cette spec, et se changent par une commande.
 
 ---
 

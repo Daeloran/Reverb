@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "reverb-anim"
+version = "0.1.0"
+dependencies = [
+ "reverb-proto",
+]
+
+[[package]]
 name = "reverb-cli"
 version = "0.1.0"
 dependencies = [
@@ -14,6 +21,7 @@ dependencies = [
 name = "reverb-daemon"
 version = "0.1.0"
 dependencies = [
+ "reverb-anim",
  "reverb-hw",
  "reverb-proto",
 ]
