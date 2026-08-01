@@ -74,8 +74,15 @@ export component Fenetre inherits Window {
     callback choisir-cible(string);
     callback appliquer-couleur();
     callback lancer-animation(string);
+    // Un réglage a bougé pendant que l'animation tourne. Sans ce rappel, le
+    // curseur de vitesse n'écrivait qu'une propriété et le démon gardait la
+    // vitesse d'avant.
+    callback regler-animation();
     callback arreter-animation();
     callback regler-ventilateur(string, int);
+    // La poignée est lâchée : à partir de là, la mesure a le droit de la
+    // reprendre — mais pas tout de suite.
+    callback relacher-ventilateur(string);
     callback rendre-au-firmware(string);
 
     property <[string]> directions: [
@@ -277,12 +284,16 @@ export component Fenetre inherits Window {
                                     minimum: 1;
                                     maximum: 10;
                                     value: root.vitesse;
-                                    changed(valeur) => { root.vitesse = Math.round(valeur); }
+                                    changed(valeur) => {
+                                        root.vitesse = Math.round(valeur);
+                                        root.regler-animation();
+                                    }
                                 }
                             }
                             ComboBox {
                                 model: root.directions;
                                 current-index <=> root.direction;
+                                selected => { root.regler-animation(); }
                             }
                             Button { text: "Arrêter"; clicked => { root.arreter-animation(); } }
                         }
@@ -325,9 +336,16 @@ export component Fenetre inherits Window {
                                     Slider {
                                         minimum: 0;
                                         maximum: 100;
+                                        // La valeur vient de la poignée du
+                                        // canal, pas de la mesure brute : c'est
+                                        // elle qui décide si une mesure a le
+                                        // droit de déplacer le curseur.
                                         value: canal.pwm;
-                                        released(valeur) => {
+                                        changed(valeur) => {
                                             root.regler-ventilateur(canal.canal, Math.round(valeur));
+                                        }
+                                        released(valeur) => {
+                                            root.relacher-ventilateur(canal.canal);
                                         }
                                     }
                                     Button {

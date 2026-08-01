@@ -17,15 +17,19 @@
 //! image entière, cinquante millisecondes — et l'interface collerait aux doigts
 //! pendant qu'une animation tourne.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::sync::mpsc::{Sender, channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
 use reverb_gui::plan::{Cible, Place, Plan};
+use reverb_gui::reglages::{Poignee, Reglage};
 use reverb_gui::{FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, PointLed};
 use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine};
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
@@ -132,6 +136,49 @@ impl Tableau {
     }
 }
 
+/// Ce que la fenêtre garde entre deux gestes.
+///
+/// Tout y vit dans le fil de l'interface — d'où `RefCell` et non `Mutex` : les
+/// deux autres fils passent par la boucle d'événements de Slint pour y toucher,
+/// et ne partagent donc jamais un emprunt.
+struct Pupitre {
+    tableau: RefCell<Tableau>,
+    selection: std::cell::Cell<Selection>,
+    /// Les réglages d'animation tels qu'ils sont affichés.
+    reglage: RefCell<Reglage>,
+    /// Une poignée par canal de ventilateur, jamais partagée entre canaux.
+    poignees: RefCell<HashMap<String, Poignee>>,
+    /// Le modèle des lignes de ventilateur, **gardé vivant** : le reconstruire
+    /// à chaque seconde recrée les curseurs, et un curseur recréé sous les
+    /// doigts perd le geste en cours.
+    canaux: Rc<VecModel<LigneVentilateur>>,
+    /// L'origine des temps de la fenêtre. Les poignées raisonnent en durées
+    /// depuis elle, ce qui les rend testables sans horloge.
+    depart: Instant,
+}
+
+impl Pupitre {
+    fn nouveau() -> Pupitre {
+        Pupitre {
+            tableau: RefCell::new(Tableau::noir()),
+            selection: std::cell::Cell::new(Selection::Groupe(LightTarget::All)),
+            reglage: RefCell::new(Reglage {
+                animation: None,
+                couleur: Rgb::new(0xff, 0x40, 0xff),
+                vitesse: 3,
+                direction: 0,
+            }),
+            poignees: RefCell::new(HashMap::new()),
+            canaux: Rc::new(VecModel::default()),
+            depart: Instant::now(),
+        }
+    }
+
+    fn maintenant(&self) -> Duration {
+        self.depart.elapsed()
+    }
+}
+
 fn main() -> ExitCode {
     let fenetre = match Fenetre::new() {
         Ok(fenetre) => fenetre,
@@ -146,24 +193,27 @@ fn main() -> ExitCode {
 
     let socket = chemin_du_socket();
     let plan = Plan::nouveau(&reverb_anim::Geometrie::mesuree());
-    let tableau = std::rc::Rc::new(std::cell::RefCell::new(Tableau::noir()));
-    let selection = std::rc::Rc::new(std::cell::Cell::new(Selection::Groupe(LightTarget::All)));
+    let pupitre = Rc::new(Pupitre::nouveau());
 
     fenetre.set_familles(familles());
-    fenetre.set_cible(SharedString::from(selection.get().nom()));
-    dessiner(&fenetre, &plan, &tableau.borrow(), selection.get());
-
-    let (ordres, file) = channel::<Request>();
-    lancer_le_fil_des_ordres(socket.clone(), file, fenetre.as_weak());
-    lancer_le_fil_des_images(
-        socket,
-        fenetre.as_weak(),
-        plan.clone(),
-        tableau.clone(),
-        selection.clone(),
+    fenetre.set_cible(SharedString::from(pupitre.selection.get().nom()));
+    fenetre.set_ventilateurs(ModelRc::from(pupitre.canaux.clone()));
+    dessiner(
+        &fenetre,
+        &plan,
+        &pupitre.tableau.borrow(),
+        pupitre.selection.get(),
     );
 
-    brancher(&fenetre, &plan, &tableau, &selection, ordres.clone());
+    let (ordres, file) = channel::<Request>();
+    // Les réponses reviennent par un canal plutôt que par la boucle
+    // d'événements : ce qu'elles mettent à jour vit dans le `Pupitre`, qui est
+    // au fil de l'interface et ne traverse donc aucune frontière de fil.
+    let (retours, arrivees) = channel::<Retour>();
+    lancer_le_fil_des_ordres(socket.clone(), file, fenetre.as_weak(), retours);
+    lancer_le_fil_des_images(socket, fenetre.as_weak(), plan.clone());
+
+    brancher(&fenetre, &plan, &pupitre, ordres.clone());
 
     // La télémétrie n'a pas de flux : on la redemande, doucement. Une seconde
     // suffit pour des tours par minute, et n'ajoute rien de mesurable au démon.
@@ -176,6 +226,26 @@ fn main() -> ExitCode {
         },
     );
 
+    // Les réponses se vident plus vite qu'elles n'arrivent : une mesure affichée
+    // avec une seconde de retard serait une seconde de retard sur tout.
+    let vidange = slint::Timer::default();
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        vidange.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(200),
+            move || {
+                let Some(fenetre) = faible.upgrade() else {
+                    return;
+                };
+                while let Ok(retour) = arrivees.try_recv() {
+                    ranger(&fenetre, &pupitre, retour);
+                }
+            },
+        );
+    }
+
     if let Err(erreur) = fenetre.run() {
         eprintln!("erreur : {erreur}");
         return ExitCode::FAILURE;
@@ -183,11 +253,18 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Une réponse du démon, en route vers le fil de l'interface.
+enum Retour {
+    Telemetrie(Vec<ResponseLine>),
+    Eclairage(Vec<ResponseLine>),
+}
+
 /// Le fil qui agit : il attend les réponses du démon à la place de l'interface.
 fn lancer_le_fil_des_ordres(
     socket: PathBuf,
     file: std::sync::mpsc::Receiver<Request>,
     fenetre: Weak<Fenetre>,
+    retours: Sender<Retour>,
 ) {
     thread::spawn(move || {
         let mut client: Option<Client> = None;
@@ -206,7 +283,7 @@ fn lancer_le_fil_des_ordres(
             match ouvert.demander(&requete) {
                 Ok(lignes) => {
                     let etait = matches!(requete, Request::Status);
-                    repondre(&fenetre, &requete, &lignes);
+                    repondre(&fenetre, &retours, &requete, lignes);
                     if !etait {
                         // Une commande qui passe est la meilleure preuve de vie
                         // qu'on puisse afficher.
@@ -223,16 +300,7 @@ fn lancer_le_fil_des_ordres(
 }
 
 /// Le fil qui regarde : une image, une mise à jour de la maquette.
-fn lancer_le_fil_des_images(
-    socket: PathBuf,
-    fenetre: Weak<Fenetre>,
-    plan: Plan,
-    tableau: std::rc::Rc<std::cell::RefCell<Tableau>>,
-    selection: std::rc::Rc<std::cell::Cell<Selection>>,
-) {
-    // `Rc` et `Cell` vivent dans le fil de l'interface : le fil des images ne
-    // les touche pas, il lui envoie les couleurs par le canal de Slint.
-    let _ = (&tableau, &selection);
+fn lancer_le_fil_des_images(socket: PathBuf, fenetre: Weak<Fenetre>, plan: Plan) {
     thread::spawn(move || {
         loop {
             match Abonnement::ouvrir(&socket) {
@@ -357,25 +425,19 @@ fn choisie(selection: Option<Selection>, cible: Cible) -> bool {
     }
 }
 
-fn brancher(
-    fenetre: &Fenetre,
-    plan: &Plan,
-    tableau: &std::rc::Rc<std::cell::RefCell<Tableau>>,
-    selection: &std::rc::Rc<std::cell::Cell<Selection>>,
-    ordres: Sender<Request>,
-) {
+fn brancher(fenetre: &Fenetre, plan: &Plan, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
     // ── Cliquer une LED ────────────────────────────────────────────────────
     {
         let plan = plan.clone();
-        let selection = selection.clone();
+        let pupitre = pupitre.clone();
         let faible = fenetre.as_weak();
         fenetre.on_clic_maquette(move |x, y| {
             let Some(fenetre) = faible.upgrade() else {
                 return;
             };
             if let Some(cible) = plan.sous(Place { x, y }) {
-                selection.set(Selection::Led(cible));
-                rafraichir_selection(&fenetre, &plan, selection.get());
+                pupitre.selection.set(Selection::Led(cible));
+                rafraichir_selection(&fenetre, &plan, pupitre.selection.get());
             }
         });
     }
@@ -383,7 +445,7 @@ fn brancher(
     // ── Choisir un groupe ──────────────────────────────────────────────────
     {
         let plan = plan.clone();
-        let selection = selection.clone();
+        let pupitre = pupitre.clone();
         let faible = fenetre.as_weak();
         fenetre.on_choisir_cible(move |nom| {
             let Some(fenetre) = faible.upgrade() else {
@@ -394,8 +456,8 @@ fn brancher(
                 "ram" => LightTarget::Ram,
                 _ => LightTarget::All,
             };
-            selection.set(Selection::Groupe(groupe));
-            rafraichir_selection(&fenetre, &plan, selection.get());
+            pupitre.selection.set(Selection::Groupe(groupe));
+            rafraichir_selection(&fenetre, &plan, pupitre.selection.get());
         });
     }
 
@@ -411,8 +473,7 @@ fn brancher(
 
     // ── Appliquer la couleur ───────────────────────────────────────────────
     {
-        let selection = selection.clone();
-        let tableau = tableau.clone();
+        let pupitre = pupitre.clone();
         let envoi = ordres.clone();
         let faible = fenetre.as_weak();
         fenetre.on_appliquer_couleur(move || {
@@ -425,7 +486,7 @@ fn brancher(
                 ));
                 return;
             };
-            let requete = match selection.get() {
+            let requete = match pupitre.selection.get() {
                 Selection::Groupe(target) => Request::Light {
                     target,
                     color: couleur,
@@ -434,7 +495,9 @@ fn brancher(
                 // c'est voulu — `paint` réécrit la cible entière, en gardant
                 // les couleurs affichées pour les autres LED. C'est aussi ce
                 // qui rend le geste réversible : la LED voisine ne bouge pas.
-                Selection::Led(cible) => peinture(&fenetre, &tableau.borrow(), cible, couleur),
+                Selection::Led(cible) => {
+                    peinture(&fenetre, &pupitre.tableau.borrow(), cible, couleur)
+                }
             };
             let _ = envoi.send(requete);
         });
@@ -442,53 +505,57 @@ fn brancher(
 
     // ── Les animations ─────────────────────────────────────────────────────
     {
+        let pupitre = pupitre.clone();
         let envoi = ordres.clone();
         let faible = fenetre.as_weak();
         fenetre.on_lancer_animation(move |nom| {
             let Some(fenetre) = faible.upgrade() else {
                 return;
             };
-            let Ok(animation) = Animation::par_nom(&nom) else {
+            if Animation::par_nom(&nom).is_err() {
                 return;
-            };
-            // Seules les clés que cette animation accepte : `arc-en-ciel`
-            // refuse `couleur`, et la lui donner ferait refuser la commande
-            // entière.
-            let acceptees = animation.parametres_acceptes();
-            let mut reglages = Vec::new();
-            if let (true, Some(couleur)) = (
-                acceptees.contains(&"couleur"),
-                lire_couleur(&fenetre.get_couleur()),
-            ) {
-                reglages.push((
-                    "couleur".to_owned(),
-                    format!("{:02x}{:02x}{:02x}", couleur.r, couleur.g, couleur.b),
-                ));
-            }
-            if acceptees.contains(&"vitesse") {
-                reglages.push(("vitesse".to_owned(), fenetre.get_vitesse().to_string()));
-            }
-            let index = usize::try_from(fenetre.get_direction()).unwrap_or(0);
-            if let (true, Some(direction)) = (
-                acceptees.contains(&"direction"),
-                reverb_anim::Direction::ALL.get(index),
-            ) {
-                reglages.push(("direction".to_owned(), direction.slug().to_owned()));
             }
             fenetre.set_animation_courante(nom.clone());
-            let _ = envoi.send(Request::Animate {
-                name: Some(nom.to_string()),
-                reglages,
-            });
+            let mut reglage = pupitre.reglage.borrow_mut();
+            reglage.animation = Some(nom.to_string());
+            relever(&fenetre, &mut reglage);
+            if let Some(requete) = reglage.commande() {
+                let _ = envoi.send(requete);
+            }
+        });
+    }
+    // ── Un réglage change pendant que l'animation tourne ───────────────────
+    //
+    // C'est le rappel qui manquait : le curseur de vitesse et le menu de
+    // direction n'écrivaient qu'une propriété de l'interface, et le démon
+    // gardait la vitesse d'avant jusqu'au prochain clic sur le bouton de
+    // l'animation. Le curseur bougeait pour rien.
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_regler_animation(move || {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            let mut reglage = pupitre.reglage.borrow_mut();
+            relever(&fenetre, &mut reglage);
+            // `None` quand rien ne tourne : bouger la vitesse à vide ne doit
+            // pas démarrer une animation que personne n'a demandée.
+            if let Some(requete) = reglage.commande() {
+                let _ = envoi.send(requete);
+            }
         });
     }
     {
+        let pupitre = pupitre.clone();
         let envoi = ordres.clone();
         let faible = fenetre.as_weak();
         fenetre.on_arreter_animation(move || {
             if let Some(fenetre) = faible.upgrade() {
                 fenetre.set_animation_courante(SharedString::from("aucune"));
             }
+            pupitre.reglage.borrow_mut().animation = None;
             let _ = envoi.send(Request::Animate {
                 name: None,
                 reglages: Vec::new(),
@@ -498,23 +565,66 @@ fn brancher(
 
     // ── Les ventilateurs ───────────────────────────────────────────────────
     {
+        let pupitre = pupitre.clone();
         let envoi = ordres.clone();
         fenetre.on_regler_ventilateur(move |canal, consigne| {
-            let _ = envoi.send(Request::Fan {
-                channel: canal.to_string(),
-                action: FanAction::Pwm(u8::try_from(consigne.clamp(0, 100)).unwrap_or(0)),
-            });
+            let maintenant = pupitre.maintenant();
+            let mut poignees = pupitre.poignees.borrow_mut();
+            let poignee = poignees
+                .entry(canal.to_string())
+                .or_insert_with(Poignee::nouvelle);
+            poignee.saisir(
+                u8::try_from(consigne.clamp(0, 100)).unwrap_or(0),
+                maintenant,
+            );
+            // Une commande par pas franchi, pas une par image : c'est la
+            // poignée qui le décide, pas la cadence de la souris.
+            if let Some(consigne) = poignee.a_envoyer() {
+                let _ = envoi.send(Request::Fan {
+                    channel: canal.to_string(),
+                    action: FanAction::Pwm(consigne),
+                });
+            }
         });
     }
     {
+        let pupitre = pupitre.clone();
+        fenetre.on_relacher_ventilateur(move |canal| {
+            let maintenant = pupitre.maintenant();
+            pupitre
+                .poignees
+                .borrow_mut()
+                .entry(canal.to_string())
+                .or_insert_with(Poignee::nouvelle)
+                .relacher(maintenant);
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
         let envoi = ordres;
         fenetre.on_rendre_au_firmware(move |canal| {
+            pupitre
+                .poignees
+                .borrow_mut()
+                .entry(canal.to_string())
+                .or_insert_with(Poignee::nouvelle)
+                .liberer();
             let _ = envoi.send(Request::Fan {
                 channel: canal.to_string(),
                 action: FanAction::Auto,
             });
         });
     }
+}
+
+/// Recopie dans les réglages ce que la fenêtre affiche de la couleur, de la
+/// vitesse et de la direction.
+fn relever(fenetre: &Fenetre, reglage: &mut Reglage) {
+    if let Some(couleur) = lire_couleur(&fenetre.get_couleur()) {
+        reglage.couleur = couleur;
+    }
+    reglage.vitesse = u8::try_from(fenetre.get_vitesse().clamp(0, 255)).unwrap_or(3);
+    reglage.direction = usize::try_from(fenetre.get_direction()).unwrap_or(0);
 }
 
 /// Réécrit la cible d'une LED en n'y changeant qu'elle.
@@ -631,8 +741,14 @@ fn familles() -> ModelRc<FamilleAnimation> {
     ModelRc::new(VecModel::from(familles))
 }
 
-/// Range une réponse du démon dans la fenêtre.
-fn repondre(fenetre: &Weak<Fenetre>, requete: &Request, lignes: &[ResponseLine]) {
+/// Range une réponse du démon : soit dans la fenêtre, soit dans le canal de
+/// retour quand elle touche à ce que le `Pupitre` garde.
+fn repondre(
+    fenetre: &Weak<Fenetre>,
+    retours: &Sender<Retour>,
+    requete: &Request,
+    lignes: Vec<ResponseLine>,
+) {
     if let Some(ResponseLine::Error { message }) = lignes.last() {
         let message = message.clone();
         let _ = fenetre.upgrade_in_event_loop(move |fenetre| {
@@ -644,28 +760,39 @@ fn repondre(fenetre: &Weak<Fenetre>, requete: &Request, lignes: &[ResponseLine])
 
     match requete {
         Request::Status => {
-            let lignes = lignes.to_vec();
-            let _ = fenetre.upgrade_in_event_loop(move |fenetre| {
-                poser_telemetrie(&fenetre, &lignes);
-            });
+            let _ = retours.send(Retour::Telemetrie(lignes));
         }
         Request::Lighting => {
-            let lignes = lignes.to_vec();
-            let _ = fenetre.upgrade_in_event_loop(move |fenetre| {
-                for ligne in &lignes {
-                    if let ResponseLine::Anim { nom, .. } = ligne {
-                        fenetre.set_animation_courante(SharedString::from(nom.clone()));
-                    }
-                }
-            });
+            let _ = retours.send(Retour::Eclairage(lignes));
         }
         _ => {}
     }
 }
 
-fn poser_telemetrie(fenetre: &Fenetre, lignes: &[ResponseLine]) {
+/// Applique une réponse arrivée par le canal de retour. Fil de l'interface.
+fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) {
+    match retour {
+        Retour::Telemetrie(lignes) => poser_telemetrie(fenetre, pupitre, &lignes),
+        Retour::Eclairage(lignes) => {
+            let mut anime = None;
+            for ligne in &lignes {
+                if let ResponseLine::Anim { nom, .. } = ligne {
+                    anime = Some(nom.clone());
+                }
+            }
+            fenetre.set_animation_courante(SharedString::from(
+                anime.clone().unwrap_or_else(|| "aucune".to_owned()),
+            ));
+            pupitre.reglage.borrow_mut().animation = anime;
+        }
+    }
+}
+
+fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine]) {
     let mut canaux = Vec::new();
     let mut temperatures = Vec::new();
+    let maintenant = pupitre.maintenant();
+    let mut poignees = pupitre.poignees.borrow_mut();
     for ligne in lignes {
         match ligne {
             ResponseLine::Channel {
@@ -674,18 +801,27 @@ fn poser_telemetrie(fenetre: &Fenetre, lignes: &[ResponseLine]) {
                 rpm,
                 pwm,
                 mode,
-            } => canaux.push(LigneVentilateur {
-                canal: SharedString::from(channel.clone()),
-                position: SharedString::from(
-                    position.map_or_else(String::new, |position| position.name().to_owned()),
-                ),
-                rpm: SharedString::from(
-                    rpm.map_or_else(|| "—".to_owned(), |tours| tours.to_string()),
-                ),
-                pwm: i32::from(pwm.unwrap_or(0)),
-                mode: SharedString::from(mode.clone()),
-                lisible: rpm.is_some(),
-            }),
+            } => {
+                // La mesure passe par la poignée du canal : c'est elle qui
+                // décide si elle a le droit de déplacer le curseur, ou si une
+                // consigne encore fraîche le tient.
+                let poignee = poignees
+                    .entry(channel.clone())
+                    .or_insert_with(Poignee::nouvelle);
+                poignee.mesurer(pwm.unwrap_or(0), maintenant);
+                canaux.push(LigneVentilateur {
+                    canal: SharedString::from(channel.clone()),
+                    position: SharedString::from(
+                        position.map_or_else(String::new, |position| position.name().to_owned()),
+                    ),
+                    rpm: SharedString::from(
+                        rpm.map_or_else(|| "—".to_owned(), |tours| tours.to_string()),
+                    ),
+                    pwm: i32::from(poignee.affichee()),
+                    mode: SharedString::from(mode.clone()),
+                    lisible: rpm.is_some(),
+                });
+            }
             ResponseLine::Temp {
                 sensor,
                 millidegrees,
@@ -700,7 +836,19 @@ fn poser_telemetrie(fenetre: &Fenetre, lignes: &[ResponseLine]) {
             _ => {}
         }
     }
-    fenetre.set_ventilateurs(ModelRc::new(VecModel::from(canaux)));
+    // ⚠️ **Les lignes se modifient en place.** Remplacer le modèle recrée les
+    // curseurs à chaque seconde, et un curseur recréé sous les doigts perd le
+    // geste en cours : c'est la moitié de la barre « un peu buggée » que Nico a
+    // signalée. On ne réécrit que les lignes qui ont vraiment changé.
+    if pupitre.canaux.row_count() == canaux.len() {
+        for (rang, ligne) in canaux.into_iter().enumerate() {
+            if pupitre.canaux.row_data(rang).as_ref() != Some(&ligne) {
+                pupitre.canaux.set_row_data(rang, ligne);
+            }
+        }
+    } else {
+        pupitre.canaux.set_vec(canaux);
+    }
     fenetre.set_temperatures(ModelRc::new(VecModel::from(temperatures)));
 }
 
