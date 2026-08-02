@@ -24,6 +24,10 @@ export struct LigneVentilateur {
     pwm: int,
     mode: string,
     lisible: bool,
+    // Ce canal sait-il rendre la main a une regulation automatique. Faux pour
+    // les trois canaux de nzxtsmart2, dont le pilote n'a aucun mode
+    // automatique : on ne montre pas un bouton qui ne peut qu'echouer (#50).
+    sait-faire-auto: bool,
 }
 
 export struct LigneTemperature {
@@ -750,8 +754,15 @@ export component Fenetre inherits Window {
                                             root.relacher-ventilateur(canal.canal);
                                         }
                                     }
+                                    // ⚠️ `width: 0px` en plus de `visible` : un
+                                    // element invisible garde sa place en
+                                    // layout, et le laisser la creuserait un
+                                    // trou a droite des trois curseurs de
+                                    // nzxtsmart2.
                                     Button {
                                         text: "auto";
+                                        visible: canal.sait-faire-auto;
+                                        width: canal.sait-faire-auto ? self.preferred-width : 0px;
                                         clicked => { root.rendre-au-firmware(canal.canal); }
                                     }
                                 }

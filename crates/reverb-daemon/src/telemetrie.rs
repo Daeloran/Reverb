@@ -58,6 +58,10 @@ pub fn releve(
             rpm,
             pwm,
             mode,
+            // Lu sur le nom du pilote, jamais sur une tentative d'écriture : la
+            // tentative qui réussit là où il ne fallait pas envoie le canal à
+            // plein régime, en silence (issue #50).
+            sait_faire_auto: canal.sait_faire_auto(),
         });
     }
 

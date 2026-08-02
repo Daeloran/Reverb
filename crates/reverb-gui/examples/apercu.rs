@@ -203,21 +203,25 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     interface.set_affichage_ecran(SharedString::from("gauge:kraken2023elite:coolant"));
     interface.set_luminosite_ecran(60);
     interface.set_ventilateurs(ModelRc::new(VecModel::from(vec![
+        // Un canal de chaque espèce : celui qui n'a pas de mode automatique et
+        // n'affiche donc pas de bouton « auto », et celui qui en a un (#50).
         LigneVentilateur {
             canal: SharedString::from("nzxtsmart2:fan-1"),
             position: SharedString::from("radiateur haut"),
             rpm: SharedString::from("1180"),
             pwm: 60,
-            mode: SharedString::from("courbe firmware"),
+            mode: SharedString::from("manuel"),
             lisible: true,
+            sait_faire_auto: false,
         },
         LigneVentilateur {
             canal: SharedString::from("kraken2023elite:pump"),
             position: SharedString::new(),
             rpm: SharedString::from("2400"),
             pwm: 75,
-            mode: SharedString::from("courbe de l'hote"),
+            mode: SharedString::from("courbe-de-l'hôte"),
             lisible: true,
+            sait_faire_auto: true,
         },
     ])));
     // Les cinq sondes retenues, avec une courbe dessinée à la main : de quoi

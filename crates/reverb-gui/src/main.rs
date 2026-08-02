@@ -1410,6 +1410,7 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
                 rpm,
                 pwm,
                 mode,
+                sait_faire_auto,
             } => {
                 // La mesure passe par la poignée du canal : c'est elle qui
                 // décide si elle a le droit de déplacer le curseur, ou si une
@@ -1429,6 +1430,7 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
                     pwm: i32::from(poignee.affichee()),
                     mode: SharedString::from(mode.clone()),
                     lisible: rpm.is_some(),
+                    sait_faire_auto: *sait_faire_auto,
                 });
             }
             ResponseLine::Temp {

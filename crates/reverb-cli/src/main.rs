@@ -273,7 +273,12 @@ fn regler_ventilateur(cible: &CibleCanal, action: ActionVentilateur) -> Result<(
 
     for canal in vises {
         match action {
-            ActionVentilateur::Auto => hwmon::set_mode(canal, hwmon::Mode::FirmwareCurve)
+            // ⚠️ `HostCurve` (2) et non `PleinRegime` (0). `0` n'a jamais rendu
+            // la main à une courbe : sur `nzxt-kraken3` il écrit un rapport
+            // cyclique de 255 et cesse de piloter — 100 %, la barre lâchée. Et
+            // sur `nzxt-smart2` il est refusé, ce contrôleur n'ayant aucun mode
+            // automatique (issue #50).
+            ActionVentilateur::Auto => hwmon::set_mode(canal, hwmon::Mode::HostCurve)
                 .map_err(|e| echec_ecriture(canal, &e))?,
             ActionVentilateur::Curve => {
                 // Mettre en service une courbe qui n'existe pas laisserait le
@@ -368,24 +373,31 @@ fn consigner(
         ));
     }
 
-    // Un canal sur sa courbe firmware réagit à la température. Lui imposer une
+    // Un canal qui exécute une courbe réagit à la température. Lui imposer une
     // consigne fixe l'en sort — et il n'y reviendra pas tout seul. Ça ne doit
     // jamais être un effet de bord.
+    //
+    // ⚠️ **C'est `HostCurve` (2) qui adapte, pas `PleinRegime` (0).** Ce garde
+    // visait `0` jusqu'au 2026-08-02, et disait au passage « suit sa courbe
+    // firmware et s'adapte à la température » d'un canal qui tourne en fait à
+    // 100 % sans rien réguler (issue #50). Un canal en `0` n'a donc rien à
+    // perdre à recevoir une consigne : on le sort du plein régime sans rien
+    // demander, ce qui est même le service rendu.
     let mode = canal
         .mode()
         .map_err(|e| format!("lecture du mode de « {} » : {e}", canal.name))?;
 
-    if mode == hwmon::Mode::FirmwareCurve {
-        if !manual {
-            return Err(format!(
-                "« {} » suit sa courbe firmware et s'adapte à la température. \
-                 Lui imposer {} % l'en sortirait définitivement : ajoutez « --manual » \
-                 si c'est voulu, et « reverb fan --channel {} --auto » pour l'y rendre.",
-                canal.name,
-                percent.percent(),
-                canal.name
-            ));
-        }
+    if mode == hwmon::Mode::HostCurve && !manual {
+        return Err(format!(
+            "« {} » exécute une courbe et s'adapte à la température. \
+             Lui imposer {} % l'en sortirait définitivement : ajoutez « --manual » \
+             si c'est voulu, et « reverb fan --channel {} --auto » pour l'y rendre.",
+            canal.name,
+            percent.percent(),
+            canal.name
+        ));
+    }
+    if matches!(mode, hwmon::Mode::HostCurve | hwmon::Mode::PleinRegime) {
         hwmon::set_mode(canal, hwmon::Mode::Manual).map_err(|e| echec_ecriture(canal, &e))?;
     }
 
