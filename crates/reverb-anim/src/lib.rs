@@ -422,7 +422,14 @@ impl Animation {
 
             // Le spectre déroulé le long de la direction. Seule famille à ne pas
             // accepter de couleur : elle les produit toutes.
-            Famille::ArcEnCiel => teinte_vers_rgb(fraction(place + temps)),
+            //
+            // ⚠️ `place - temps`, et non `place + temps`. Avec le plus, une
+            // teinte donnée se trouvait en `place = h - temps`, qui **décroît**
+            // avec le temps : le spectre remontait la direction demandée pendant
+            // que les cinq autres familles la descendaient. Le défaut se voyait
+            // mal parce qu'un arc-en-ciel n'a ni tête ni traîne — c'est en
+            // comparant les familles entre elles qu'il apparaît (issue #49).
+            Famille::ArcEnCiel => teinte_vers_rgb(fraction(place - temps)),
 
             // Une bande nette, pour qui préfère voir la limite bouger plutôt
             // qu'un dégradé.
@@ -469,6 +476,18 @@ fn cycle(valeur: f32) -> f32 {
 }
 
 /// Où se trouve un point le long de la direction demandée, entre 0 et 1.
+///
+/// La convention est **zéro au départ** : un motif avance des projections
+/// faibles vers les fortes, donc `bas-haut` rend zéro au plancher.
+///
+/// ⚠️ **La paire de profondeur y déroge, et c'est voulu.** `avant-arriere` rend
+/// zéro au **grand** `z`. Nico a jugé la paire inversée à l'œil le 2026-08-02
+/// (issue #49), sur une comète — et le repère du boîtier, lui, n'est pas en
+/// cause : `docs/GEOMETRIE.md` et `spec_disposition.rs` le tiennent depuis le
+/// schéma du 2026-08-01, où le radiateur est bien devant les deux rangées
+/// couchées, et la RAM entre les deux comme sur une carte mère réelle. C'est
+/// donc l'attache des deux noms à leurs extrémités qui était fautive, pas la
+/// donnée : la corriger ici laisse le relevé physique et la maquette intacts.
 fn projection(direction: Direction, point: Point, bornes: (Point, Point)) -> f32 {
     let (bas, haut) = bornes;
     let rapport = |valeur: f32, min: f32, max: f32| {
@@ -481,8 +500,8 @@ fn projection(direction: Direction, point: Point, bornes: (Point, Point)) -> f32
     match direction {
         Direction::BasHaut => rapport(point.y, bas.y, haut.y),
         Direction::HautBas => 1.0 - rapport(point.y, bas.y, haut.y),
-        Direction::AvantArriere => rapport(point.z, bas.z, haut.z),
-        Direction::ArriereAvant => 1.0 - rapport(point.z, bas.z, haut.z),
+        Direction::AvantArriere => 1.0 - rapport(point.z, bas.z, haut.z),
+        Direction::ArriereAvant => rapport(point.z, bas.z, haut.z),
         Direction::Horaire => angle_du_tour(point, bornes),
         Direction::Antihoraire => 1.0 - angle_du_tour(point, bornes),
     }

@@ -666,9 +666,28 @@ fn resume_des_delais(delais: &[(Organe, u32)], geometrie: &Geometrie) -> String 
 }
 
 #[test]
-fn une_onde_avant_arriere_traverse_le_boitier_dans_l_ordre_des_profondeurs() {
-    // Test d'intention n° 5 de l'issue, critère d'acceptation n° 6 — « Une onde `avant-arriere`
-    // atteint les trois du radiateur avant tout le reste, et le ventilateur arrière en dernier ».
+fn une_onde_de_profondeur_traverse_le_boitier_dans_l_ordre_des_profondeurs() {
+    // Test d'intention n° 5 de l'issue #27, critère d'acceptation n° 6 — « Une onde
+    // `avant-arriere` atteint les trois du radiateur avant tout le reste, et le ventilateur
+    // arrière en dernier ».
+    //
+    // ⚠️ **Ce critère a été retiré le 2026-08-02 par l'issue #49, et ce test le dit au lieu de le
+    // taire.** Nico a regardé une comète tourner sur le boîtier et jugé `avant-arriere` et
+    // `arriere-avant` inversées. Les deux affirmations ne peuvent pas tenir ensemble : il n'existe
+    // aucune façon de faire partir `avant-arriere` d'ailleurs que du radiateur tout en gardant le
+    // critère n° 6.
+    //
+    // Ce qui a cédé est le **nom accroché à l'extrémité**, décidé sur schéma le 2026-08-01 ; ce qui
+    // tient est l'observation faite sur le matériel qui tourne. C'est la règle du projet —
+    // « l'étiquette physique vient d'une observation humaine et se vérifie » — et son précédent,
+    // `SPEC-PROTOCOLE-NZXT.md` §3, dont la table s'est révélée fausse sur deux groupes de canaux
+    // sur quatre.
+    //
+    // **Rien d'autre n'a bougé, et c'est ce qui rend le retrait tenable.** La géométrie que ce
+    // fichier fige est intacte — le radiateur reste devant les deux rangées couchées (test n° 1),
+    // la RAM entre les deux — et cette onde traverse toujours le boîtier dans l'ordre des
+    // profondeurs, la colonne d'un bloc, sur au moins trois instants distincts. Seule la paire de
+    // noms qui porte ces deux ordres est échangée.
     //
     // C'est le test qui relie la donnée à ce qu'on voit : la géométrie n'est pas qu'un dessin, les
     // animations la lisent. Avec la colonne à mi-profondeur, l'onde la traverse au milieu du tour
@@ -691,13 +710,14 @@ fn une_onde_avant_arriere_traverse_le_boitier_dans_l_ordre_des_profondeurs() {
     let fond = Organe::Ventilateur(Position::Arriere);
 
     for (direction, premier, dernier) in [
-        (Direction::AvantArriere, colonne, fond),
+        // La colonne d'abord, le fond en dernier — c'est `arriere-avant` depuis #49.
+        (Direction::ArriereAvant, colonne, fond),
         // Le miroir. L'issue ne le nomme pas, mais il coûte la même mesure et il attrape le cas où
         // les deux directions rendraient la même chose — une onde qui ignorerait le signe passerait
         // le premier cas seul.
-        (Direction::ArriereAvant, fond, colonne),
+        (Direction::AvantArriere, fond, colonne),
     ] {
-        let vers_l_arriere = direction == Direction::AvantArriere;
+        let vers_l_arriere = direction == Direction::ArriereAvant;
         let delais = delais_depuis(&vague, &geometrie, direction, premier);
         let resume = resume_des_delais(&delais, &geometrie);
         let delai = |cherche: Organe| {

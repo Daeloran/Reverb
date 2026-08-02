@@ -88,6 +88,18 @@ vue du panneau latéral gauche, arrière ← → avant
 > Les deux énoncés ne se contredisent pas : « sur le flanc » dit le **plan**, « à l'avant » dit la
 > **profondeur**.
 
+> ⚠️ **Le nom des deux directions de profondeur a été échangé le 2026-08-02** (issue #49).
+>
+> La géométrie ci-dessus n'a **pas** bougé : le radiateur est toujours devant les deux rangées
+> couchées, la RAM toujours entre lui et le fond. Ce qui a changé, c'est le nom accroché à chaque
+> extrémité. C'est **`arriere-avant`** qui commence par la colonne du radiateur et finit par le
+> ventilateur du fond ; `avant-arriere` fait l'inverse.
+>
+> Le critère n° 6 de l'issue #27 disait le contraire — il avait été écrit d'après un schéma. Nico a
+> regardé une comète tourner sur le boîtier monté et jugé la paire inversée. C'est la règle du
+> projet : **l'étiquette physique se vérifie sur le matériel, elle ne se déduit pas d'un dessin.**
+> `crates/reverb-anim/tests/spec_disposition.rs` porte le détail de l'arbitrage.
+
 La **RAM** se situe entre le plancher et le plafond, un peu plus près du plafond, et à mi-chemin
 entre le plan du radiateur et le ventilateur arrière — c'est-à-dire dans le vide que le
 déplacement de la colonne a ouvert au milieu du boîtier. L'écran du Kraken est immédiatement du
