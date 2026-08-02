@@ -13,6 +13,15 @@
 //!   ligne à zéro qui ferait croire à une chute ;
 //! - une sonde **qui disparaît** — un périphérique débranché — ne doit pas figer
 //!   sa dernière valeur et laisser croire qu'elle est encore lue.
+//!
+//! # Ce que la fenêtre montre, et ce qu'elle tait
+//!
+//! Le démon découvre **tout** ce que `hwmon` expose — seize sondes sur SHYNAEL,
+//! dont quatre hubs SPD de barrettes, une puce Wi-Fi et une puce Ethernet — et
+//! c'est le bon comportement pour un relevé : mieux vaut tout découvrir que
+//! rater celle qui compte. Mais un panneau de seize cartes ne se lit plus.
+//!
+//! Le tri est donc un choix **d'affichage**, et il vit ici (issue #51).
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -99,4 +108,132 @@ impl Historique {
             (bas.min(valeur), haut.max(valeur))
         }))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Les sondes retenues (issue #51)
+// ---------------------------------------------------------------------------
+
+/// Une sonde que le panneau montre : son `slug` et son libellé lisible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SondeRetenue {
+    pub slug: String,
+    pub libelle: String,
+}
+
+/// Ce que la fenêtre a lu une fois dans `/sys/class/nvme/nvmeN/model`.
+///
+/// `default()` est le cas des deux modèles illisibles — une machine où `sysfs`
+/// n'a pas répondu. Il ne rend pas les deux disques indiscernables pour autant :
+/// voir [`libelle_du_disque`].
+#[derive(Debug, Clone, Default)]
+pub struct ModelesNvme {
+    pub nvme0: Option<String>,
+    pub nvme1: Option<String>,
+}
+
+/// Le CPU — celle que les ventilateurs suivent, et non un die parmi d'autres.
+const CPU: &str = "k10temp:tctl";
+/// Le liquide du Kraken.
+const LIQUIDE: &str = "kraken2023elite:coolant-temp";
+/// La carte graphique.
+///
+/// ⚠️ **Pas `amdgpu:edge`**, qui est le GPU intégré du 9800X3D : affiché sous le
+/// nom « GPU », il donnerait une température plausible et fausse — celle qui ne
+/// bouge pas quand le jeu chauffe.
+const GPU: &str = "nvidia:NVIDIA_GeForce_RTX_5070";
+/// Le premier disque NVMe.
+const NVME0: &str = "nvme:nvme0:composite";
+/// Le second disque NVMe.
+const NVME1: &str = "nvme:nvme1:composite";
+
+/// Les sondes retenues, **dans l'ordre du panneau**.
+///
+/// C'est cette table qui donne l'ordre, et non un tri des libellés : le panneau
+/// doit se lire pareil quel que soit l'ordre dans lequel le démon rend ses
+/// lignes `temp`.
+const RETENUES: [&str; 5] = [CPU, LIQUIDE, GPU, NVME0, NVME1];
+
+/// Le libellé d'une sonde retenue, ou `None` si elle ne l'est pas.
+///
+/// Fonction **pure** : le modèle du disque est un paramètre. Le lire ici ferait
+/// dépendre le tri de la machine sur laquelle il tourne.
+pub fn libelle_retenu(slug: &str, modeles: &ModelesNvme) -> Option<String> {
+    match slug {
+        CPU => Some("CPU".to_owned()),
+        LIQUIDE => Some("Liquide".to_owned()),
+        GPU => Some("GPU".to_owned()),
+        NVME0 => Some(libelle_du_disque(0, modeles)),
+        NVME1 => Some(libelle_du_disque(1, modeles)),
+        _ => None,
+    }
+}
+
+/// Les sondes à montrer, dans l'ordre du panneau, sans doublon.
+///
+/// Parcourt [`RETENUES`] plutôt que l'entrée : l'ordre est garanti, un `slug`
+/// répété ne produit qu'une carte, et une sonde absente de la machine ne laisse
+/// pas de trou — elle manque, simplement.
+pub fn sondes_retenues(slugs: &[String], modeles: &ModelesNvme) -> Vec<SondeRetenue> {
+    RETENUES
+        .iter()
+        .filter(|retenue| slugs.iter().any(|slug| slug == *retenue))
+        .filter_map(|retenue| {
+            libelle_retenu(retenue, modeles).map(|libelle| SondeRetenue {
+                slug: (*retenue).to_owned(),
+                libelle,
+            })
+        })
+        .collect()
+}
+
+/// Le libellé d'un des deux disques.
+///
+/// ⚠️ **Le modèle ne suffit pas à les distinguer.** Deux SSD identiques dans une
+/// machine est le cas courant, et l'issue exige de savoir « laquelle chauffe ».
+///
+/// Trois cas, et le numéro du disque n'apparaît que quand il sert vraiment — un
+/// `nvme0` collé à un modèle déjà unique n'apprendrait rien et allongerait une
+/// carte étroite :
+///
+/// - modèle lisible et **différent** de celui du voisin : le modèle suffit ;
+/// - modèle lisible mais **partagé** : le modèle, plus le numéro pour trancher ;
+/// - modèle illisible : le numéro seul.
+///
+/// Ce numéro n'est pas un numéro de `hwmon` — il ne change pas au redémarrage,
+/// et l'issue demandait précisément de ne pas en faire lire un.
+fn libelle_du_disque(rang: usize, modeles: &ModelesNvme) -> String {
+    let (mien, autre) = if rang == 0 {
+        (&modeles.nvme0, &modeles.nvme1)
+    } else {
+        (&modeles.nvme1, &modeles.nvme0)
+    };
+    match mien {
+        Some(modele) if Some(modele) != autre.as_ref() => format!("NVMe {modele}"),
+        Some(modele) => format!("NVMe {modele} (nvme{rang})"),
+        None => format!("NVMe nvme{rang}"),
+    }
+}
+
+/// Les modèles des deux premiers disques, lus dans `sysfs`.
+///
+/// Lecture d'un fichier en lecture seule, faite **une fois au démarrage** : ce
+/// n'est pas ouvrir un périphérique, et l'ADR-002 n'est donc pas touché. Un
+/// fichier absent ou vide donne `None`, ce que [`libelle_du_disque`] sait
+/// traiter.
+pub fn modeles_nvme() -> ModelesNvme {
+    ModelesNvme {
+        nvme0: modele_de("/sys/class/nvme/nvme0/model"),
+        nvme1: modele_de("/sys/class/nvme/nvme1/model"),
+    }
+}
+
+/// Le modèle écrit dans un fichier de `sysfs`, débarrassé de son bourrage.
+///
+/// `sysfs` complète le champ à sa largeur fixe avec des espaces : sans le
+/// `trim`, le libellé traînerait vingt blancs derrière lui.
+fn modele_de(chemin: &str) -> Option<String> {
+    let brut = std::fs::read_to_string(chemin).ok()?;
+    let propre = brut.trim();
+    (!propre.is_empty()).then(|| propre.to_owned())
 }

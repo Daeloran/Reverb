@@ -220,35 +220,34 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             lisible: true,
         },
     ])));
-    // Quatre sondes plausibles, avec une courbe dessinée à la main : de quoi
-    // regarder la carte sans machine ni démon.
+    // Les cinq sondes retenues, avec une courbe dessinée à la main : de quoi
+    // regarder la carte sans machine ni démon. Les libellés sont ceux que la
+    // fenêtre produit vraiment, modèles de disques compris (issue #51).
     interface.set_temperatures(ModelRc::new(VecModel::from(
         [
-            ("kraken2023elite", "coolant-temp", "34.2 °C", 0.55, true),
-            ("k10temp", "tctl", "61.8 °C", 0.30, true),
-            ("nvidia", "GeForce RTX 5070", "51.0 °C", 0.70, true),
-            ("spd5118", "temp1", "illisible", 0.0, false),
+            ("CPU", "61.8 °C", 0.30, true),
+            ("Liquide", "34.2 °C", 0.55, true),
+            ("GPU", "51.0 °C", 0.70, true),
+            ("NVMe CT2000T705SSD5", "36.9 °C", 0.20, true),
+            ("NVMe CT4000P3SSD8", "illisible", 0.0, false),
         ]
         .into_iter()
-        .map(
-            |(origine, capteur, valeur, base, lisible)| LigneTemperature {
-                origine: SharedString::from(origine),
-                capteur: SharedString::from(capteur),
-                valeur: SharedString::from(valeur),
-                courbe: SharedString::from(if lisible {
-                    (0..40_i32)
-                        .map(|rang| {
-                            let x = rang as f32 / 39.0;
-                            let y = 0.5 + (x * 9.0 + base * 6.0).sin() * 0.35 * (0.4 + base);
-                            format!("{} {x:.3} {y:.3} ", if rang == 0 { "M" } else { "L" })
-                        })
-                        .collect::<String>()
-                } else {
-                    String::new()
-                }),
-                lisible,
-            },
-        )
+        .map(|(libelle, valeur, base, lisible)| LigneTemperature {
+            libelle: SharedString::from(libelle),
+            valeur: SharedString::from(valeur),
+            courbe: SharedString::from(if lisible {
+                (0..40_i32)
+                    .map(|rang| {
+                        let x = rang as f32 / 39.0;
+                        let y = 0.5 + (x * 9.0 + base * 6.0).sin() * 0.35 * (0.4 + base);
+                        format!("{} {x:.3} {y:.3} ", if rang == 0 { "M" } else { "L" })
+                    })
+                    .collect::<String>()
+            } else {
+                String::new()
+            }),
+            lisible,
+        })
         .collect::<Vec<LigneTemperature>>(),
     )));
     interface.set_zones(ModelRc::new(VecModel::from(vec![
