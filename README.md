@@ -31,7 +31,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Démon | ✅ éclairage sans fenêtre, descripteurs tenus |
 | Géométrie du boîtier | ✅ mesurée le 2026-07-31 |
 | Catalogue d'animations | ✅ six familles paramétrables |
-| Interface Slint | ✅ maquette, zones, sondes, écran |
+| Interface Slint | ✅ maquette habillée, deux vues, zones, sondes, écran |
 | Écran du Kraken dans le démon | ✅ luminosité, cadran, image, GIF |
 
 ## Ce que les protocoles permettent
@@ -226,6 +226,16 @@ Sept des dix ventilateurs sont vus par la tranche depuis ce panneau ; les dessin
 ferait sept traits, où aucune LED ne serait cliquable. Ils sont donc dessinés en cercles quand
 même. Une vue faite pour ne plus regarder sous le bureau doit montrer les 124 LED.
 
+**Une seconde vue, isométrique**, se prend au bouton en haut à droite de la maquette. Elle projette
+les positions réelles — aucun ventilateur n'y est vu par la tranche, et les quatre plans occupés
+s'y distinguent. Son plafond reste **ouvert** : une plaque pleine masquerait les trois ventilateurs
+du dessus, qui sont ce qu'elle sert à montrer. La sélection survit au changement de vue.
+
+Les deux vues sont habillées d'un châssis, de parois et des organes internes — plateau de carte
+mère, carte graphique, cache d'alimentation. **Aucune de ces formes n'a de coordonnée dans le
+`.slint`** : toutes viennent de `plan.rs`, sinon la maquette divergerait de la géométrie à la
+première correction.
+
 `cargo run --release --example apercu -p reverb-gui` dessine la fenêtre **sans écran**, dans un
 fichier : c'est ainsi qu'on vérifie une mise en page sans ouvrir de session graphique.
 
@@ -235,6 +245,13 @@ fichier : c'est ainsi qu'on vérifie une mise en page sans ouvrir de session gra
   reste l'unique franchissement de privilège (ADR-002).
 - La fermer n'éteint rien : le démon continue. Il n'y a **pas d'icône dans la barre système** —
   sur GNOME/Wayland elle dépendrait d'une extension du bureau, qui casse aux montées de version.
+- Elle ne montre **pas les seize sondes** que la machine expose, seulement quatre familles — CPU,
+  liquide, GPU, et un disque NVMe par SSD — sous des noms qui se lisent. Le démon, lui, continue de
+  toutes les découvrir et de toutes les rendre : le tri est un choix d'affichage, pas un filtre de
+  relevé.
+- Le bouton **« auto » n'apparaît que sur les deux canaux du Kraken**. Le pilote `nzxt-smart2` n'a
+  aucun mode automatique — sa vitesse est celle que l'hôte écrit —, et montrer un bouton qui ne
+  peut qu'échouer vaut moins que ne pas le montrer.
 - Une LED peinte à la main (`paint`) **ne survit pas à un redémarrage** : `eclairage.conf` garde
   une couleur par cible, pas une par LED (#21). La cible reprend sa couleur unie au démarrage.
   **Une zone, si** — c'est le moyen de rendre une peinture durable : sélectionner les LED, les
@@ -349,8 +366,12 @@ jamais tronqué**. Un mouvement lent et complet se regarde, un mouvement saccad�
 
 ### Le cadran
 
-`--gauge <sonde>` affiche une sonde en gros, avec son unité et un anneau de proportion. Les noms
-de sondes sont ceux de `reverb fans` et du panneau SONDES de la fenêtre.
+`--gauge <sonde>` affiche une sonde en gros, avec son unité et un anneau de proportion.
+
+⚠️ **Le nom à donner est celui du protocole, pas celui de la fenêtre.** Le panneau SONDES montre
+« CPU », « Liquide », « GPU » et les deux disques sous leur modèle ; le cadran, lui, attend le
+`slug` — `kraken2023elite:coolant-temp`. `echo status | socat - UNIX-CONNECT:/run/reverb/reverbd.sock`
+en donne la liste complète, seize lignes `temp`.
 
 **Il ne dépend d'aucune pile de texte** : des chiffres à sept segments et une police matricielle de
 5 × 7, dessinés à la main dans le tampon 640 × 640. Charger un moteur de rendu de police pour
