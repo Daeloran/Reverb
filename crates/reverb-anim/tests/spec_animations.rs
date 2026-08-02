@@ -218,16 +218,6 @@ fn couleurs_du_ventilateur(image: &Image, position: Position) -> &[Rgb; LEDS_PER
     couleurs
 }
 
-/// Le nombre de descripteurs de fichier ouverts par le processus.
-///
-/// Rend 0 si `/proc` n'est pas monté — les deux mesures valent alors 0, et le test ne dit rien
-/// plutôt que de mentir.
-fn descripteurs_ouverts() -> usize {
-    std::fs::read_dir("/proc/self/fd")
-        .map(std::iter::Iterator::count)
-        .unwrap_or(0)
-}
-
 /// La clé de regroupement d'une hauteur : les bits du flottant, `-0.0` ramené à `0.0`.
 ///
 /// L'égalité exacte est bien ce qu'on veut. Le test d'intention n° 9 dit « deux LED **déclarées**
@@ -260,26 +250,17 @@ fn chaque_animation_rend_les_cent_vingt_quatre_couleurs_sans_rien_ouvrir() {
     let geometrie = geometrie_de_test();
     let reglages = reglages(TEMOIN, Direction::BasHaut);
 
-    // Mesure à blanc d'abord : `read_dir` ouvre lui-même un descripteur, et c'est la **variation**
-    // qui est observée, pas le nombre absolu.
-    let _ = descripteurs_ouverts();
-    let avant = descripteurs_ouverts();
-
+    // ⚠️ **Le « sans rien ouvrir » a déménagé dans `spec_purete.rs`** (issue #55). Il se mesurait
+    // ici en comptant `/proc/self/fd`, qui est global au **processus**, alors que les trente tests
+    // de ce binaire y tournent en parallèle : tout descripteur ouvert par un autre test comptait
+    // comme une ouverture faite par `Animation::image`, et le test échouait au hasard sous charge.
+    // Ce qui reste ici est le décompte des couleurs, qui n'a jamais eu de course.
     let mut images = Vec::new();
     for animation in catalogue() {
         for pas in [0u32, 1, 7, 30, 900] {
             images.push((animation.nom(), animation.image(&geometrie, &reglages, pas)));
         }
     }
-
-    let apres = descripteurs_ouverts();
-    assert_eq!(
-        avant,
-        apres,
-        "rendre {} images a ouvert {} descripteur(s) : le crate n'est plus pur",
-        images.len(),
-        apres.saturating_sub(avant)
-    );
 
     // Les dix ventilateurs, chacun une fois, désignés par leur position. Un tableau de dix
     // entrées dont deux porteraient la même position laisserait un ventilateur sans couleur, et
@@ -1173,4 +1154,71 @@ fn meme_ordre_de_composantes(rendue: Rgb, demandee: Rgb) -> bool {
 
 fn ordre(gauche: u8, droite: u8) -> std::cmp::Ordering {
     gauche.cmp(&droite)
+}
+
+// ---------------------------------------------------------------------------
+// 10 — le crate ne nomme aucune porte de sortie (issue #55)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn les_sources_du_crate_ne_nomment_aucune_porte_de_sortie() {
+    // Le pendant structurel du décompte de descripteurs de `spec_purete.rs`, et le seul des deux
+    // qui n'ait **aucune course** : une lecture de fichier ouverte puis refermée pendant un rendu
+    // échapperait au décompte, pas à celui-ci.
+    //
+    // La liste est celle des portes par lesquelles un crate cesse d'être calculable : le disque,
+    // le réseau, l'environnement, les processus, l'horloge. L'horloge y est parce qu'une animation
+    // qui lirait l'heure ne serait plus une fonction de son pas — et la fenêtre ne pourrait plus
+    // prévoir ce que le démon envoie, ce qui est toute la promesse de `reverb-anim`.
+    const INTERDITS: [&str; 6] = [
+        "std::fs",
+        "std::net",
+        "std::process",
+        "std::env",
+        "SystemTime",
+        "Instant",
+    ];
+
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut lus = 0usize;
+    let mut a_examiner = vec![source.clone()];
+    while let Some(dossier) = a_examiner.pop() {
+        let entrees = std::fs::read_dir(&dossier)
+            .unwrap_or_else(|erreur| panic!("« {} » illisible : {erreur}", dossier.display()));
+        for entree in entrees.flatten() {
+            let chemin = entree.path();
+            if chemin.is_dir() {
+                a_examiner.push(chemin);
+                continue;
+            }
+            if chemin.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let texte = std::fs::read_to_string(&chemin)
+                .unwrap_or_else(|erreur| panic!("« {} » illisible : {erreur}", chemin.display()));
+            lus += 1;
+            for interdit in INTERDITS {
+                // Les commentaires en parlent — c'est même le lieu où l'on explique pourquoi le
+                // crate n'y touche pas. Seul le code est examiné.
+                let coupable = texte.lines().find(|ligne| {
+                    let nu = ligne.trim_start();
+                    !nu.starts_with("//") && ligne.contains(interdit)
+                });
+                assert!(
+                    coupable.is_none(),
+                    "« {} » nomme {interdit} : le crate cesse d'être calculable hors du démon, et \
+                     l'aperçu de la fenêtre cesse de pouvoir prévoir ce que le boîtier reçoit — \
+                     « {} »",
+                    chemin.display(),
+                    coupable.unwrap_or_default().trim()
+                );
+            }
+        }
+    }
+
+    assert!(
+        lus >= 2,
+        "seulement {lus} fichier(s) source examiné(s) sous « {} » : ce test ne prouve rien",
+        source.display()
+    );
 }
