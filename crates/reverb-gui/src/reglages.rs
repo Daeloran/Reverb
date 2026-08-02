@@ -417,3 +417,90 @@ pub fn requetes_vers_la_cible(
         None => sans_zone(couleur),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Ce que la fenêtre compose pour l'écran (issue #48)
+// ---------------------------------------------------------------------------
+
+/// Les affichages du menu de l'écran, dans l'ordre.
+const AFFICHAGES: [&str; 4] = ["rien", "cadran", "image", "gif"];
+
+/// Le rang de « rien », qui est aussi le repli.
+///
+/// C'est le seul rang dont le sens reste vrai quand la fenêtre ne sait pas
+/// nommer ce que le démon affiche.
+const RIEN: usize = 0;
+
+/// L'affichage d'écran que la fenêtre montre, et la poignée qui le protège.
+///
+/// # Le défaut
+///
+/// La fenêtre demande `screen state` chaque seconde et réécrivait le rang du
+/// menu depuis la réponse. Tant que « Appliquer » n'a pas été cliqué, le démon
+/// répond encore `rien` — la sélection en cours était donc effacée sous les
+/// doigts, avec le chemin ou le nom de sonde qu'on était en train de taper.
+///
+/// C'est le même défaut que celui de la poignée de ventilateur et que celui de
+/// l'animation (#41) : **une valeur que l'utilisateur compose ne se laisse pas
+/// écraser par un relevé.**
+///
+/// ⚠️ **La luminosité, elle, est toujours adoptée.** Elle part à chaque cran et
+/// n'est jamais composée : la retenir la ferait sauter en arrière.
+#[derive(Debug, Clone, Default)]
+pub struct EcranChoisi {
+    /// Rang dans [`AFFICHAGES`].
+    pub affichage: usize,
+    /// Chemin de fichier ou nom de sonde, selon l'affichage.
+    pub argument: String,
+    /// En pour cent.
+    pub luminosite: u8,
+    /// L'utilisateur est en train de composer un affichage.
+    compose: bool,
+}
+
+impl EcranChoisi {
+    /// L'utilisateur compose : la poignée se lève.
+    pub fn saisir(&mut self) {
+        self.compose = true;
+    }
+
+    /// « Appliquer » ou « Annuler » : elle retombe.
+    pub fn relacher(&mut self) {
+        self.compose = false;
+    }
+
+    pub fn compose(&self) -> bool {
+        self.compose
+    }
+
+    /// Range un relevé du démon. Rend `true` si quelque chose a changé.
+    ///
+    /// L'affichage se coupe de son argument au **premier** deux-points : un nom
+    /// de sonde en contient — `kraken2023elite:coolant` — et couper au dernier
+    /// tronquerait l'argument sans rien dire.
+    pub fn adopter(&mut self, luminosite: u8, affichage: &str) -> bool {
+        let mut change = self.luminosite != luminosite;
+        self.luminosite = luminosite;
+
+        if self.compose {
+            return change;
+        }
+
+        let (quoi, argument) = affichage.split_once(':').unwrap_or((affichage, ""));
+        // Le démon écrit `gauge:` là où la fenêtre affiche « cadran » : le mot
+        // du protocole d'un côté, celui de l'utilisateur de l'autre.
+        let attendu = if quoi == "gauge" { "cadran" } else { quoi };
+        // ⚠️ Un affichage inconnu retombe sur « rien » **et vide l'argument** :
+        // laisser un argument orphelin sous « rien » afficherait un chemin que
+        // plus rien n'explique.
+        let (rang, argument) = match AFFICHAGES.iter().position(|nom| *nom == attendu) {
+            Some(RIEN) | None => (RIEN, ""),
+            Some(rang) => (rang, argument),
+        };
+
+        change |= self.affichage != rang || self.argument != argument;
+        self.affichage = rang;
+        self.argument = argument.to_owned();
+        change
+    }
+}
