@@ -31,7 +31,8 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Démon | ✅ éclairage sans fenêtre, descripteurs tenus |
 | Géométrie du boîtier | ✅ mesurée le 2026-07-31 |
 | Catalogue d'animations | ✅ six familles paramétrables |
-| Interface Slint | ⏳ à faire |
+| Interface Slint | ✅ maquette, zones, sondes, écran |
+| Écran du Kraken dans le démon | ✅ luminosité, cadran, image, GIF |
 
 ## Ce que les protocoles permettent
 
@@ -39,7 +40,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 |---|---|---|
 | Ventilateurs | **par le firmware** | écrit une fois, puis dort |
 | Écran — température liquide | **par le firmware** | rien |
-| Écran — image personnalisée | l'hôte | 1,2 Mo toutes les ~25 s |
+| Écran — image, cadran, GIF | l'hôte | 1,2 Mo toutes les 25 s, 2 s ou 100 ms |
 | **RAM** | **l'hôte, obligatoirement** | boucle SMBus permanente |
 
 La RAM est la seule contrainte temps réel. Tout le reste est en écriture unique — le démon
@@ -123,8 +124,9 @@ motifs rapides — et eux tiennent 50 à 100.
 
 Tant que le démon tourne, `reverb set|paint|ram|fan|curve` **refuse d'écrire** — un seul processus
 détient les bus (ADR-002), et deux écritures SMBus qui se croisent corrompent une transaction.
-`reverb list|modes|fans|screen` continuent de marcher : le démon ne tient pas l'écran, justement
-pour garder de quoi diagnostiquer.
+`reverb list|modes|fans` continuent de marcher, et `reverb screen` aussi : depuis #33 il **passe
+par le démon** au lieu d'écrire lui-même. Seule `screen --mire` reste en direct, et rejoint donc la
+liste des refusées.
 
 ### Les animations
 
@@ -176,10 +178,14 @@ animation avec ses réglages. Le démon écrit son état dans `/var/lib/reverb/e
 **chaque changement**, pas à l'arrêt : ce qu'on veut retrouver, c'est justement l'éclairage
 d'avant une coupure de courant, qui ne laisse le temps d'écrire nulle part.
 
-Deux fichiers, deux natures. La géométrie est une donnée de montage, décidée une fois, et reste
-dans `/etc` ; l'éclairage est l'état courant du service, réécrit à chaque commande, et va dans
-`/var/lib` (`StateDirectory=reverb`). Les mêler ferait réécrire à chaque changement de couleur le
-fichier qui a coûté un relevé au sol.
+Deux natures, quatre fichiers. La géométrie est une donnée de montage, décidée une fois, et reste
+dans `/etc` ; l'éclairage, les zones et l'écran sont l'état courant du service, réécrits à chaque
+commande, et vont dans `/var/lib` (`StateDirectory=reverb`). Les mêler ferait réécrire à chaque
+changement de couleur le fichier qui a coûté un relevé au sol.
+
+L'écran suit la même règle : `ecran.conf` garde sa luminosité et **le chemin** de ce qu'il montre,
+jamais les pixels. Au redémarrage le démon relit le fichier ; s'il a disparu depuis, la dalle reste
+au firmware et le journal le dit **une fois**, sans boucler.
 
 **Un fichier absent et un fichier disant « noir » ne se confondent jamais.** Le premier est un
 premier démarrage : le boîtier s'allume en **bleu pur**, ce qui prouve du même coup que les deux
@@ -233,6 +239,10 @@ fichier : c'est ainsi qu'on vérifie une mise en page sans ouvrir de session gra
   une couleur par cible, pas une par LED (#21). La cible reprend sa couleur unie au démarrage.
   **Une zone, si** — c'est le moyen de rendre une peinture durable : sélectionner les LED, les
   nommer, leur donner leur couleur.
+- Le chemin d'une image se **colle dans un champ de texte**, il ne s'ouvre pas dans un sélecteur de
+  fichiers : une boîte de dialogue demanderait le portail XDG, donc un client D-Bus, donc une
+  dépendance de runtime que l'ADR-001 refuse. C'est le seul endroit de la fenêtre où l'on tape au
+  lieu de cliquer, et c'est un manque assumé.
 
 ### Les zones — une zone, une couche
 
@@ -313,23 +323,75 @@ Deux accès restent hors de sa portée :
 
 ## L'écran du Kraken
 
+**Le démon tient la dalle.** La fenêtre n'ouvre aucun périphérique (ADR-002) : elle envoie un
+**chemin de fichier**, et c'est le démon qui lit, décode, met à l'échelle et pousse les 1,2 Mo. Le
+mégaoctet ne traverse jamais le socket ; seul le chemin le fait.
+
 ```bash
-reverb screen                                   # resolution, luminosite, orientation
+reverb screen                              # luminosite et affichage courants
 reverb screen --brightness 40
-ffmpeg -i photo.png -vf scale=640:640 -f rawvideo -pix_fmt bgr24 /tmp/img.raw
-reverb screen --image /tmp/img.raw              # boucle jusqu'a Ctrl-C
+reverb screen --image /home/nico/fond.png  # PNG ou JPEG, n'importe quelle taille
+reverb screen --gif   /home/nico/pluie.gif # en boucle, a la cadence du fichier
+reverb screen --gauge kraken2023elite:coolant
+reverb screen --off                        # la dalle est rendue au firmware
 ```
 
-L'image fait exactement 1 228 800 octets — 640 × 640 en **BGR**, trois octets par pixel. Reverb ne
-décode ni PNG ni JPEG : la conversion est le travail de `ffmpeg`, et l'interface graphique
-produira ces octets directement.
+⚠️ **Le chemin doit être absolu**, et la ligne de commande le complète pour vous : le démon lit
+sous son propre répertoire courant, qui n'est pas celui de son client.
 
-⚠️ **La commande boucle, et ce n'est pas un choix.** Le firmware reprend la main une trentaine de
-secondes après le dernier envoi ; un affichage durable impose de réémettre. Il n'existe aucune
-commande de retour au mode firmware — arrêter la commande est le seul moyen connu d'y revenir.
+Une image est mise à l'échelle **sans déformer ses proportions**, puis centrée sur du noir. Une
+photo 16/9 écrasée en carré s'afficherait sans erreur, nette et fausse ; c'est mesuré par les
+tests, pas regardé sur une dalle de 6 cm.
+
+Un GIF est joué à la cadence de ses propres images, **plancher compris** : une image de 1,2 Mo met
+une centaine de millisecondes à passer, et un GIF à trente images par seconde est donc **ralenti,
+jamais tronqué**. Un mouvement lent et complet se regarde, un mouvement saccadé non.
+
+### Le cadran
+
+`--gauge <sonde>` affiche une sonde en gros, avec son unité et un anneau de proportion. Les noms
+de sondes sont ceux de `reverb fans` et du panneau SONDES de la fenêtre.
+
+**Il ne dépend d'aucune pile de texte** : des chiffres à sept segments et une police matricielle de
+5 × 7, dessinés à la main dans le tampon 640 × 640. Charger un moteur de rendu de police pour
+afficher « 34.2 » serait hors de proportion, et ajouterait une bibliothèque système à un démon qui
+n'en veut pas.
+
+```bash
+cargo run --release --example cadran -p reverb-daemon -- /tmp/cadran.ppm 34.2 0.34
+```
+
+dessine un cadran **sans matériel**, dans un fichier : c'est ainsi qu'on vérifie « lisible à un
+mètre » sans brancher de Kraken.
+
+⚠️ **Une sonde muette affiche des tirets, jamais un zéro.** C'est le mode de défaillance le plus
+coûteux du cadran, parce qu'il est rassurant : un 34 °C figé derrière une pompe arrêtée, c'est un
+circuit qui chauffe sans que rien ne le signale.
+
+### Ce que le démon réémet, et pourquoi
+
+Rien de ce que la dalle affiche ne tient sans réémission — **pas même une image fixe**. Le firmware
+reprend la main une trentaine de secondes après le dernier envoi, et il n'existe aucune commande
+pour y revenir : **cesser d'émettre est le seul moyen connu**, et c'est exactement ce que
+`--off` fait.
+
+| affichage | réémission |
+|---|---|
+| image fixe | toutes les 25 s |
+| GIF | à la cadence de ses images, au plus vite tous les 100 ms |
+| cadran | toutes les 2 s, avec la valeur du moment |
+| rien | jamais — le démon est au repos absolu |
+
+### Ce qui reste en direct
 
 `reverb screen --mire` affiche quatre quadrants de couleurs connues. C'est la mire qui a confirmé
-l'ordre BGR, que la rétro-ingénierie n'avait jamais pu vérifier.
+l'ordre BGR, que la rétro-ingénierie n'avait jamais pu vérifier. Elle n'est **pas** dans le
+protocole — c'est un outil de diagnostic — et elle écrit donc en direct, ce qui suppose le démon
+arrêté : le nœud USB ne se réclame pas deux fois.
+
+Sans démon, `reverb screen` retrouve tout ce qu'il savait faire seul : l'état lu sur le
+contrôleur, la luminosité, et une image **brute** de 1 228 800 octets en BGR, telle que
+`ffmpeg -i photo.png -vf scale=640:640 -f rawvideo -pix_fmt bgr24 img.raw` la produit.
 
 ## La RAM Corsair
 

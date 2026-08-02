@@ -88,6 +88,12 @@ pub enum ActionEcran {
     },
     /// Affiche la mire de quadrants qui a tranché l'ordre des composantes.
     Mire { once: bool },
+    /// Joue un GIF en boucle. **Passe par le démon**, qui seul décode.
+    Gif { chemin: std::path::PathBuf },
+    /// Affiche un cadran sur une sonde. **Passe par le démon**, qui seul lit.
+    Cadran { sonde: String },
+    /// Rend la dalle au firmware.
+    Eteindre,
 }
 
 /// Quels ventilateurs sont visés.
@@ -354,6 +360,9 @@ fn parse_ram(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
 fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String> {
     let mut luminosite: Option<u8> = None;
     let mut image: Option<std::path::PathBuf> = None;
+    let mut gif: Option<std::path::PathBuf> = None;
+    let mut sonde: Option<String> = None;
+    let mut eteindre = false;
     let mut mire = false;
     let mut once = false;
 
@@ -361,6 +370,19 @@ fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String>
         match argument.as_str() {
             "--once" => once = true,
             "--mire" => mire = true,
+            "--off" => eteindre = true,
+            "--gif" => {
+                let brut = args
+                    .next()
+                    .ok_or_else(|| "« --gif » attend un chemin de fichier.".to_owned())?;
+                gif = Some(std::path::PathBuf::from(brut));
+            }
+            "--gauge" => {
+                sonde = Some(
+                    args.next()
+                        .ok_or_else(|| "« --gauge » attend un nom de sonde.".to_owned())?,
+                );
+            }
             "--brightness" => {
                 let brut = args
                     .next()
@@ -379,27 +401,36 @@ fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String>
         }
     }
 
-    // Les trois actions s'excluent : chacune ouvre le périphérique pour une
-    // raison différente, et les enchaîner silencieusement masquerait une faute
-    // de frappe. La luminosité doit de toute façon précéder l'image (spec §3.4),
+    // Les actions s'excluent : chacune ouvre le périphérique pour une raison
+    // différente, et les enchaîner silencieusement masquerait une faute de
+    // frappe. La luminosité doit de toute façon précéder l'image (spec §3.4),
     // ce qui se fait en deux commandes.
-    let demandes =
-        usize::from(luminosite.is_some()) + usize::from(image.is_some()) + usize::from(mire);
+    let demandes = usize::from(luminosite.is_some())
+        + usize::from(image.is_some())
+        + usize::from(gif.is_some())
+        + usize::from(sonde.is_some())
+        + usize::from(eteindre)
+        + usize::from(mire);
     if demandes > 1 {
-        return Err("« --brightness », « --image » et « --mire » s'excluent. \
-             Régler la luminosité AVANT d'envoyer l'image, en deux commandes : \
-             un changement de luminosité réinitialise l'affichage."
-            .to_owned());
+        return Err(
+            "« --brightness », « --image », « --gif », « --gauge », « --off » et \
+             « --mire » s'excluent. Régler la luminosité AVANT d'envoyer l'image, en deux \
+             commandes : un changement de luminosité réinitialise l'affichage."
+                .to_owned(),
+        );
     }
 
-    let action = match (luminosite, image, mire) {
-        (Some(percent), _, _) => ActionEcran::Luminosite(percent),
-        (_, Some(chemin), _) => ActionEcran::Image { chemin, once },
-        (_, _, true) => ActionEcran::Mire { once },
+    let action = match (luminosite, image, gif, sonde, eteindre, mire) {
+        (Some(percent), ..) => ActionEcran::Luminosite(percent),
+        (_, Some(chemin), ..) => ActionEcran::Image { chemin, once },
+        (_, _, Some(chemin), ..) => ActionEcran::Gif { chemin },
+        (_, _, _, Some(sonde), ..) => ActionEcran::Cadran { sonde },
+        (_, _, _, _, true, _) => ActionEcran::Eteindre,
+        (.., true) => ActionEcran::Mire { once },
         _ => ActionEcran::Etat,
     };
 
-    if once && matches!(action, ActionEcran::Etat | ActionEcran::Luminosite(_)) {
+    if once && !matches!(action, ActionEcran::Image { .. } | ActionEcran::Mire { .. }) {
         return Err("« --once » ne s'applique qu'à « --image » ou « --mire ».".to_owned());
     }
 

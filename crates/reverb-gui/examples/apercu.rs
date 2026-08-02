@@ -198,6 +198,10 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     // « comete » : rang 1 dans le catalogue, donc 2 dans un menu qui commence
     // par « aucune ».
     interface.set_animation_choisie(2);
+    interface.set_affichage_choisi(1);
+    interface.set_argument_ecran(SharedString::from("kraken2023elite:coolant"));
+    interface.set_affichage_ecran(SharedString::from("gauge:kraken2023elite:coolant"));
+    interface.set_luminosite_ecran(60);
     interface.set_ventilateurs(ModelRc::new(VecModel::from(vec![
         LigneVentilateur {
             canal: SharedString::from("nzxtsmart2:fan-1"),

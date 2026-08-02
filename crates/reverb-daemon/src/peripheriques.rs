@@ -5,19 +5,28 @@
 //! trame plafonne à une image et demie par seconde ; garder les descripteurs
 //! ouvre la voie à une animation qui ne saccade pas.
 //!
-//! **L'écran du Kraken n'est pas ici.** Le démon ne le tient pas, pour que
-//! `reverb screen --image` continue de marcher pendant que le démon tourne :
-//! l'envoi d'une image de 1,2 Mo n'est pas exposable sur un protocole texte, et
-//! prendre l'écran sans l'exposer serait une régression de capacité pour rien.
-//! Il rejoindra le démon quand la fenêtre en aura besoin.
+//! **L'écran du Kraken est ici depuis #33.** La condition posée s'est
+//! réalisée — « il rejoindra le démon quand la fenêtre en aura besoin » —, et
+//! la fenêtre n'ouvre aucun périphérique (ADR-002). Elle envoie donc un chemin
+//! de fichier, et c'est le démon qui lit et qui pousse les 1,2 Mo.
+//!
+//! ⚠️ **Régression de capacité assumée** : `reverb screen --image` en direct ne
+//! marche plus pendant que le démon tourne, le nœud USB ne se réclamant pas
+//! deux fois. Elle est compensée — la ligne de commande passe par le socket
+//! comme la fenêtre, et y gagne le PNG, le JPEG et le GIF qu'elle n'avait pas.
 
 use std::io;
+use std::path::PathBuf;
 
 use reverb_hw::hidraw::{self, OpenController};
 use reverb_hw::hwmon::{self, FanChannel, Mode, Percent};
 use reverb_hw::i2c;
+use reverb_hw::usbfs;
 use reverb_proto::ram::{self, SlotAddress};
-use reverb_proto::{Apply, Brightness, LEDS_PER_FAN, Position, Rgb, frame};
+use reverb_proto::{Apply, Brightness, LEDS_PER_FAN, Position, Rgb, frame, screen};
+
+/// L'identifiant produit du Kraken Elite 2023.
+const KRAKEN: u16 = 0x300c;
 
 /// Couleurs des huit LED d'un ventilateur.
 pub type CouleursVentilateur = [Rgb; LEDS_PER_FAN as usize];
@@ -32,6 +41,9 @@ pub struct Peripheriques {
     /// machine sans elle doit continuer de piloter ses ventilateurs.
     bus: Option<i2c::Bus>,
     canaux: Vec<FanChannel>,
+    /// L'écran du Kraken. Absent si le Kraken n'est pas branché, ou si la règle
+    /// udev manque — une machine sans lui doit continuer de s'éclairer.
+    ecran: Option<Kraken>,
     /// Ce qui a été écrit en dernier, pour ne pas le réécrire.
     ///
     /// **Aucune de ces cibles n'a de watchdog** : l'état écrit tient
@@ -111,15 +123,56 @@ impl Peripheriques {
             }
         }
 
+        // L'écran est facultatif : une machine sans Kraken doit démarrer, et le
+        // dire **une fois**, sans boucler à le chercher.
+        let ecran = match Kraken::ouvrir() {
+            Ok(kraken) => Some(kraken),
+            Err(erreur) => {
+                soucis.push(format!("écran du Kraken injoignable : {erreur}"));
+                None
+            }
+        };
+
         Ok((
             Peripheriques {
                 controleurs,
                 bus,
                 canaux,
+                ecran,
                 dernier: Dernier::default(),
             },
             soucis,
         ))
+    }
+
+    /// Vrai si le démon tient l'écran.
+    pub fn a_un_ecran(&self) -> bool {
+        self.ecran.is_some()
+    }
+
+    /// Règle la luminosité de la dalle.
+    ///
+    /// ⚠️ **Avant l'image, jamais après** : `30 02` réinitialise le pipeline
+    /// d'affichage (spec §3.4), et l'envoyer ensuite ferait clignoter la dalle
+    /// vers son affichage firmware.
+    pub fn luminosite_ecran(&mut self, pourcent: u8) -> io::Result<()> {
+        let kraken = self.kraken()?;
+        kraken.luminosite(pourcent)
+    }
+
+    /// Pousse une image de `screen::IMAGE_LEN` octets sur la dalle.
+    pub fn afficher_ecran(&mut self, image: &[u8]) -> io::Result<()> {
+        let kraken = self.kraken()?;
+        kraken.afficher(image)
+    }
+
+    fn kraken(&mut self) -> io::Result<&mut Kraken> {
+        self.ecran.as_mut().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "aucun écran de Kraken tenu par le démon",
+            )
+        })
     }
 
     /// Peint les huit LED d'un ventilateur.
@@ -230,4 +283,67 @@ impl Peripheriques {
 pub enum Consigne {
     Pwm(Percent),
     Auto,
+}
+
+/// L'écran du Kraken, ses deux interfaces tenues ouvertes.
+///
+/// **Deux nœuds pour un écran** : `MI_01` en HID porte les commandes — mode de
+/// diffusion, annonce, validation —, `MI_00` en bulk porte les 1,2 Mo de
+/// pixels. Le premier se rouvre à chaque trame, ce qui coûte 51 ms ; c'est
+/// tenable ici, une image ne partant qu'une fois toutes les vingt-cinq
+/// secondes. Le second, lui, est **tenu** : c'est le nœud que la ligne de
+/// commande ne peut plus réclamer tant que le démon tourne.
+struct Kraken {
+    hidraw: PathBuf,
+    bulk: usbfs::Screen,
+}
+
+impl Kraken {
+    fn ouvrir() -> io::Result<Kraken> {
+        Ok(Kraken {
+            hidraw: hidraw::find_path(KRAKEN)?,
+            bulk: usbfs::Screen::open()?,
+        })
+    }
+
+    fn luminosite(&mut self, pourcent: u8) -> io::Result<()> {
+        let trame = screen::set_brightness(pourcent)
+            .map_err(|erreur| io::Error::new(io::ErrorKind::InvalidInput, erreur.to_string()))?;
+        hidraw::write_frame(&self.hidraw, &trame)
+    }
+
+    /// Envoie une image, en respectant les accusés du contrôleur.
+    ///
+    /// Le contrôleur **acquitte chaque étape** et attend l'accusé avant la
+    /// suivante (spec §3.2) : `36 01` → `37 01`, puis les données, puis
+    /// `36 02` → `37 02`. Envoyer les 1,2 Mo sans attendre `37 01`, c'est
+    /// parler à un contrôleur qui n'écoute pas encore.
+    fn afficher(&mut self, image: &[u8]) -> io::Result<()> {
+        screen::check_image(image)
+            .map_err(|erreur| io::Error::new(io::ErrorKind::InvalidInput, erreur.to_string()))?;
+
+        // INDISPENSABLE : sans cette trame, l'image est ignorée en silence.
+        hidraw::write_frame(&self.hidraw, &screen::broadcast_mode())?;
+
+        let longueur = u32::try_from(image.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "image trop volumineuse"))?;
+        let entete = screen::bulk_header(longueur);
+
+        let accuse = hidraw::ask(&self.hidraw, &screen::begin_image(), &[0x37, 0x01])?;
+        verifier(&accuse, "l'annonce")?;
+
+        self.bulk.write_bulk(&entete)?;
+        self.bulk.write_bulk(image)?;
+
+        let accuse = hidraw::ask(&self.hidraw, &screen::end_image(), &[0x37, 0x02])?;
+        verifier(&accuse, "la validation")
+    }
+}
+
+/// Un accusé du contrôleur d'écran, dont le troisième octet porte le verdict.
+fn verifier(accuse: &reverb_proto::Frame, quoi: &str) -> io::Result<()> {
+    match screen::check_ack(accuse) {
+        Ok(()) => Ok(()),
+        Err(erreur) => Err(io::Error::other(format!("{quoi} refusée : {erreur}"))),
+    }
 }

@@ -136,6 +136,12 @@ export component Fenetre inherits Window {
     // un choix — celui d'arreter.
     in property <[string]> animations;
     in-out property <int> animation-choisie: 0;
+    // L'ecran du Kraken : ce qu'il montre, et de quoi le changer.
+    in property <[string]> affichages: ["rien", "cadran", "image", "gif"];
+    in-out property <int> affichage-choisi: 0;
+    in-out property <string> argument-ecran;
+    in-out property <int> luminosite-ecran: 100;
+    in property <string> affichage-ecran: "rien";
     in property <[LigneZone]> zones;
     in-out property <string> nouvelle-zone;
     in property <string> cible: "tout le boîtier";
@@ -179,6 +185,9 @@ export component Fenetre inherits Window {
     // vitesse d'avant.
     callback regler-animation();
     callback arreter-animation();
+    // L'ecran : la luminosite part a chaque cran, l'affichage sur un bouton.
+    callback regler-luminosite-ecran(int);
+    callback poser-ecran(string, string);
     callback regler-ventilateur(string, int);
     // La poignée est lâchée : à partir de là, la mesure a le droit de la
     // reprendre — mais pas tout de suite.
@@ -657,6 +666,57 @@ export component Fenetre inherits Window {
                                 selected => { root.regler-animation(); }
                             }
                             Button { text: "Arrêter"; clicked => { root.arreter-animation(); } }
+                        }
+
+                        // L'ecran du Kraken
+                        VerticalLayout {
+                            spacing: 6px;
+                            Titre { text: "ÉCRAN — " + root.affichage-ecran; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: "lumière " + root.luminosite-ecran;
+                                    font-size: 12px;
+                                    color: #8a8c9b;
+                                    vertical-alignment: center;
+                                    width: 78px;
+                                }
+                                Slider {
+                                    minimum: 0;
+                                    maximum: 100;
+                                    value: root.luminosite-ecran;
+                                    changed(valeur) => {
+                                        root.luminosite-ecran = Math.round(valeur);
+                                        root.regler-luminosite-ecran(root.luminosite-ecran);
+                                    }
+                                }
+                            }
+                            ComboBox {
+                                model: root.affichages;
+                                current-index <=> root.affichage-choisi;
+                            }
+                            // Un CHAMP DE TEXTE, pas un selecteur de fichiers :
+                            // ouvrir une boite de dialogue demanderait le portail
+                            // XDG, donc un client D-Bus, donc une dependance de
+                            // runtime que l'ADR-001 refuse. Le chemin se colle
+                            // depuis le gestionnaire de fichiers.
+                            LineEdit {
+                                placeholder-text: root.affichage-choisi == 1
+                                    ? "nom de la sonde, tel qu'il figure dans SONDES"
+                                    : "/chemin/absolu/vers/le/fichier";
+                                text <=> root.argument-ecran;
+                                // Invisible NE SUFFIT PAS : un element cache
+                                // garde sa place dans une VerticalLayout, et
+                                // laisserait un trou sous le menu.
+                                visible: root.affichage-choisi != 0;
+                                height: root.affichage-choisi == 0 ? 0px : 32px;
+                            }
+                            Button {
+                                text: "Appliquer à l'écran";
+                                clicked => {
+                                    root.poser-ecran(root.affichages[root.affichage-choisi], root.argument-ecran);
+                                }
+                            }
                         }
 
                         // Ventilateurs

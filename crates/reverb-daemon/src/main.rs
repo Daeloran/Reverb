@@ -4,7 +4,7 @@
 //! principal détient seul les périphériques**. Aucun verrou sur le matériel :
 //! ce qui n'est pas partagé ne peut pas entrer en collision.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, channel};
 use std::thread;
@@ -12,13 +12,14 @@ use std::time::{Duration, Instant};
 
 use reverb_anim::{Animation, Geometrie, Orientation, Reglages, Sens};
 use reverb_daemon::cadence::{Cadence, Tick};
+use reverb_daemon::ecran;
 use reverb_daemon::peripheriques::{Consigne, Peripheriques};
 use reverb_daemon::persistance::{self, Eclairage};
 use reverb_daemon::serveur::{self, Ordre};
 use reverb_daemon::telemetrie;
 use reverb_daemon::zones::{self, Rendu, Tampon, Zones};
 use reverb_hw::hwmon::Percent;
-use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine};
+use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine, ScreenAction};
 use reverb_proto::ram::{self, SlotAddress};
 use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
 
@@ -90,18 +91,41 @@ fn main() -> ExitCode {
         eprintln!("attention : {souci}");
     }
 
-    let etat = Etat::nouveau(
+    let fichier_ecran = std::env::args()
+        .nth(5)
+        .map_or_else(|| PathBuf::from(ecran::CHEMIN_ECRAN), PathBuf::from);
+    let (dalle, souci) = ecran::charger(&fichier_ecran);
+    if let Some(souci) = souci {
+        eprintln!("attention : {souci}");
+    }
+
+    let mut etat = Etat::nouveau(
         eclairage,
         geometrie,
         Fichiers {
             geometrie: fichier_geometrie,
             eclairage: fichier_eclairage,
             zones: fichier_zones,
+            ecran: fichier_ecran,
         },
         couches,
         sondes,
         lancer_le_fil_du_gpu(),
+        dalle,
     );
+
+    // La dalle retrouve ce qu'elle affichait, si le démon tient l'écran. Un
+    // fichier effacé depuis le dernier démarrage se dit **une fois** : la dalle
+    // reste au firmware plutôt que de réessayer en boucle.
+    if peripheriques.a_un_ecran() {
+        if let Err(erreur) = peripheriques.luminosite_ecran(etat.ecran.luminosite) {
+            eprintln!("attention : luminosité de l'écran : {erreur}");
+        }
+        if let Err(message) = etat.preparer_ecran() {
+            eprintln!("attention : écran non rétabli : {message}");
+            etat.ecran.affichage = ecran::Affichage::Rien;
+        }
+    }
 
     let annonce = socket.display().to_string();
     thread::spawn(move || {
@@ -145,16 +169,51 @@ fn lancer_le_fil_du_gpu() -> CacheGpu {
     cache
 }
 
-/// Les trois fichiers que le démon conserve, et leur nature.
+/// Les quatre fichiers que le démon conserve, et leur nature.
 ///
 /// `geometrie.conf` décrit la **machine** — un montage, qu'un administrateur
-/// peut corriger — d'où `/etc`. Les deux autres décrivent l'**état du service**,
-/// écrit par le démon, d'où `/var/lib`.
+/// peut corriger — d'où `/etc`. Les trois autres décrivent l'**état du
+/// service**, écrit par le démon, d'où `/var/lib`.
 struct Fichiers {
     geometrie: PathBuf,
     eclairage: PathBuf,
     zones: PathBuf,
+    ecran: PathBuf,
 }
+
+/// Ce que le démon pousse sur la dalle, et à quel rythme.
+///
+/// Le firmware reprend la main une trentaine de secondes après le dernier envoi
+/// (spec §2.2.2) : **rien de ce qui est affiché ne tient sans réémission**, pas
+/// même une image fixe. D'où une échéance dans tous les cas sauf `Rien`.
+enum Diffusion {
+    /// La dalle est rendue au firmware : le démon n'écrit plus rien.
+    Rien,
+    /// Une image fixe, réémise avant le repli.
+    Fixe(Box<ecran::Dalle>),
+    /// Un GIF, une image par délai, en boucle.
+    Anime {
+        dalles: Vec<ecran::Dalle>,
+        delais: Vec<Duration>,
+        rang: usize,
+    },
+    /// Un cadran, redessiné à chaque tour avec la valeur du moment.
+    Cadran(String),
+}
+
+/// Entre deux images d'un cadran.
+///
+/// Bien plus court que le repli du firmware : un cadran qui ne bougerait
+/// qu'une fois toutes les vingt-cinq secondes serait une photo de température,
+/// et « le cadran se met à jour tant qu'il est affiché » serait faux à l'œil.
+const CADENCE_CADRAN: Duration = Duration::from_secs(2);
+
+/// Le plancher d'un GIF : ce qu'une image de 1,2 Mo coûte sur le bus.
+///
+/// Mesuré à l'envoi : annonce, en-tête, 1,2 Mo de bulk, validation. En deçà, le
+/// démon ne tiendrait pas la cadence et prendrait du retard sans le dire — d'où
+/// `ecran::cadence`, qui **ralentit** le GIF au lieu d'en sauter des images.
+const PLANCHER_GIF: Duration = Duration::from_millis(100);
 
 struct Etat {
     ventilateurs: [Rgb; 10],
@@ -184,6 +243,17 @@ struct Etat {
     fixe: Tampon,
     /// Les couches nommées.
     zones: Zones,
+    /// L'écran du Kraken : sa luminosité et ce qu'il montre. Conservé sur
+    /// disque, comme l'éclairage.
+    ecran: ecran::Etat,
+    /// Ce qui part vraiment sur la dalle, déjà décodé et mis à l'échelle.
+    ///
+    /// Séparé de `ecran` parce que ce n'est pas la même nature : l'un est un
+    /// choix qu'on conserve, l'autre est un mégaoctet de pixels qu'on ne
+    /// conserve jamais et qu'on redécode au démarrage.
+    diffusion: Diffusion,
+    /// Quand la prochaine image doit partir. `None` : rien à pousser.
+    echeance_ecran: Option<Instant>,
 }
 
 impl Etat {
@@ -194,6 +264,7 @@ impl Etat {
         zones: Zones,
         sondes: Vec<reverb_hw::hwmon::Sonde>,
         gpu: CacheGpu,
+        ecran: ecran::Etat,
     ) -> Etat {
         Etat {
             ventilateurs: eclairage.ventilateurs,
@@ -216,6 +287,66 @@ impl Etat {
                     .map(|couleur| [couleur; ram::LEDS_PER_STICK]),
             },
             zones,
+            ecran,
+            // Décodée juste après la construction, par `reprendre_l_ecran` : le
+            // fichier ne garde qu'un chemin, jamais des pixels.
+            diffusion: Diffusion::Rien,
+            echeance_ecran: None,
+        }
+    }
+
+    /// Prépare ce que la dalle doit montrer, depuis l'affichage conservé.
+    ///
+    /// Rend le message d'échec s'il y en a un — un fichier effacé depuis le
+    /// dernier démarrage, par exemple. La dalle reste alors au firmware, et le
+    /// démon le dit **une fois** plutôt que de réessayer en boucle.
+    fn preparer_ecran(&mut self) -> Result<(), String> {
+        let (diffusion, echeance) = match &self.ecran.affichage {
+            ecran::Affichage::Rien => (Diffusion::Rien, None),
+            ecran::Affichage::Cadran(sonde) => {
+                (Diffusion::Cadran(sonde.clone()), Some(Instant::now()))
+            }
+            ecran::Affichage::Image(chemin) => {
+                let dalles = ecran::Dalle::depuis_fichier(Path::new(chemin))
+                    .map_err(|erreur| erreur.to_string())?;
+                let premiere = dalles
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| format!("{chemin} : aucune image"))?;
+                (Diffusion::Fixe(Box::new(premiere)), Some(Instant::now()))
+            }
+            ecran::Affichage::Gif(chemin) => {
+                let (dalles, ecrits) = ecran::Dalle::animee_depuis_fichier(Path::new(chemin))
+                    .map_err(|erreur| erreur.to_string())?;
+                // Les délais écrits dans le fichier, **relevés au plancher du
+                // bus** : un GIF à trente images par seconde est ralenti, pas
+                // tronqué. Un mouvement lent et complet se regarde.
+                let delais = ecran::cadence(&ecrits, PLANCHER_GIF);
+                (
+                    Diffusion::Anime {
+                        dalles,
+                        delais,
+                        rang: 0,
+                    },
+                    Some(Instant::now()),
+                )
+            }
+        };
+        self.diffusion = diffusion;
+        self.echeance_ecran = echeance;
+        Ok(())
+    }
+
+    /// L'état de la dalle, sous la forme qu'un client attend.
+    fn ligne_ecran(&self) -> ResponseLine {
+        ResponseLine::Screen {
+            luminosite: self.ecran.luminosite,
+            affichage: match &self.ecran.affichage {
+                ecran::Affichage::Rien => "rien".to_owned(),
+                ecran::Affichage::Cadran(sonde) => format!("gauge:{sonde}"),
+                ecran::Affichage::Image(chemin) => format!("image:{chemin}"),
+                ecran::Affichage::Gif(chemin) => format!("gif:{chemin}"),
+            },
         }
     }
 
@@ -315,6 +446,12 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat:
             REPOS
         };
 
+        // L'écran a sa propre horloge : rien de ce qu'il affiche ne tient sans
+        // réémission, pas même une image fixe. Elle est **indépendante** de
+        // celle de l'éclairage — une dalle qui montre un cadran n'oblige pas
+        // les ventilateurs à s'animer, et l'inverse non plus.
+        let attente = attente.min(tour_d_ecran(&mut etat, peripheriques));
+
         if attente > Duration::ZERO {
             match ordres.recv_timeout(attente) {
                 Ok(ordre) => traiter(ordre, &mut etat, peripheriques),
@@ -324,6 +461,80 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat:
             }
         }
     }
+}
+
+/// Pousse une image sur la dalle si son échéance est venue, et dit dans combien
+/// de temps revenir.
+///
+/// Rend [`REPOS`] quand il n'y a rien à afficher : le démon doit être au repos
+/// absolu quand la dalle est rendue au firmware.
+fn tour_d_ecran(etat: &mut Etat, peripheriques: &mut Peripheriques) -> Duration {
+    let Some(echeance) = etat.echeance_ecran else {
+        return REPOS;
+    };
+    let maintenant = Instant::now();
+    if maintenant < echeance {
+        return echeance - maintenant;
+    }
+
+    // Le délai jusqu'à l'image suivante est décidé **avant** l'envoi : un
+    // envoi qui échoue ne doit pas figer l'horloge, sinon un Kraken débranché
+    // ferait tourner cette boucle à plein régime.
+    let prochain = match &mut etat.diffusion {
+        Diffusion::Rien => {
+            etat.echeance_ecran = None;
+            return REPOS;
+        }
+        Diffusion::Fixe(dalle) => {
+            let octets = dalle.octets().to_vec();
+            let _ = peripheriques.afficher_ecran(&octets);
+            Duration::from_secs(reverb_proto::screen::REFRESH_INTERVAL_SECS)
+        }
+        Diffusion::Anime {
+            dalles,
+            delais,
+            rang,
+        } => {
+            let courant = *rang % dalles.len().max(1);
+            let octets = dalles
+                .get(courant)
+                .map(|dalle| dalle.octets().to_vec())
+                .unwrap_or_default();
+            if !octets.is_empty() {
+                let _ = peripheriques.afficher_ecran(&octets);
+            }
+            let delai = delais.get(courant).copied().unwrap_or(PLANCHER_GIF);
+            *rang = (courant + 1) % dalles.len().max(1);
+            delai
+        }
+        Diffusion::Cadran(sonde) => {
+            let dalle = cadran_du_moment(sonde, &etat.sondes);
+            let _ = peripheriques.afficher_ecran(dalle.octets());
+            CADENCE_CADRAN
+        }
+    };
+
+    etat.echeance_ecran = Some(maintenant + prochain);
+    prochain
+}
+
+/// Le cadran d'une sonde, avec sa valeur du moment.
+///
+/// Une sonde absente ou muette rend un cadran **sans valeur** : la dalle le dit
+/// plutôt que de figer la dernière lecture. Un 34 °C affiché derrière une pompe
+/// arrêtée est le mode de défaillance le plus coûteux du cadran, parce qu'il
+/// est rassurant.
+fn cadran_du_moment(slug: &str, sondes: &[reverb_hw::hwmon::Sonde]) -> ecran::Dalle {
+    let sonde = sondes.iter().find(|sonde| sonde.slug == slug);
+    let valeur = sonde
+        .and_then(|sonde| sonde.lire().ok())
+        .map(|millidegres| millidegres as f32 / 1000.0);
+    let libelle = sonde.map_or(slug, |sonde| sonde.slug.as_str());
+    // La proportion se lit sur une échelle de température de boîtier : zéro
+    // degré vide l'anneau, cent le remplit. Ce n'est pas une mesure, c'est une
+    // lecture au coup d'œil — la valeur exacte est écrite au centre.
+    let proportion = valeur.map_or(0.0, |degres| degres / 100.0);
+    ecran::Dalle::cadran(libelle, valeur, "°C", proportion)
 }
 
 /// Ce que la boucle de rendu tient réellement, une seconde à la fois.
@@ -492,6 +703,8 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
 
         Request::Lighting => etat_eclairage(etat),
 
+        Request::Screen(action) => ecran_commande(etat, peripheriques, action),
+
         Request::Watch => {
             if let Some(canal) = abonnement {
                 // La première image part **tout de suite** quand rien n'est
@@ -642,6 +855,93 @@ fn conserver(etat: &Etat) -> Vec<ResponseLine> {
             message: format!(
                 "éclairage appliqué mais non conservé : {} ({erreur})",
                 etat.fichiers.eclairage.display()
+            ),
+        }],
+    }
+}
+
+/// Ce qu'une commande `screen` fait de la dalle.
+///
+/// ⚠️ **Rien n'est appliqué avant que tout soit accepté.** Une image d'un format
+/// inconnu est refusée sans que la dalle change — c'est le critère
+/// d'acceptation, et c'est aussi ce qui distingue « refuser » d'« éteindre en
+/// silence ».
+fn ecran_commande(
+    etat: &mut Etat,
+    peripheriques: &mut Peripheriques,
+    action: ScreenAction,
+) -> Vec<ResponseLine> {
+    match action {
+        ScreenAction::State => vec![etat.ligne_ecran(), ResponseLine::End],
+
+        ScreenAction::Brightness(pourcent) => {
+            if let Err(erreur) = peripheriques.luminosite_ecran(pourcent) {
+                return vec![ResponseLine::Error {
+                    message: format!("luminosité refusée : {erreur}"),
+                }];
+            }
+            etat.ecran.luminosite = pourcent;
+            // ⚠️ `30 02` réinitialise le pipeline d'affichage (spec §3.4) :
+            // l'image doit repartir tout de suite derrière, sinon la dalle
+            // clignote vers le firmware et y reste.
+            if !matches!(etat.diffusion, Diffusion::Rien) {
+                etat.echeance_ecran = Some(Instant::now());
+            }
+            conserver_ecran(etat)
+        }
+
+        ScreenAction::Off => {
+            etat.ecran.affichage = ecran::Affichage::Rien;
+            etat.diffusion = Diffusion::Rien;
+            etat.echeance_ecran = None;
+            // Aucune trame ne ramène au mode firmware : **cesser d'émettre est
+            // le seul moyen connu d'y revenir** (spec §2.3). La dalle reprend
+            // donc son affichage d'origine dans la trentaine de secondes.
+            conserver_ecran(etat)
+        }
+
+        ScreenAction::Image(chemin) => poser_affichage(etat, ecran::Affichage::Image(chemin)),
+        ScreenAction::Gif(chemin) => poser_affichage(etat, ecran::Affichage::Gif(chemin)),
+        ScreenAction::Gauge(sonde) => {
+            // Une sonde inconnue est refusée **ici**, pas sur la dalle : un
+            // cadran qui afficherait « --- » pour une faute de frappe se lirait
+            // comme une sonde en panne.
+            if !etat.sondes.iter().any(|connue| connue.slug == sonde) {
+                return vec![ResponseLine::Error {
+                    message: format!(
+                        "sonde « {sonde} » inconnue — « status » donne celles de la machine"
+                    ),
+                }];
+            }
+            poser_affichage(etat, ecran::Affichage::Cadran(sonde))
+        }
+    }
+}
+
+/// Change ce que la dalle montre, en refusant sans rien casser.
+fn poser_affichage(etat: &mut Etat, affichage: ecran::Affichage) -> Vec<ResponseLine> {
+    let precedent = std::mem::replace(&mut etat.ecran.affichage, affichage);
+    match etat.preparer_ecran() {
+        Ok(()) => conserver_ecran(etat),
+        Err(message) => {
+            // Le refus remet **tout** en place, y compris ce qui était en train
+            // de tourner : une image illisible ne doit pas éteindre le cadran
+            // qu'elle remplaçait.
+            etat.ecran.affichage = precedent;
+            let _ = etat.preparer_ecran();
+            vec![ResponseLine::Error { message }]
+        }
+    }
+}
+
+/// Écrit l'état de l'écran sur disque, et répond.
+fn conserver_ecran(etat: &Etat) -> Vec<ResponseLine> {
+    match ecran::enregistrer(&etat.fichiers.ecran, &etat.ecran) {
+        Ok(()) => vec![ResponseLine::End],
+        Err(erreur) => vec![ResponseLine::Error {
+            message: format!(
+                "écran appliqué mais non conservé : {} ({erreur})",
+                etat.fichiers.ecran.display()
             ),
         }],
     }
