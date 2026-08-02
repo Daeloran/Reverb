@@ -47,8 +47,19 @@ StateDirectory=reverb
 # ⚠️ Ne PAS ajouter `ProtectKernelTunables=yes` : il monte /sys en lecture
 # seule, ce qui coupe précisément le réglage des ventilateurs.
 NoNewPrivileges=yes
-ProtectHome=yes
-PrivateTmp=yes
+
+# `read-only` et non `yes` : le démon **lit** des images que l'utilisateur
+# nomme — c'est tout le sujet de l'écran du Kraken (#33) —, et n'écrit jamais
+# rien chez lui. Avec `yes`, systemd monte un tmpfs vide sur /home, donc sur
+# /var/home dont /home est le lien ici : le démon voyait le dossier personnel
+# **vide** et refusait toute image en disant « No such file or directory »,
+# alors que le fichier existait (#62). Le durcissement qui compte — l'écriture —
+# reste entier.
+ProtectHome=read-only
+
+# Pas de `PrivateTmp` : /tmp est l'endroit où l'on pose une image pour l'essayer,
+# et un /tmp privé la rendait invisible au démon exactement comme /home. Il n'y
+# écrit aucun fichier temporaire, la protection ne le protégeait de rien.
 
 Restart=on-failure
 RestartSec=2
