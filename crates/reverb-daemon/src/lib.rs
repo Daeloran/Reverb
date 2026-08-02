@@ -17,6 +17,7 @@ pub mod cadence;
 pub mod ecran;
 pub mod peripheriques;
 pub mod persistance;
+pub mod profils;
 pub mod quarantaine;
 pub mod serveur;
 pub mod telemetrie;
