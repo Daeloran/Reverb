@@ -153,6 +153,9 @@ fn reglages_temoins() -> Reglages {
         couleur: Rgb::new(0x00, 0xff, 0x00),
         vitesse: 7,
         direction: Direction::HautBas,
+        // Champ ajouté par #75. Aucune des animations employées ici ne suit de sonde ;
+        // `vague` la refuserait même.
+        sonde: None,
     }
 }
 
@@ -800,7 +803,7 @@ fn une_zone_animee_montre_ce_que_l_animation_calcule_sur_le_boitier_entier() {
     zones.poser("radiateur", &cibles);
     let anim = animation("vague");
     let reglages = reglages_temoins();
-    assert!(zones.animer("radiateur", Some((anim, reglages))));
+    assert!(zones.animer("radiateur", Some((anim, reglages.clone()))));
 
     let geometrie = Geometrie::mesuree();
     for pas in [0, 5, 60, 137] {
@@ -858,8 +861,8 @@ fn deux_zones_animees_differemment_avancent_chacune_a_sa_vitesse() {
     let mut zones = Zones::vide();
     zones.poser("lente", &lentes);
     zones.poser("rapide", &rapides);
-    assert!(zones.animer("lente", Some((anim, lente))));
-    assert!(zones.animer("rapide", Some((anim, rapide))));
+    assert!(zones.animer("lente", Some((anim, lente.clone()))));
+    assert!(zones.animer("rapide", Some((anim, rapide.clone()))));
     aucune_led_dans_deux_zones(&zones);
 
     let geometrie = Geometrie::mesuree();
@@ -1129,6 +1132,10 @@ fn reglages_acceptables(anim: Animation) -> Reglages {
                 }
                 "vitesse" => reglages_temoins().vitesse.to_string(),
                 "direction" => reglages_temoins().direction.slug().to_owned(),
+                // Étendu pour #75, comme ce message le demande. `thermique` exige le slug
+                // d'une sonde ; ce fichier ne vérifie que l'aller-retour du réglage, et un
+                // slug plausible y suffit — l'existence de la sonde est l'affaire du démon.
+                "sonde" => "kraken2023elite:coolant-temp".to_owned(),
                 autre => panic!(
                     "« {autre} » est un paramètre d'animation que ce test ne sait pas fabriquer : \
                      l'étendre plutôt que le contourner."

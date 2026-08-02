@@ -85,7 +85,7 @@ const TEMOIN_BIS: Rgb = Rgb::new(0x20, 0xff, 0x80);
 /// Le contrat fixe la liste par construction : `reglages` rend un `Reglages` à trois champs
 /// (`couleur`, `vitesse`, `direction`), donc une clé hors de cette liste n'aurait nulle part où
 /// atterrir. `sens` y figure parce que l'issue l'écrit dans son exemple de commande.
-const CLES_CONNUES: [&str; 4] = ["couleur", "vitesse", "direction", "sens"];
+const CLES_CONNUES: [&str; 5] = ["couleur", "vitesse", "direction", "sens", "sonde"];
 
 /// Le mot qui écrit une direction sur le socket.
 fn slug_direction(direction: Direction) -> &'static str {
@@ -96,6 +96,13 @@ fn slug_direction(direction: Direction) -> &'static str {
         Direction::ArriereAvant => "arriere-avant",
         Direction::Horaire => "horaire",
         Direction::Antihoraire => "antihoraire",
+        // Les deux directions locales de #75. Elles n'existaient pas quand ce
+        // fichier a été écrit ; elles sont ajoutées ici pour qu'il compile, et
+        // **rien d'autre n'est touché** — ce que les tests de #27 vérifient
+        // reste vérifié à l'identique. Leur propre spécification vit dans
+        // `spec_motifs_locaux.rs`.
+        Direction::BordsCentre => "bords-centre",
+        Direction::CentreBords => "centre-bords",
     }
 }
 
@@ -522,15 +529,22 @@ fn un_parametre_inconnu_est_refuse_en_nommant_la_cle_fautive() {
 
             // Ce qui est déclaré est accepté, pour de bon : la valeur passe, et le réglage rendu
             // reste utilisable pour rendre une image.
+            //
+            // ⚠️ Les réglages **obligatoires** l'accompagnent (#75) : sans eux, c'est leur absence
+            // que le refus nommerait, et non l'acceptation de la clé qu'on mesure ici.
             let valeur = valeur_valide(cle);
-            let reglages = animation
-                .reglages(&[paire(cle, &valeur)])
-                .unwrap_or_else(|erreur| {
-                    panic!(
-                        "« {} » déclare accepter « {cle} » mais refuse « {cle}={valeur} » : {erreur}",
-                        animation.nom()
-                    )
-                });
+            let mut essai = vec![paire(cle, &valeur)];
+            for exigee in animation.parametres_obligatoires() {
+                if exigee != cle {
+                    essai.push(paire(exigee, &valeur_valide(exigee)));
+                }
+            }
+            let reglages = animation.reglages(&essai).unwrap_or_else(|erreur| {
+                panic!(
+                    "« {} » déclare accepter « {cle} » mais refuse « {cle}={valeur} » : {erreur}",
+                    animation.nom()
+                )
+            });
             let _ = animation.image(&geometrie, &reglages, 0);
 
             // Et la valeur atterrit dans le champ qui porte son nom. Une clé acceptée qui
@@ -573,6 +587,14 @@ fn un_parametre_inconnu_est_refuse_en_nommant_la_cle_fautive() {
                         );
                     }
                 }
+                // Ajoutée par #75, et vérifiée comme les autres : la valeur atterrit dans le champ
+                // qui porte son nom, et pas dans un autre.
+                "sonde" => assert_eq!(
+                    reglages.sonde.as_deref(),
+                    Some(valeur.as_str()),
+                    "« {} » : `sonde={valeur}` doit atterrir dans le champ `sonde`",
+                    animation.nom()
+                ),
                 autre => unreachable!("« {autre} » n'est pas une clé connue de ce test"),
             }
 
@@ -581,12 +603,19 @@ fn un_parametre_inconnu_est_refuse_en_nommant_la_cle_fautive() {
             // rangée dans son champ, puis ignorée au rendu est le pire des trois défauts : elle
             // répond `end` sans rien changer, et on cherche ailleurs.
             for (une, autre) in valeurs_distinctes(cle) {
-                let premier = animation
-                    .reglages(&[paire(cle, une)])
-                    .expect("valeur valide");
-                let second = animation
-                    .reglages(&[paire(cle, autre)])
-                    .expect("valeur valide");
+                // Les réglages obligatoires accompagnent l'essai (#75), pour la même raison que
+                // plus haut : sans eux, c'est leur absence qu'on mesurerait.
+                let avec = |valeur: &str| {
+                    let mut paires = vec![paire(cle, valeur)];
+                    for exigee in animation.parametres_obligatoires() {
+                        if exigee != cle {
+                            paires.push(paire(exigee, &valeur_valide(exigee)));
+                        }
+                    }
+                    paires
+                };
+                let premier = animation.reglages(&avec(une)).expect("valeur valide");
+                let second = animation.reglages(&avec(autre)).expect("valeur valide");
                 assert!(
                     rendus_differents(&animation, &geometrie, &premier, &second),
                     "« {} » : `{cle}={une}` et `{cle}={autre}` peignent la même chose à tous les \
@@ -741,7 +770,23 @@ fn sans_parametre_le_rendu_est_celui_des_valeurs_par_defaut_explicites() {
     let geometrie = geometrie_de_test();
     let defaut = Reglages::default();
 
-    for animation in catalogue() {
+    // ⚠️ **Domaine restreint par #75, et l'intention est intacte.** À la
+    // rédaction de ce test, tout réglage du catalogue avait une valeur par
+    // défaut : « toute animation » et « toute animation dont tous les réglages
+    // ont un défaut » désignaient alors le même ensemble.
+    //
+    // `thermique` (#75) est la première à exiger un réglage — sa sonde —, et
+    // `Reglages::default()` n'a aucune valeur sensée à lui donner : il n'existe
+    // pas de sonde par défaut, la machine en expose seize et le choix dépend
+    // d'elle. Lancer `animate thermique` sans sonde afficherait un blanc pulsant
+    // permanent, indiscernable d'une sonde tombée en panne.
+    //
+    // Ce test garde donc **exactement** ce qu'il vérifiait, sur exactement les
+    // mêmes animations qu'au jour où il a été écrit.
+    for animation in catalogue()
+        .into_iter()
+        .filter(|animation| animation.parametres_obligatoires().is_empty())
+    {
         let implicites = animation
             .reglages(&[])
             .expect("aucune paire, donc aucune paire fautive");
@@ -1058,6 +1103,9 @@ fn valeur_valide(cle: &str) -> String {
         // borne haute, dont le contrat ne dit pas si elles sont admises.
         "vitesse" => "3".to_owned(),
         "direction" | "sens" => slug_direction(Direction::BasHaut).to_owned(),
+        // Ajoutée par #75. Un slug plausible suffit : ce crate est pur et ne vérifie pas qu'une
+        // sonde existe — c'est le démon qui les découvre.
+        "sonde" => "kraken2023elite:coolant-temp".to_owned(),
         autre => panic!("« {autre} » n'est pas une clé connue de ce test"),
     }
 }
@@ -1080,6 +1128,15 @@ fn valeurs_distinctes(cle: &str) -> Vec<(&'static str, &'static str)> {
             }
             couples
         }
+        // ⚠️ **Aucun couple, et c'est structurel** (#75). `sonde` est le seul réglage du catalogue
+        // qui soit un **nom** et non un paramètre de rendu : il désigne *quelle* mesure suivre, et
+        // c'est la mesure — passée à `image_avec_mesure` par le démon — qui peint. `image()` est
+        // pure et ne relève rien, donc deux sondes différentes y rendent forcément la même image.
+        //
+        // La vérification « le paramètre fait quelque chose » n'a donc pas d'objet ici. Ce que
+        // `sonde` doit faire est vérifié dans `spec_familles_nouvelles.rs` : le gradient suit la
+        // mesure, et une sonde muette pulse en blanc.
+        "sonde" => Vec::new(),
         autre => panic!("« {autre} » n'est pas une clé connue de ce test"),
     }
 }
@@ -1134,6 +1191,10 @@ fn valeurs_invalides(cle: &str) -> &'static [&'static str] {
             "avant-arrière",
             "anti-horaire",
         ],
+        // Ajoutée par #75. Une sonde vide ne se relève jamais : l'accepter lancerait une animation
+        // condamnée au blanc pulsant permanent, que rien n'expliquerait. Un slug inexistant, lui,
+        // n'est **pas** refusable ici — ce crate est pur et ne connaît aucune sonde.
+        "sonde" => &["", " ", "   ", "\t"],
         autre => panic!("« {autre} » n'est pas une clé connue de ce test"),
     }
 }

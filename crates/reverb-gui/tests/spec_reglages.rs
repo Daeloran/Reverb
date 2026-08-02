@@ -371,7 +371,19 @@ fn chaque_animation_du_catalogue_ne_recoit_que_les_cles_qu_elle_accepte() {
     // `arc-en-ciel`, et elle ne dégrade pas la commande : elle l'annule. Le symptôme à l'usage est
     // celui-là même que #32 répare — un curseur qui ne fait rien — mais pour une autre cause, sur
     // une seule animation du catalogue. D'où un balayage complet plutôt qu'un cas.
-    for nom in CATALOGUE {
+    //
+    // ⚠️ **Les animations à réglage obligatoire en sont écartées** (#75). `thermique` exige le slug
+    // d'une sonde, et la fenêtre ne sait pas encore en proposer une — elle ne montre les sondes que
+    // sous leurs noms lisibles, dans un panneau qui ne parle pas encore aux animations. C'est
+    // nommément le chantier #76, dont un critère d'acceptation est que « `thermique` propose les
+    // sondes sous leurs noms lisibles ». Jusque-là, `commande` ne saurait que produire une requête
+    // que le démon refuserait — ce que ce test constaterait sans rien apprendre.
+    for nom in CATALOGUE.iter().filter(|nom| {
+        Animation::par_nom(nom)
+            .expect("le catalogue s'ouvre")
+            .parametres_obligatoires()
+            .is_empty()
+    }) {
         let regle = reglage(Some(*nom), VITESSE_AVANT, DIRECTION_AVANT);
         let (porte, paires) = animate(&regle);
         assert_eq!(porte, *nom, "« {nom} » se relance sous son propre nom");
@@ -398,12 +410,22 @@ fn chaque_animation_du_catalogue_ne_recoit_que_les_cles_qu_elle_accepte() {
 
         // Et ce qui est porté est bien ce qui est affiché : une clé acceptée mais laissée de côté
         // ferait retomber le démon sur son défaut, sans un mot.
+        //
+        // ⚠️ La direction n'est attendue que si l'animation l'accepte (#75) : quatre familles
+        // nouvelles n'en suivent aucune — `rotation` suit le montage relevé de chaque anneau,
+        // `pouls` la distance à la pompe, `scintillement` le hasard, `thermique` une sonde. La leur
+        // porter ferait refuser la commande entière, ce que la boucle ci-dessus interdit déjà.
         let lu = relu(nom, &paires);
         assert_eq!(
-            (lu.vitesse, lu.direction),
-            (VITESSE_AVANT, DIRECTION_AVANT),
-            "« {nom} » reçoit la vitesse et la direction affichées : {paires:?}"
+            lu.vitesse, VITESSE_AVANT,
+            "« {nom} » reçoit la vitesse affichée : {paires:?}"
         );
+        if acceptees.contains(&"direction") {
+            assert_eq!(
+                lu.direction, DIRECTION_AVANT,
+                "« {nom} » reçoit la direction affichée : {paires:?}"
+            );
+        }
         if acceptees.contains(&"couleur") {
             assert_eq!(
                 lu.couleur, COULEUR,

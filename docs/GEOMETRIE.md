@@ -109,6 +109,24 @@ côté arrière des barrettes.
 > panneau d'E/S arrière par rapport aux slots DIMM. Deux observations indépendantes concordent sur
 > « gauche = arrière », ce qui est plus solide que l'une des deux seule.
 
+## Le bloc-pompe 🔶
+
+L'animation `pouls` (#75) propage une onde **sphérique** depuis le bloc-pompe : il lui faut donc un
+point d'origine.
+
+🔶 **Déduit, jamais relevé.** Aucune mesure ne le donne. Il est posé d'après la seule indication
+ci-dessus — « l'écran du Kraken est immédiatement du côté arrière des barrettes » — donc sur le
+plateau de carte mère, à la hauteur du milieu des barrettes, et soixante millimètres derrière
+elles.
+
+**La précision importe peu, et c'est pourquoi ce 🔶 tient** : une onde sphérique se reconnaît à sa
+forme, pas à son origine au millimètre. Ce qu'il ne faudrait pas, c'est la placer au **centre du
+boîtier** — l'onde y deviendrait indiscernable d'une pulsation générale, et c'est le seul écart qui
+se verrait à l'œil.
+
+**À relever si** quelqu'un ouvre le panneau avec un mètre : c'est le seul moyen de passer ce point
+en ✅.
+
 ## Par où l'écoulement entre dans un ventilateur ✅
 
 Relevé le **2026-08-01**, dans les termes de Nico :

@@ -30,7 +30,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Outil de validation en ligne de commande | ✅ les trois cibles pilotées |
 | Démon | ✅ éclairage sans fenêtre, descripteurs tenus |
 | Géométrie du boîtier | ✅ mesurée le 2026-07-31 |
-| Catalogue d'animations | ✅ six familles paramétrables |
+| Catalogue d'animations | ✅ dix familles, huit directions dont deux locales |
 | Interface Slint | ✅ maquette habillée, deux vues, zones, sondes, écran |
 | Écran du Kraken dans le démon | ✅ luminosité, cadran, image, GIF |
 | Profils — une ambiance sous un nom | ✅ éclairage, zones et écran, deux exemples livrés |
@@ -112,8 +112,13 @@ saute que ce qui n'a pas bougé :
 
 | animation | cibles réécrites (sur 14) | cadence |
 |---|---|---|
-| `balayage`, `comete` | 3 à 5 | 50 à 100 img/s |
-| `vague`, `respiration`, `arc-en-ciel`, `braise` | **14** | **~20 img/s** |
+| `balayage` | 3 | ~90 img/s |
+| `comete`, `pouls` | 5 | ~45 img/s |
+| `vague`, `respiration`, `arc-en-ciel`, `braise`, `rotation`, `scintillement` | **14** | **~20 img/s** |
+
+`thermique` ne figure pas dans ce tableau : à température stable elle **ne change pas d'image**, et
+le cache saute alors les quatorze cibles. C'est la seule animation du catalogue qui laisse le démon
+au repos.
 
 Vingt images par seconde n'est pas un décrochage : c'est le **plancher physique** de ce matériel
 — 29,5 ms de trames HID plus 21,6 ms de blocs SMBus, dont ~3 ms par bloc sur le fil à 100 kHz.
@@ -137,10 +142,85 @@ echo 'animate arc-en-ciel direction=avant-arriere'
 echo 'animate off'
 ```
 
-Six familles — `vague`, `comete`, `respiration`, `arc-en-ciel`, `balayage`, `braise` — chacune
-réglable par `couleur` (six chiffres hexadécimaux), `vitesse` (1 à 10) et `direction`
-(`bas-haut`, `haut-bas`, `avant-arriere`, `arriere-avant`, `horaire`, `antihoraire`).
-`arc-en-ciel` n'accepte pas de couleur : elle les produit toutes.
+Dix familles, réglables par `couleur` (six chiffres hexadécimaux), `vitesse` (1 à 10) et
+`direction`. Chacune n'accepte que ce qu'elle sait porter — une clé de trop fait refuser la
+commande **entière**, pas seulement la clé.
+
+| famille | ce qu'elle fait | réglages |
+|---|---|---|
+| `vague` | l'onde plane, le long de la direction | couleur, vitesse, direction |
+| `comete` | une tête vive suivie d'une traînée | couleur, vitesse, direction |
+| `respiration` | le boîtier respire, et la respiration se propage | couleur, vitesse, direction |
+| `arc-en-ciel` | le spectre déroulé — elle produit ses teintes | vitesse, direction |
+| `balayage` | une bande nette dont on voit la limite bouger | couleur, vitesse, direction |
+| `braise` | deux ondes incommensurables, sans cycle apparent | couleur, vitesse, direction |
+| `rotation` | **chaque anneau tourne sur lui-même** | couleur, vitesse |
+| `thermique` | **la couleur suit une sonde** | vitesse, **sonde** |
+| `pouls` | **une onde sphérique née à la pompe** | couleur, vitesse |
+| `scintillement` | **des LED s'allument au hasard** | couleur, vitesse |
+
+Huit directions : `bas-haut`, `haut-bas`, `avant-arriere`, `arriere-avant`, `horaire`,
+`antihoraire`, et les deux **locales** — `bords-centre`, `centre-bords`.
+
+#### Les directions locales — le motif se répète sur chaque objet
+
+```bash
+echo 'animate vague direction=bords-centre'
+echo 'animate comete direction=centre-bords'
+```
+
+Les six premières directions projettent une LED sur un **axe du boîtier** : l'onde traverse les
+quatorze objets comme un volume. Les deux locales la projettent sur sa **distance au milieu de
+l'objet qui la porte** — sa barrette, son ventilateur. Le motif se répète donc à l'identique sur
+chacun des quatorze, ce que fait iCUE sur la RAM : il part des deux bords de *chaque* barrette et
+converge vers son milieu. Douze motifs pour deux directions écrites.
+
+⚠️ **Les deux LED d'extrémité d'un objet s'allument toujours ensemble** — c'est la définition du
+motif, et la symétrie est calculée sur les **indices**, jamais sur une position flottante. Mesuré :
+`2 × (9/10) − 1` ne vaut pas exactement `|2 × (1/10) − 1|` en `f32`, et les LED 1 et 9 d'une
+barrette ressortaient à 153 et 152 — un écart d'une unité sur 255, invisible à l'œil, et une
+symétrie fausse.
+
+#### `thermique` — et ce qu'une sonde muette doit montrer
+
+```bash
+echo 'animate thermique sonde=kraken2023elite:coolant-temp'
+```
+
+Le boîtier passe du **bleu au vert, à l'orange, au rouge** entre 25 °C et 60 °C : le cadran de
+l'écran transposé aux 124 LED.
+
+⚠️ **La sonde est exigée, pas seulement acceptée** — seule du catalogue. `Reglages::default()` n'a
+aucune valeur sensée à lui donner : il n'existe pas de sonde par défaut, la machine en expose
+seize. Un nom inconnu est refusé **en donnant la liste**, et ce refus-là vit dans le démon, seul à
+savoir lesquelles existent.
+
+⚠️ **Une sonde qui ne répond plus fait pulser le boîtier en blanc**, jamais la dernière couleur
+connue. C'est le mode de défaillance le plus coûteux du projet parce qu'il est rassurant : un
+34 °C figé derrière une pompe arrêtée, c'est un circuit qui chauffe sans que rien ne le signale. Le
+blanc est achromatique — aucune étape du gradient ne l'est — et il pulse, ce qu'aucune température
+ne fait. La quarantaine de #68 s'applique, et le gradient reprend dès que la sonde répond.
+
+La sonde est relue **une fois par seconde**, jamais à la cadence des images : une lecture sysfs sur
+un périphérique muet bloque cinq secondes en sommeil non interruptible.
+
+#### `rotation`, `pouls`, `scintillement` — trois motifs qui ne suivent aucun axe
+
+**`rotation`** fait tourner chaque anneau **sur lui-même**, à sa place dans le boîtier. C'est le
+motif le plus « ventilateur » du catalogue, et il manquait : `horaire` est une rotation dans le
+*volume*, pas d'un anneau. Elle suit l'**angle relevé** de chaque ventilateur, jamais le numéro de
+LED — sans quoi le motif tournerait à l'envers sur les trois du plafond, montés antihoraire. Les
+barrettes, qui n'ont pas d'anneau, suivent bords↔centre : une RAM éteinte pendant qu'un motif
+tourne se lirait comme une panne.
+
+**`pouls`** propage une onde **sphérique** depuis le bloc-pompe. Deux LED à égale distance de lui
+s'allument ensemble, quels que soient leur organe et leur axe — la première animation à exploiter
+la géométrie comme une distance plutôt que comme une projection.
+
+**`scintillement`** est la seule famille **sans période** : chaque LED pulse à sa cadence et à sa
+phase propres, tirées d'un hachage de son numéro. Aucun `rand`, aucune horloge, aucun état — le
+rendu doit rester reproductible à l'identique dans la fenêtre et dans le démon, sans quoi
+« l'aperçu montre ce que le boîtier reçoit » deviendrait faux sans le dire.
 
 **Un motif traverse le boîtier comme un volume, pas comme une file d'attente.** Chaque LED est
 ramenée à sa position le long de la direction demandée, si bien qu'une onde qui monte atteint en

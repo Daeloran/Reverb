@@ -465,6 +465,34 @@ fn se_colore(nom: &str) -> bool {
         .contains(&"couleur")
 }
 
+/// Les réglages qu'une animation doit rendre après avoir été relancée dans la couleur posée.
+///
+/// ⚠️ **Chaque champ n'y figure que si l'animation l'accepte** (#75). Quand ce fichier a été
+/// écrit, toute animation colorée acceptait aussi `direction` : le triplet complet était donc
+/// toujours l'attendu. `rotation` accepte `couleur` sans accepter `direction` — son anneau suit le
+/// montage relevé de chaque ventilateur, pas un axe du boîtier —, et lui réécrire une direction
+/// ferait refuser la commande en bloc.
+///
+/// C'est la règle que `reglages_ecrits` applique déjà : « seulement les clés que cette animation
+/// accepte ». Ce qui est vérifié reste identique — que ce qui est affiché reparte, sans rien
+/// perdre de ce que l'animation sait porter.
+fn attendus(nom_anim: &str) -> Reglages {
+    let acceptes = Animation::par_nom(nom_anim)
+        .unwrap_or_else(|e| panic!("« {nom_anim} » est au catalogue : {e}"))
+        .parametres_acceptes();
+    let mut reglages = Reglages::default();
+    if acceptes.contains(&"couleur") {
+        reglages.couleur = POSEE;
+    }
+    if acceptes.contains(&"vitesse") {
+        reglages.vitesse = VITESSE;
+    }
+    if acceptes.contains(&"direction") {
+        reglages.direction = DIRECTION;
+    }
+    reglages
+}
+
 // ---------------------------------------------------------------------------
 // 0 — les repères de ce fichier ne sont aucun défaut
 // ---------------------------------------------------------------------------
@@ -669,11 +697,7 @@ fn tout_le_boitier_sous_une_animation_qui_se_colore_relance_l_animation() {
         let lu = relu(nom_anim, paires);
         assert_eq!(
             lu,
-            Reglages {
-                couleur: POSEE,
-                vitesse: VITESSE,
-                direction: DIRECTION,
-            },
+            attendus(nom_anim),
             "« {nom_anim} » doit repartir dans la couleur posée, sans perdre la vitesse ni la \
              direction affichées — {paires:?}"
         );
@@ -856,11 +880,7 @@ fn une_selection_partielle_sous_une_animation_qui_se_colore_la_rejoue_en_zone() 
             );
             assert_eq!(
                 relu(nom_anim, paires),
-                Reglages {
-                    couleur: POSEE,
-                    vitesse: VITESSE,
-                    direction: DIRECTION,
-                },
+                attendus(nom_anim),
                 "la zone reprend l'animation dans la couleur posée, à la vitesse et dans la \
                  direction du boîtier — deux allures côte à côte se verraient — {paires:?}"
             );
@@ -1115,6 +1135,7 @@ fn une_zone_visee_recoit_la_couleur_sous_la_forme_que_l_animation_permet() {
                             couleur: POSEE,
                             vitesse: VITESSE,
                             direction: DIRECTION,
+                            sonde: None,
                         }),
                 },
                 // `arc-en-ciel` produit ses propres teintes : « dans la couleur choisie » n'y a

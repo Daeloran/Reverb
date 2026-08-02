@@ -184,6 +184,8 @@ fn reglages_globaux() -> Reglages {
         couleur: Rgb::new(0x00, 0xff, 0x00),
         vitesse: 7,
         direction: Direction::HautBas,
+        // Champ ajouté par #75 ; le témoin global emploie `vague`, qui ne suit aucune sonde.
+        sonde: None,
     }
 }
 
@@ -195,6 +197,7 @@ fn reglages_de_zone() -> Reglages {
         couleur: Rgb::new(0x12, 0x34, 0x56),
         vitesse: 9,
         direction: Direction::ArriereAvant,
+        sonde: None,
     }
 }
 
@@ -443,13 +446,17 @@ fn un_profil_traverse_l_aller_retour_sans_rien_perdre() {
         );
     }
 
+    // Clonés plutôt que déplacés : `Reglages` a perdu `Copy` avec le champ `sonde` (#75), et les
+    // deux profils sont comparés en entier plus bas.
     let (anim_pose, reglages_poses) = pose
         .eclairage
         .animation
+        .clone()
         .expect("le témoin porte une animation globale");
     let (anim_relue, reglages_relus) = relu
         .eclairage
         .animation
+        .clone()
         .expect("une animation en cours doit encore être en cours après l'aller-retour");
     assert_eq!(
         anim_relue, anim_pose,
@@ -518,7 +525,7 @@ fn les_six_animations_et_leurs_reglages_traversent_l_aller_retour() {
         let reglages = reglages_acceptables(anim);
 
         let mut eclairage = eclairage_temoin();
-        eclairage.animation = Some((anim, reglages));
+        eclairage.animation = Some((anim, reglages.clone()));
         let mut zones = Zones::vide();
         zones.poser("zone", &leds("fan:arriere"));
         zones.animer("zone", Some((anim, reglages)));
@@ -547,6 +554,9 @@ fn reglages_acceptables(anim: Animation) -> Reglages {
             "couleur" => reglages.couleur = reglages_globaux().couleur,
             "vitesse" => reglages.vitesse = 8,
             "direction" => reglages.direction = Direction::AvantArriere,
+            // Ajouté par #75 : `thermique` exige le slug d'une sonde. Ce crate ne vérifie pas
+            // qu'elle existe — c'est le démon qui les découvre —, un slug plausible suffit.
+            "sonde" => reglages.sonde = Some("kraken2023elite:coolant-temp".to_owned()),
             autre => panic!(
                 "« {autre} » est un paramètre d'animation que ce test ne sait pas fabriquer : le \
                  catalogue s'est étendu, ce test doit suivre"

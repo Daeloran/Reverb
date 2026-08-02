@@ -874,6 +874,7 @@ fn arc_en_ciel_ne_rapporte_aucune_couleur_et_l_animation_reste_bien_presente() {
             couleur: COULEUR_LUE,
             vitesse: VITESSE_LUE,
             direction: DIRECTION_LUE,
+            sonde: None,
         },
     );
     let ResponseLine::Anim { reglages, .. } = &ligne else {
@@ -914,6 +915,13 @@ fn ce_que_le_demon_ecrit_se_relit_pour_chaque_animation_du_catalogue() {
     for nom in CATALOGUE {
         let animation = animation(nom);
         let accepte_couleur = animation.parametres_acceptes().contains(&"couleur");
+        // ⚠️ Ajouté par #75, sur le modèle de `accepte_couleur` juste au-dessus. Quatre familles
+        // nouvelles ne suivent aucune direction du boîtier — `rotation` suit le montage relevé de
+        // chaque anneau, `pouls` la distance à la pompe, `scintillement` le hasard, `thermique`
+        // une sonde. Le démon ne leur écrit donc pas de direction, et la fenêtre n'a rien à en
+        // relire. C'est la même règle que pour `arc-en-ciel` et la couleur, à laquelle ce test se
+        // pliait déjà.
+        let accepte_direction = animation.parametres_acceptes().contains(&"direction");
 
         for direction in Direction::ALL {
             for vitesse in 1..=10u8 {
@@ -921,6 +929,7 @@ fn ce_que_le_demon_ecrit_se_relit_pour_chaque_animation_du_catalogue() {
                     couleur: COULEUR_LUE,
                     vitesse,
                     direction,
+                    sonde: None,
                 };
                 let lu = eclairage_lu(&reponse(&[ligne_du_demon(nom, &ecrits)]));
                 assert_eq!(
@@ -935,10 +944,13 @@ fn ce_que_le_demon_ecrit_se_relit_pour_chaque_animation_du_catalogue() {
                 );
                 assert_eq!(
                     lu.direction,
-                    Some(rang(direction)),
-                    "la direction {direction:?} écrite par le démon pour « {nom} » se relit au \
-                     rang {} — {lu:?}",
-                    rang(direction)
+                    accepte_direction.then(|| rang(direction)),
+                    "« {nom} » {} la direction : c'est ce que la fenêtre doit en rapporter — {lu:?}",
+                    if accepte_direction {
+                        "accepte"
+                    } else {
+                        "refuse"
+                    }
                 );
                 assert_eq!(
                     lu.couleur,
@@ -1040,6 +1052,7 @@ fn adopter_au_demarrage_une_animation_deja_en_cours_prend_son_nom_et_ses_reglage
             couleur: COULEUR_LUE,
             vitesse: VITESSE_LUE,
             direction: DIRECTION_LUE,
+            sonde: None,
         },
     )]));
     assert!(
@@ -1104,6 +1117,7 @@ fn adopter_une_autre_animation_ecrit_ce_qui_est_rapporte_et_garde_le_reste() {
             couleur: COULEUR_LUE,
             vitesse: VITESSE_LUE,
             direction: DIRECTION_LUE,
+            sonde: None,
         },
     )]));
     assert!(
@@ -1200,6 +1214,7 @@ fn apres_adoption_bouger_la_vitesse_envoie_la_couleur_et_la_direction_du_demon()
             couleur: COULEUR_LUE,
             vitesse: VITESSE_LUE,
             direction: DIRECTION_LUE,
+            sonde: None,
         },
     )]));
     assert!(fenetre.adopter(&lu), "une animation tournait déjà");
@@ -1244,6 +1259,7 @@ fn apres_adoption_bouger_la_vitesse_envoie_la_couleur_et_la_direction_du_demon()
             couleur: COULEUR_LUE,
             vitesse: VITESSE_LUE,
             direction: DIRECTION_LUE,
+            sonde: None,
         },
     )]));
     assert!(

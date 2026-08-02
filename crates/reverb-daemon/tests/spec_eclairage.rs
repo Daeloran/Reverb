@@ -92,6 +92,9 @@ fn reglages_temoins() -> Reglages {
         couleur: Rgb::new(0x00, 0xff, 0x00),
         vitesse: 7,
         direction: Direction::HautBas,
+        // Champ ajouté par #75. Aucune des animations employées ici ne suit de sonde ;
+        // `vague` la refuserait même.
+        sonde: None,
     }
 }
 
@@ -438,8 +441,11 @@ fn une_animation_et_ses_reglages_traversent_l_aller_retour() {
     let pose = eclairage_temoin_anime();
     let relu = aller_retour(&pose);
 
+    // Emprunté plutôt que déplacé : `Reglages` a perdu `Copy` avec le champ `sonde` (#75), et
+    // `relu` est comparé en entier plus bas.
     let (animation_relue, reglages_relus) = relu
         .animation
+        .clone()
         .expect("une animation en cours doit encore être en cours après l'aller-retour");
     assert_eq!(
         animation_relue,
@@ -513,6 +519,10 @@ fn reglages_acceptables(animation: Animation) -> Reglages {
                 "couleur" => hexa(reglages_temoins().couleur),
                 "vitesse" => reglages_temoins().vitesse.to_string(),
                 "direction" => reglages_temoins().direction.slug().to_owned(),
+                // Étendu pour #75, comme ce message le demande. `thermique` exige le slug
+                // d'une sonde ; ce fichier ne vérifie que l'aller-retour du réglage, et un
+                // slug plausible y suffit — l'existence de la sonde est l'affaire du démon.
+                "sonde" => "kraken2023elite:coolant-temp".to_owned(),
                 autre => panic!(
                     "« {autre} » est un paramètre d'animation que ce test ne sait pas fabriquer : \
                      l'étendre plutôt que le contourner."

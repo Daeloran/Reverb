@@ -16,7 +16,7 @@ use reverb_daemon::ecran;
 use reverb_daemon::peripheriques::{Consigne, Peripheriques};
 use reverb_daemon::persistance::{self, Eclairage};
 use reverb_daemon::profils::{self, Ecriture, Profil};
-use reverb_daemon::quarantaine::Quarantaine;
+use reverb_daemon::quarantaine::{Quarantaine, Releve};
 use reverb_daemon::serveur::{self, Ordre};
 use reverb_daemon::telemetrie;
 use reverb_daemon::zones::{self, Rendu, Tampon, Zones};
@@ -276,6 +276,14 @@ struct Etat {
     vigie: ecran::Vigie,
     /// Les sondes écartées parce qu'elles ne répondent plus (#68).
     quarantaine: Quarantaine,
+    /// La dernière valeur de la sonde que `thermique` suit, en degrés (#75).
+    ///
+    /// `None` : aucune animation ne suit de sonde, ou celle-ci est écartée. Le
+    /// boîtier passe alors au blanc pulsant — jamais à la dernière valeur
+    /// connue, qui ferait croire à une mesure à jour.
+    mesure: Option<f32>,
+    /// Quand relire cette sonde.
+    prochaine_mesure: Duration,
     /// L'instant du démarrage, seule origine de temps du démon.
     ///
     /// La quarantaine ne tient aucune horloge — c'est ce qui la rend
@@ -322,6 +330,8 @@ impl Etat {
             echeance_ecran: None,
             vigie: ecran::Vigie::neuve(),
             quarantaine: Quarantaine::nouvelle(),
+            mesure: None,
+            prochaine_mesure: Duration::ZERO,
             naissance: Instant::now(),
         }
     }
@@ -393,9 +403,15 @@ impl Etat {
     /// Ce que le boîtier montre à ce pas : la couche globale, puis les zones
     /// par-dessus.
     fn tampon(&self, pas: u32) -> Tampon {
-        let mut tampon = match self.animation {
+        let mut tampon = match &self.animation {
             Some((animation, reglages)) => {
-                let image = animation.image(&self.geometrie, &reglages, pas);
+                // ⚠️ **La mesure vient du cache, jamais d'une lecture ici.**
+                // `tampon` est appelée à chaque image — vingt à trente fois par
+                // seconde —, et une lecture sysfs sur une sonde qui ne répond
+                // plus bloque cinq secondes en sommeil non interruptible (#68).
+                // Relever ici gèlerait le démon à chaque image.
+                let image =
+                    animation.image_avec_mesure(&self.geometrie, reglages, pas, self.mesure);
                 let mut tampon = Tampon::noir();
                 for (position, couleurs) in &image.ventilateurs {
                     tampon.ventilateurs[position.index()] = *couleurs;
@@ -414,10 +430,57 @@ impl Etat {
         Eclairage {
             ventilateurs: self.ventilateurs,
             barrettes: self.barrettes,
-            animation: self.animation,
+            animation: self.animation.clone(),
         }
     }
+
+    /// Relit la sonde que l'animation en cours suit, si l'heure est venue.
+    ///
+    /// ⚠️ **Au plus une fois par [`INTERVALLE_MESURE`]**, et par la quarantaine
+    /// (#68). Une température ne bouge pas plus vite que cela, et une sonde
+    /// muette coûte cinq secondes de sommeil non interruptible — la relire à la
+    /// cadence des images rendrait le démon inutilisable, ce qui est exactement
+    /// la panne que #68 a corrigée.
+    ///
+    /// Une sonde écartée rend `None`, donc le blanc pulsant : jamais la dernière
+    /// valeur connue, qui ferait croire à une température à jour.
+    fn rafraichir_la_mesure(&mut self) {
+        let Some(slug) = self
+            .animation
+            .as_ref()
+            .and_then(|(_, reglages)| reglages.sonde.clone())
+        else {
+            // Aucune animation ne suit de sonde : rien à relever, et le cache
+            // est vidé pour qu'une reprise ne parte pas d'une valeur périmée.
+            self.mesure = None;
+            return;
+        };
+
+        let maintenant = self.naissance.elapsed();
+        if maintenant < self.prochaine_mesure {
+            return;
+        }
+        self.prochaine_mesure = maintenant + INTERVALLE_MESURE;
+
+        let Some(sonde) = self.sondes.iter().find(|sonde| sonde.slug == slug) else {
+            self.mesure = None;
+            return;
+        };
+        let verdict = self
+            .quarantaine
+            .tour(&sonde.slug, maintenant, || sonde.lire().ok());
+        self.mesure = match verdict {
+            Releve::Valeur(millidegres) => Some(millidegres as f32 / 1000.0),
+            Releve::Muette { .. } => None,
+        };
+    }
 }
+
+/// Entre deux lectures de la sonde que `thermique` suit.
+///
+/// Une seconde : c'est la cadence de la télémétrie, et une température de
+/// liquide ne bouge pas plus vite.
+const INTERVALLE_MESURE: Duration = Duration::from_secs(1);
 
 fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat: Etat) {
     let mut cadence = Cadence::new(IMAGES_PAR_SECONDE);
@@ -437,6 +500,11 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat:
         // manquées — un décrochage annoncé qui n'a jamais eu lieu.
         // Une zone animée suffit à faire tourner la boucle : la couche globale
         // peut être fixe pendant que la colonne du radiateur couve.
+        // La sonde que `thermique` suit, relue au plus une fois par seconde
+        // (#75). Placée avant le calcul de l'image, et hors de `tampon` qui est
+        // appelée trente fois par seconde.
+        etat.rafraichir_la_mesure();
+
         let anime = etat.animation.is_some() || etat.zone_animee();
         if anime != animait {
             animait = anime;
@@ -699,7 +767,7 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
             // nom de celui qu'on voulait.
             let rendu = match animation {
                 None => Ok(None),
-                Some(anime) => lancer(&anime, &reglages).map(Some),
+                Some(anime) => lancer(&anime, &reglages, &etat.sondes).map(Some),
             };
             match rendu {
                 Err(message) => vec![ResponseLine::Error { message }],
@@ -743,7 +811,7 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
                 etat.a_ecrire = true;
                 conserver(etat)
             }
-            Some(nom) => match lancer(&nom, &reglages) {
+            Some(nom) => match lancer(&nom, &reglages, &etat.sondes) {
                 Ok(anime) => {
                     etat.animation = Some(anime);
                     conserver(etat)
@@ -1227,11 +1295,36 @@ fn conserver_zones(etat: &Etat) -> Vec<ResponseLine> {
 /// catalogue pour un nom inconnu, et les clés acceptées pour un réglage
 /// fautif. Le démon n'a rien à y ajouter — il les répète tels quels, ce qui
 /// garantit que le socket et la ligne de commande disent la même chose.
-fn lancer(nom: &str, reglages: &[(String, String)]) -> Result<(Animation, Reglages), String> {
+fn lancer(
+    nom: &str,
+    reglages: &[(String, String)],
+    sondes: &[reverb_hw::hwmon::Sonde],
+) -> Result<(Animation, Reglages), String> {
     let animation = Animation::par_nom(nom).map_err(|erreur| erreur.to_string())?;
     let reglages = animation
         .reglages(reglages)
         .map_err(|erreur| erreur.to_string())?;
+
+    // ⚠️ **Le seul refus que `reverb-anim` ne peut pas porter** (#75). Ce crate
+    // est pur : il sait que `thermique` veut une sonde, il ne sait pas
+    // lesquelles existent. Le démon, lui, les a découvertes au démarrage.
+    //
+    // Sans ce refus, une faute de frappe lancerait une animation condamnée au
+    // blanc pulsant, que rien ne distinguerait d'une sonde en panne.
+    if let Some(voulue) = &reglages.sonde
+        && !sondes.iter().any(|sonde| sonde.slug == *voulue)
+    {
+        let mut connues: Vec<&str> = sondes.iter().map(|sonde| sonde.slug.as_str()).collect();
+        connues.sort_unstable();
+        return Err(format!(
+            "sonde « {voulue} » inconnue. Sondes de cette machine : {}",
+            if connues.is_empty() {
+                "aucune n'a été découverte".to_owned()
+            } else {
+                connues.join(", ")
+            }
+        ));
+    }
     Ok((animation, reglages))
 }
 
