@@ -131,6 +131,11 @@ export component Fenetre inherits Window {
     in property <[LigneVentilateur]> ventilateurs;
     in property <[LigneTemperature]> temperatures;
     in property <[FamilleAnimation]> familles;
+    // Ce que le menu deroulant propose : « aucune » d'abord, puis les six
+    // familles dans l'ordre de CATALOGUE. Le rang zero n'est pas un trou, c'est
+    // un choix — celui d'arreter.
+    in property <[string]> animations;
+    in-out property <int> animation-choisie: 0;
     in property <[LigneZone]> zones;
     in-out property <string> nouvelle-zone;
     in property <string> cible: "tout le boîtier";
@@ -600,18 +605,32 @@ export component Fenetre inherits Window {
                         VerticalLayout {
                             spacing: 6px;
                             Titre { text: "ANIMATION — " + root.animation-courante; }
-                            for famille in root.familles: VerticalLayout {
-                                spacing: 2px;
-                                Button {
-                                    text: famille.nom;
-                                    clicked => { root.lancer-animation(famille.nom); }
+                            ComboBox {
+                                model: root.animations;
+                                current-index <=> root.animation-choisie;
+                                // Le nom recu plutot que le rang : il vient du
+                                // rappel lui-meme, et ne depend donc pas de
+                                // l'ordre dans lequel le widget met ses
+                                // proprietes a jour.
+                                selected(nom) => {
+                                    if (nom == root.animations[0]) {
+                                        root.arreter-animation();
+                                    } else {
+                                        root.lancer-animation(nom);
+                                    }
                                 }
-                                Text {
-                                    text: famille.effet;
-                                    font-size: 11px;
-                                    color: #6f7180;
-                                    wrap: word-wrap;
-                                }
+                            }
+                            // La phrase suit le choix. Elle n'est pas de la
+                            // decoration : six noms seuls ne disent pas ce que
+                            // l'animation fait, et c'est ce qui manquait avant
+                            // qu'on les ajoute sous les boutons.
+                            Text {
+                                text: root.animation-choisie > 0
+                                    ? root.familles[Math.max(root.animation-choisie - 1, 0)].effet
+                                    : "Aucune animation : le boîtier garde sa couleur.";
+                                font-size: 11px;
+                                color: #6f7180;
+                                wrap: word-wrap;
                             }
                             HorizontalLayout {
                                 spacing: 8px;

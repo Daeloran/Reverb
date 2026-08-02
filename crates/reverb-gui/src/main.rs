@@ -388,6 +388,7 @@ fn main() -> ExitCode {
     let pupitre = Rc::new(Pupitre::nouveau());
 
     fenetre.set_familles(familles());
+    fenetre.set_animations(noms_du_menu());
     fenetre.set_ventilateurs(ModelRc::from(pupitre.canaux.clone()));
     dessiner(&fenetre, &pupitre);
 
@@ -1055,6 +1056,11 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         let envoi = ordres.clone();
         let faible = fenetre.as_weak();
         fenetre.on_arreter_animation(move || {
+            // Le bouton « Arrêter » ramène aussi le menu au rang zéro : le
+            // sélectionner depuis le menu l'y met tout seul, le bouton non.
+            if let Some(fenetre) = faible.upgrade() {
+                fenetre.set_animation_choisie(0);
+            }
             if let Some(zone) = pupitre.visee.borrow().clone() {
                 let _ = envoi.send(Request::ZoneAnim {
                     nom: zone,
@@ -1065,7 +1071,7 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
                 return;
             }
             if let Some(fenetre) = faible.upgrade() {
-                fenetre.set_animation_courante(SharedString::from("aucune"));
+                fenetre.set_animation_courante(SharedString::from(AUCUNE));
             }
             pupitre.reglage.borrow_mut().animation = None;
             let _ = envoi.send(Request::Animate {
@@ -1239,8 +1245,11 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
                 reglage
                     .animation
                     .clone()
-                    .unwrap_or_else(|| "aucune".to_owned()),
+                    .unwrap_or_else(|| AUCUNE.to_owned()),
             ));
+            // Le menu montre ce qui tourne, y compris quand la fenêtre vient de
+            // s'ouvrir sur un boîtier qui animait déjà.
+            fenetre.set_animation_choisie(rang_dans_le_menu(reglage.animation.as_deref()));
             // Les curseurs, ensuite : `relever` les relit à chaque geste, et
             // les laisser en arrière renverrait au démon les réglages du
             // sélecteur — régler la vitesse repeindrait le boîtier.
@@ -1477,4 +1486,36 @@ fn familles() -> ModelRc<FamilleAnimation> {
         })
         .collect();
     ModelRc::new(VecModel::from(familles))
+}
+
+/// Le nom que le menu déroulant porte au rang zéro.
+///
+/// Ce n'est pas un trou en tête de liste, c'est un choix : celui d'arrêter. Un
+/// menu qui n'aurait que les six familles resterait vide quand rien ne tourne,
+/// et un menu vide se lit comme une fenêtre en panne.
+const AUCUNE: &str = "aucune";
+
+/// Ce que le menu déroulant propose : « aucune », puis l'ordre de `CATALOGUE`.
+fn noms_du_menu() -> ModelRc<SharedString> {
+    let noms: Vec<SharedString> = std::iter::once(AUCUNE)
+        .chain(CATALOGUE.iter().copied())
+        .map(SharedString::from)
+        .collect();
+    ModelRc::new(VecModel::from(noms))
+}
+
+/// Le rang d'une animation dans le menu — zéro pour « aucune ».
+///
+/// Une animation que le catalogue ne connaît pas retombe elle aussi sur zéro :
+/// le menu ne sait pas la montrer, et le bandeau la nomme déjà. Mieux vaut un
+/// menu qui dit « aucune » qu'un menu qui montre une autre animation.
+fn rang_dans_le_menu(nom: Option<&str>) -> i32 {
+    let Some(nom) = nom else {
+        return 0;
+    };
+    CATALOGUE
+        .iter()
+        .position(|famille| *famille == nom)
+        .and_then(|rang| i32::try_from(rang + 1).ok())
+        .unwrap_or(0)
 }
