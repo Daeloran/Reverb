@@ -27,10 +27,9 @@ export struct LigneVentilateur {
 }
 
 export struct LigneTemperature {
-    // D'ou vient la sonde : le nom du hwmon, ou « nvidia ».
-    origine: string,
-    // Ce qu'on lit : le libelle du noyau.
-    capteur: string,
+    // Le nom lisible de la sonde — « CPU », « Liquide », « NVMe … ». Jamais un
+    // nom de hwmon : le panneau se lit, il ne se decode pas (issue #51).
+    libelle: string,
     valeur: string,
     // La courbe des deux dernieres minutes, en commandes SVG dans le carre
     // unite. Vide tant qu'il n'y a qu'un seul releve : un point n'est pas une
@@ -366,7 +365,13 @@ export component Fenetre inherits Window {
                         bandeau := HorizontalLayout {
                             spacing: 8px;
                             for sonde in root.temperatures: Rectangle {
-                                width: 142px;
+                                // Elastique, et non 142px fixes : cinq cartes
+                                // fixes depassaient la largeur du panneau et
+                                // poussaient le second disque hors champ. Le
+                                // Flickable reste le filet, il n'est plus le
+                                // moyen normal de voir la derniere carte.
+                                min-width: 106px;
+                                horizontal-stretch: 1;
                                 background: #191920;
                                 border-radius: 8px;
                                 border-width: 1px;
@@ -374,22 +379,11 @@ export component Fenetre inherits Window {
                                 VerticalLayout {
                                     padding: 6px;
                                     spacing: 0px;
-                                    HorizontalLayout {
-                                        spacing: 4px;
-                                        Text {
-                                            text: sonde.capteur;
-                                            font-size: 10px;
-                                            color: #8a8c9b;
-                                            horizontal-stretch: 1;
-                                            overflow: elide;
-                                        }
-                                        Text {
-                                            text: sonde.origine;
-                                            font-size: 9px;
-                                            color: #55566a;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                        }
+                                    Text {
+                                        text: sonde.libelle;
+                                        font-size: 10px;
+                                        color: #8a8c9b;
+                                        overflow: elide;
                                     }
                                     Text {
                                         text: sonde.valeur;

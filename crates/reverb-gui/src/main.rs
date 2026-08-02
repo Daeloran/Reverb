@@ -30,7 +30,7 @@ use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
 use reverb_gui::plan::{Cible, Place, Plan, Vue};
 use reverb_gui::reglages::{Poignee, Reglage, eclairage_lu};
-use reverb_gui::sondes::{Historique, Releve};
+use reverb_gui::sondes::{Historique, ModelesNvme, Releve, modeles_nvme, sondes_retenues};
 use reverb_gui::{
     FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointLed,
 };
@@ -334,6 +334,11 @@ struct Pupitre {
     /// L'origine des temps de la fenêtre. Les poignées raisonnent en durées
     /// depuis elle, ce qui les rend testables sans horloge.
     depart: Instant,
+    /// Le modèle des deux disques, lu **une seule fois** au démarrage.
+    ///
+    /// Un modèle ne change pas en cours de session : le relire à chaque seconde
+    /// ferait une ouverture de fichier par tour d'horloge pour une constante.
+    modeles_nvme: ModelesNvme,
 }
 
 impl Pupitre {
@@ -356,6 +361,7 @@ impl Pupitre {
             visee: RefCell::new(None),
             canaux: Rc::new(VecModel::default()),
             depart: Instant::now(),
+            modeles_nvme: modeles_nvme(),
         }
     }
 
@@ -1445,17 +1451,14 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
         for (sonde, releve) in releves {
             historique.noter(&sonde, releve);
         }
-        for sonde in historique.sondes() {
+        // ⚠️ **Le démon rend ses seize sondes, la fenêtre en montre quatre.**
+        // C'est un choix d'affichage, pas un filtre de relevé : `status` les
+        // rend toutes et le cadran de l'écran les vise toutes (issue #51).
+        for retenue in sondes_retenues(&historique.sondes(), &pupitre.modeles_nvme) {
+            let sonde = retenue.slug;
             let lisible = matches!(historique.dernier(&sonde), Some(Releve::Valeur(_)));
-            // Découpé par le DERNIER deux-points : un nom de `hwmon` en
-            // contient — `r8169_0_e00:00` — et couper au premier ferait passer
-            // la moitié de l'origine pour un libellé.
-            let (origine, capteur) = sonde
-                .rsplit_once(':')
-                .map_or((sonde.as_str(), ""), |(origine, reste)| (origine, reste));
             temperatures.push(LigneTemperature {
-                origine: SharedString::from(origine),
-                capteur: SharedString::from(if capteur.is_empty() { origine } else { capteur }),
+                libelle: SharedString::from(retenue.libelle),
                 valeur: SharedString::from(match historique.dernier(&sonde) {
                     Some(Releve::Valeur(millidegres)) => {
                         format!("{:.1} °C", f64::from(millidegres) / 1000.0)
