@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
 use reverb_gui::plan::{Cible, Place, Plan, Vue};
-use reverb_gui::reglages::{Poignee, Reglage};
+use reverb_gui::reglages::{Poignee, Reglage, eclairage_lu};
 use reverb_gui::sondes::{Historique, Releve};
 use reverb_gui::{
     FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointLed,
@@ -388,6 +388,7 @@ fn main() -> ExitCode {
     let pupitre = Rc::new(Pupitre::nouveau());
 
     fenetre.set_familles(familles());
+    fenetre.set_animations(noms_du_menu());
     fenetre.set_ventilateurs(ModelRc::from(pupitre.canaux.clone()));
     dessiner(&fenetre, &pupitre);
 
@@ -401,6 +402,12 @@ fn main() -> ExitCode {
 
     brancher(&fenetre, &pupitre, ordres.clone());
 
+    // **Avant tout le reste** : ce que le boîtier fait déjà. Le démon rétablit
+    // l'éclairage au démarrage, si bien qu'une animation tourne le plus souvent
+    // avant que cette fenêtre existe. Sans cette question, la fenêtre croirait
+    // piloter un boîtier éteint et son curseur de vitesse resterait muet (#41).
+    let _ = ordres.send(Request::Lighting);
+
     // La télémétrie n'a pas de flux : on la redemande, doucement. Une seconde
     // suffit pour des tours par minute, et n'ajoute rien de mesurable au démon.
     let horloge = slint::Timer::default();
@@ -410,6 +417,11 @@ fn main() -> ExitCode {
         move || {
             let _ = ordres.send(Request::Status);
             let _ = ordres.send(Request::ZoneList);
+            // `lighting` aussi : une animation lancée ailleurs — par le socket,
+            // par une seconde fenêtre — doit finir par se voir ici. C'est
+            // `Reglage::adopter` qui décide de ce qu'on en retient, et qui
+            // laisse en place ce que l'utilisateur est en train de régler.
+            let _ = ordres.send(Request::Lighting);
         },
     );
 
@@ -1044,6 +1056,11 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         let envoi = ordres.clone();
         let faible = fenetre.as_weak();
         fenetre.on_arreter_animation(move || {
+            // Le bouton « Arrêter » ramène aussi le menu au rang zéro : le
+            // sélectionner depuis le menu l'y met tout seul, le bouton non.
+            if let Some(fenetre) = faible.upgrade() {
+                fenetre.set_animation_choisie(0);
+            }
             if let Some(zone) = pupitre.visee.borrow().clone() {
                 let _ = envoi.send(Request::ZoneAnim {
                     nom: zone,
@@ -1054,7 +1071,7 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
                 return;
             }
             if let Some(fenetre) = faible.upgrade() {
-                fenetre.set_animation_courante(SharedString::from("aucune"));
+                fenetre.set_animation_courante(SharedString::from(AUCUNE));
             }
             pupitre.reglage.borrow_mut().animation = None;
             let _ = envoi.send(Request::Animate {
@@ -1210,16 +1227,36 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
             false
         }
         Retour::Eclairage(lignes) => {
-            let mut anime = None;
-            for ligne in &lignes {
-                if let ResponseLine::Anim { nom, .. } = ligne {
-                    anime = Some(nom.clone());
-                }
+            // Une zone visée : le panneau édite **sa** couche, pas celle du
+            // boîtier entier. Adopter l'état global ramènerait les curseurs sur
+            // une animation que personne n'est en train de régler.
+            if pupitre.visee.borrow().is_some() {
+                return false;
             }
+            // Rien à faire tant que le démon décrit l'animation que la fenêtre
+            // pilote déjà : réécrire les curseurs chaque seconde les ferait
+            // sauter sous les doigts qui les tirent.
+            let lu = eclairage_lu(&lignes);
+            if !pupitre.reglage.borrow_mut().adopter(&lu) {
+                return false;
+            }
+            let reglage = pupitre.reglage.borrow().clone();
             fenetre.set_animation_courante(SharedString::from(
-                anime.clone().unwrap_or_else(|| "aucune".to_owned()),
+                reglage
+                    .animation
+                    .clone()
+                    .unwrap_or_else(|| AUCUNE.to_owned()),
             ));
-            pupitre.reglage.borrow_mut().animation = anime;
+            // Le menu montre ce qui tourne, y compris quand la fenêtre vient de
+            // s'ouvrir sur un boîtier qui animait déjà.
+            fenetre.set_animation_choisie(rang_dans_le_menu(reglage.animation.as_deref()));
+            // Les curseurs, ensuite : `relever` les relit à chaque geste, et
+            // les laisser en arrière renverrait au démon les réglages du
+            // sélecteur — régler la vitesse repeindrait le boîtier.
+            fenetre.set_vitesse(i32::from(reglage.vitesse));
+            fenetre.set_direction(i32::try_from(reglage.direction).unwrap_or(0));
+            pupitre.couleur.set(reglage.couleur.en_tsl());
+            poser_couleur(fenetre, pupitre);
             false
         }
         Retour::Zones(lignes) => {
@@ -1449,4 +1486,36 @@ fn familles() -> ModelRc<FamilleAnimation> {
         })
         .collect();
     ModelRc::new(VecModel::from(familles))
+}
+
+/// Le nom que le menu déroulant porte au rang zéro.
+///
+/// Ce n'est pas un trou en tête de liste, c'est un choix : celui d'arrêter. Un
+/// menu qui n'aurait que les six familles resterait vide quand rien ne tourne,
+/// et un menu vide se lit comme une fenêtre en panne.
+const AUCUNE: &str = "aucune";
+
+/// Ce que le menu déroulant propose : « aucune », puis l'ordre de `CATALOGUE`.
+fn noms_du_menu() -> ModelRc<SharedString> {
+    let noms: Vec<SharedString> = std::iter::once(AUCUNE)
+        .chain(CATALOGUE.iter().copied())
+        .map(SharedString::from)
+        .collect();
+    ModelRc::new(VecModel::from(noms))
+}
+
+/// Le rang d'une animation dans le menu — zéro pour « aucune ».
+///
+/// Une animation que le catalogue ne connaît pas retombe elle aussi sur zéro :
+/// le menu ne sait pas la montrer, et le bandeau la nomme déjà. Mieux vaut un
+/// menu qui dit « aucune » qu'un menu qui montre une autre animation.
+fn rang_dans_le_menu(nom: Option<&str>) -> i32 {
+    let Some(nom) = nom else {
+        return 0;
+    };
+    CATALOGUE
+        .iter()
+        .position(|famille| *famille == nom)
+        .and_then(|rang| i32::try_from(rang + 1).ok())
+        .unwrap_or(0)
 }

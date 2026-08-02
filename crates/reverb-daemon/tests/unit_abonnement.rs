@@ -54,16 +54,24 @@ fn un_abonne_recoit_les_images_poussees_par_la_boucle() {
     });
 
     // Une fausse boucle de rendu : elle ne tient aucun matériel, elle pousse.
+    //
+    // ⚠️ **Une image par top, jamais trois d'affilée.** La file d'un abonné est
+    // bornée à `RETARD_TOLERE` et `diffuser` emploie `try_send` : pousser trois
+    // images sans que personne ne dépile en fait sauter une — c'est le
+    // comportement voulu du démon (#23), et le sujet du test suivant. Ce
+    // test-ci observe autre chose, et il se bloquait une fois sur deux à
+    // attendre une image que le démon avait eu raison de jeter (#43).
+    let (tic, tops) = channel::<u8>();
     thread::spawn(move || {
         let mut abonnes = Vec::new();
-        while let Ok(ordre) = ordres.recv() {
-            let Ordre { abonnement, .. } = ordre;
-            if let Some(canal) = abonnement {
-                abonnes.push(canal);
-            }
-            for teinte in 1..=3 {
-                serveur::diffuser(&mut abonnes, &image(teinte));
-            }
+        let Ok(Ordre { abonnement, .. }) = ordres.recv() else {
+            return;
+        };
+        if let Some(canal) = abonnement {
+            abonnes.push(canal);
+        }
+        while let Ok(teinte) = tops.recv() {
+            serveur::diffuser(&mut abonnes, &image(teinte));
         }
     });
 
@@ -73,10 +81,15 @@ fn un_abonne_recoit_les_images_poussees_par_la_boucle() {
 
     let mut lecteur = BufReader::new(flux);
     let mut recues = Vec::new();
-    for _ in 0..6 {
-        let mut ligne = String::new();
-        lecteur.read_line(&mut ligne).expect("une image arrive");
-        recues.push(ligne.trim_end().to_owned());
+    for teinte in 1..=3 {
+        // Poussée puis lue, avant la suivante : la file ne dépasse jamais une
+        // image, quel que soit l'ordonnancement des trois fils.
+        tic.send(teinte).expect("la boucle de rendu écoute");
+        for _ in 0..2 {
+            let mut ligne = String::new();
+            lecteur.read_line(&mut ligne).expect("une image arrive");
+            recues.push(ligne.trim_end().to_owned());
+        }
     }
 
     assert_eq!(
