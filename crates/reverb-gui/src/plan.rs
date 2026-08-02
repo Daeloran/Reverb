@@ -115,6 +115,54 @@ pub enum Vue {
     Isometrique,
 }
 
+/// Une paroi du boîtier.
+///
+/// ⚠️ **`Plafond` existe et rien ne doit jamais le rendre.** C'est délibéré : la
+/// demande de Nico est que la face du dessus **ne soit pas** remplie — une
+/// plaque pleine masquerait les trois ventilateurs du plafond, qui sont
+/// justement ce que l'isométrie sert à montrer. Une absence ne se vérifie que si
+/// elle se nomme : une énumération sans `Plafond` rendrait le critère vrai par
+/// construction, donc sans valeur le jour où quelqu'un ajoutera une plaque « pour
+/// finir le volume ».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Paroi {
+    Plancher,
+    Plafond,
+    Fond,
+    /// Le flanc du plateau de carte mère.
+    Flanc,
+}
+
+/// Une paroi à remplir, en coordonnées d'écran.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Face {
+    pub paroi: Paroi,
+    /// Les sommets dans l'ordre du contour. **La fermeture est implicite** : le
+    /// dernier rejoint le premier et ne le répète pas.
+    pub sommets: Vec<Place>,
+}
+
+/// Un organe interne du boîtier, suggéré en fond.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Piece {
+    PlateauCarteMere,
+    CarteGraphique,
+    CacheAlimentation,
+}
+
+/// Un organe interne, en coordonnées d'écran.
+///
+/// Aucun ne porte de LED et aucun n'est cliquable : ce sont des repères de
+/// lecture, pas des cibles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Organe {
+    pub piece: Piece,
+    /// Quatre sommets dans l'ordre du contour. Un rectangle du boîtier projeté
+    /// est un **parallélogramme** — c'est ce qui distingue un organe posé dans le
+    /// repère du boîtier d'un rectangle dessiné sur l'écran.
+    pub sommets: Vec<Place>,
+}
+
 /// Où dessiner chaque LED du boîtier.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
@@ -122,6 +170,14 @@ pub struct Plan {
     barrettes: [[Place; LEDS_PER_STICK]; SLOT_COUNT],
     /// Les arêtes du volume, à dessiner derrière les LED.
     aretes: Vec<(Place, Place)>,
+    /// Le contour du châssis, à dessiner derrière tout le reste.
+    silhouette: Vec<Place>,
+    /// Les parois à remplir. Vide en vue de face.
+    faces: Vec<Face>,
+    /// Les organes internes, dans les deux vues.
+    organes: Vec<Organe>,
+    /// Les deux demi-axes de chaque anneau, dans l'ordre de `Position::ALL`.
+    demi_axes: [(f32, f32); 10],
     rayon: f32,
     vue: Vue,
 }
@@ -181,6 +237,13 @@ impl Plan {
                 // vide qui n'existe pas. La vue de face est un schéma, elle
                 // n'encadre rien.
                 aretes: Vec::new(),
+                silhouette: Vec::new(),
+                // Pas de paroi remplie de face : la vue écrase la largeur du
+                // boîtier, donc plancher, fond et flanc s'y superposent en un
+                // seul rectangle qui ne dit rien de plus que la silhouette.
+                faces: Vec::new(),
+                organes: organes_projetes(geometrie, de_face),
+                demi_axes: [(rayon, rayon); 10],
                 rayon,
                 vue: Vue::Face,
             },
@@ -236,6 +299,10 @@ impl Plan {
                 ventilateurs,
                 barrettes,
                 aretes: aretes_du_volume(geometrie),
+                silhouette: Vec::new(),
+                faces: faces_du_volume(geometrie),
+                organes: organes_projetes(geometrie, en_isometrie),
+                demi_axes: etendues,
                 rayon,
                 vue: Vue::Isometrique,
             },
@@ -289,6 +356,47 @@ impl Plan {
     /// Depuis quel point de vue ce plan a été construit.
     pub fn vue(&self) -> Vue {
         self.vue
+    }
+
+    /// Le contour du châssis, dans l'ordre du contour.
+    ///
+    /// ⚠️ **Il épouse le nuage des cent vingt-quatre LED**, et non les anneaux.
+    /// C'est la seule façon qu'il ait de suivre la géométrie : `Geometrie` ne
+    /// porte que dix orientations — les centres et le rayon sont les mêmes pour
+    /// toutes les géométries d'une même machine —, si bien qu'une silhouette
+    /// calculée sur les anneaux serait insensible à toute géométrie possible,
+    /// c'est-à-dire indiscernable d'un polygone écrit à la main.
+    ///
+    /// Contrepartie assumée : remonter un ventilateur fait respirer le contour
+    /// de quelques millièmes de cadre. Les douze arêtes de #28 le font déjà,
+    /// elles viennent de `Geometrie::bornes()`, donc des LED elles-mêmes.
+    pub fn silhouette(&self) -> &[Place] {
+        &self.silhouette
+    }
+
+    /// Les parois à remplir, **jamais celle du dessus**.
+    ///
+    /// Vide en vue de face. Voir [`Paroi`].
+    pub fn faces(&self) -> &[Face] {
+        &self.faces
+    }
+
+    /// Les organes internes, dans les deux vues.
+    pub fn organes(&self) -> &[Organe] {
+        &self.organes
+    }
+
+    /// Les deux demi-axes de l'anneau d'un ventilateur : horizontal, vertical.
+    ///
+    /// ⚠️ Ceux de l'anneau **continu**, et non le maximum de ses huit LED. Un
+    /// anneau est un cercle dont les huit LED sont un échantillon à quarante-cinq
+    /// degrés : le maximum échantillonné vaut entre `cos(22,5°)` et une fois le
+    /// demi-axe réel. Un cerclage tracé sur l'échantillon passerait au travers de
+    /// ses propres LED.
+    ///
+    /// En vue de face, les deux valent [`Plan::rayon_anneau`] — c'est un cercle.
+    pub fn demi_axes_anneau(&self, position: Position) -> (f32, f32) {
+        self.demi_axes[position.index()]
     }
 
     /// Toutes les LED de l'organe qui porte cette cible.
@@ -538,6 +646,20 @@ fn cadrer(plan: Plan, etendues: [(f32, f32); 10]) -> Plan {
     // centre.
     let rayon = plan.rayon;
     let pastille = rayon * DIAMETRE_LED / 2.0;
+
+    // La silhouette se calcule **avant** le cadrage, sur les places brutes : le
+    // cadrage est une application affine, et l'enveloppe convexe d'un nuage
+    // transformé est la transformée de son enveloppe. La calculer ici plutôt que
+    // dans chaque constructeur la donne aux deux vues d'un seul coup.
+    let mut nuage: Vec<Place> = Vec::with_capacity(124);
+    for (_, anneau) in &plan.ventilateurs {
+        nuage.extend_from_slice(anneau);
+    }
+    for reglette in &plan.barrettes {
+        nuage.extend_from_slice(reglette);
+    }
+    let silhouette = silhouette_du_nuage(&nuage, pastille);
+
     let mut bornes = Bornes::vide();
     for ((centre, _), (large, haut)) in plan.ventilateurs.iter().zip(etendues) {
         bornes.ajouter(centre.x - large - pastille, centre.y - haut - pastille);
@@ -552,6 +674,23 @@ fn cadrer(plan: Plan, etendues: [(f32, f32); 10]) -> Plan {
     for (debut, fin) in &plan.aretes {
         bornes.ajouter(debut.x, debut.y);
         bornes.ajouter(fin.x, fin.y);
+    }
+    // ⚠️ L'habillage entre dans le cadre comme le reste. Sans cela, la vue de
+    // face déborderait : ses anneaux y sont dessinés **plus petits que nature**
+    // (voir `rayon_dessine`), si bien que le nuage de LED y est plus étroit que
+    // le volume dont les organes internes tirent leurs proportions.
+    for sommet in &silhouette {
+        bornes.ajouter(sommet.x, sommet.y);
+    }
+    for face in &plan.faces {
+        for sommet in &face.sommets {
+            bornes.ajouter(sommet.x, sommet.y);
+        }
+    }
+    for organe in &plan.organes {
+        for sommet in &organe.sommets {
+            bornes.ajouter(sommet.x, sommet.y);
+        }
     }
 
     let utile = 1.0 - 2.0 * MARGE;
@@ -582,11 +721,37 @@ fn cadrer(plan: Plan, etendues: [(f32, f32); 10]) -> Plan {
         .iter()
         .map(|(debut, fin)| (place(*debut), place(*fin)))
         .collect();
+    let silhouette = silhouette.into_iter().map(place).collect();
+    let faces = plan
+        .faces
+        .into_iter()
+        .map(|face| Face {
+            paroi: face.paroi,
+            sommets: face.sommets.into_iter().map(place).collect(),
+        })
+        .collect();
+    let organes = plan
+        .organes
+        .into_iter()
+        .map(|organe| Organe {
+            piece: organe.piece,
+            sommets: organe.sommets.into_iter().map(place).collect(),
+        })
+        .collect();
+    let mut demi_axes = plan.demi_axes;
+    for (large, haut) in &mut demi_axes {
+        *large *= echelle;
+        *haut *= echelle;
+    }
 
     Plan {
         ventilateurs,
         barrettes,
         aretes,
+        silhouette,
+        faces,
+        organes,
+        demi_axes,
         rayon: rayon * echelle,
         vue: plan.vue,
     }
@@ -631,5 +796,234 @@ impl Bornes {
 
     fn hauteur(&self) -> f32 {
         self.y_max - self.y_min
+    }
+}
+
+// ---------------------------------------------------------------------------
+// L'habillage (issue #52)
+// ---------------------------------------------------------------------------
+
+/// Les huit coins du volume occupé, indexés par bits — `1` pour `x`, `2` pour
+/// `y`, `4` pour `z`.
+///
+/// La même numérotation que [`aretes_du_volume`], et c'est ce qui garantit
+/// qu'une face se pose **sur** les arêtes plutôt qu'à côté.
+fn coin_du_volume(geometrie: &Geometrie, i: usize) -> Point {
+    let (bas, haut) = geometrie.bornes();
+    Point {
+        x: if i & 1 == 0 { bas.x } else { haut.x },
+        y: if i & 2 == 0 { bas.y } else { haut.y },
+        z: if i & 4 == 0 { bas.z } else { haut.z },
+    }
+}
+
+/// Les trois parois remplies de la vue isométrique.
+///
+/// ⚠️ **Le plafond n'y est pas, et ne doit jamais y être.** Une plaque pleine au
+/// dessus masquerait les trois ventilateurs du plafond, qui sont ce que
+/// l'isométrie sert à montrer (demande de Nico, issue #52).
+fn faces_du_volume(geometrie: &Geometrie) -> Vec<Face> {
+    // Les coins sont donnés dans l'ordre du contour de chaque quadrilatère : un
+    // ordre quelconque tracerait un nœud papillon, qui se dessine sans erreur et
+    // ne remplit rien.
+    let paroi = |paroi, coins: [usize; 4]| Face {
+        paroi,
+        sommets: coins
+            .into_iter()
+            .map(|i| en_isometrie(coin_du_volume(geometrie, i)))
+            .collect(),
+    };
+    vec![
+        paroi(Paroi::Plancher, [0, 1, 5, 4]),
+        paroi(Paroi::Fond, [4, 5, 7, 6]),
+        paroi(Paroi::Flanc, [1, 5, 7, 3]),
+    ]
+}
+
+/// Les trois organes internes, posés dans le repère du boîtier puis projetés.
+///
+/// Chacun est un rectangle du plan de la carte mère — donc à `x` constant, du
+/// côté du plateau — exprimé en **fractions du volume occupé**. C'est ce qui les
+/// fait suivre la géométrie au lieu de rester plantés là où on les a dessinés.
+///
+/// Les proportions viennent des photos du boîtier du 2026-08-02 : le plateau
+/// occupe la moitié arrière, la carte graphique une bande horizontale sous la
+/// RAM, le cache d'alimentation le bas.
+fn organes_projetes(geometrie: &Geometrie, projeter: fn(Point) -> Place) -> Vec<Organe> {
+    let (bas, haut) = geometrie.bornes();
+    let entre = |min: f32, max: f32, part: f32| min + (max - min) * part;
+    // Le plan de la carte mère, très légèrement en deçà du flanc : posé
+    // exactement dessus, il disputerait ses pixels à la paroi remplie.
+    let x = entre(bas.x, haut.x, 0.94);
+
+    let dalle = |piece, (y0, y1): (f32, f32), (z0, z1): (f32, f32)| {
+        let point = |y: f32, z: f32| {
+            projeter(Point {
+                x,
+                y: entre(bas.y, haut.y, y),
+                z: entre(bas.z, haut.z, z),
+            })
+        };
+        Organe {
+            piece,
+            // Dans l'ordre du contour, fermeture implicite.
+            sommets: vec![point(y0, z0), point(y0, z1), point(y1, z1), point(y1, z0)],
+        }
+    };
+
+    vec![
+        dalle(Piece::PlateauCarteMere, (0.10, 0.88), (0.42, 0.98)),
+        dalle(Piece::CarteGraphique, (0.28, 0.46), (0.46, 0.92)),
+        dalle(Piece::CacheAlimentation, (0.02, 0.16), (0.20, 0.96)),
+    ]
+}
+
+/// Le contour convexe d'un nuage de places, dans l'ordre du contour.
+///
+/// Parcours de Graham par angle polaire autour du point le plus bas : le nuage
+/// des LED n'a pas de creux qu'on veuille lire, et un contour convexe se
+/// remplit sans se croiser.
+fn enveloppe(nuage: &[Place]) -> Vec<Place> {
+    if nuage.len() < 3 {
+        return nuage.to_vec();
+    }
+    let mut points = nuage.to_vec();
+    // Le pivot : le plus bas, puis le plus à gauche. Il est sur l'enveloppe.
+    let pivot = points
+        .iter()
+        .copied()
+        .reduce(|a, b| if (b.y, b.x) < (a.y, a.x) { b } else { a })
+        .unwrap_or(ZERO);
+    points.sort_by(|a, b| {
+        let angle = |p: &Place| (p.y - pivot.y).atan2(p.x - pivot.x);
+        angle(a)
+            .partial_cmp(&angle(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let d = |p: &Place| (p.x - pivot.x).hypot(p.y - pivot.y);
+                d(a).partial_cmp(&d(b)).unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
+    let tourne =
+        |o: Place, a: Place, b: Place| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    let mut pile: Vec<Place> = Vec::with_capacity(points.len());
+    for point in points {
+        while pile.len() >= 2 {
+            let (o, a) = (pile[pile.len() - 2], pile[pile.len() - 1]);
+            // ⚠️ `<=` : on écarte aussi les points **alignés**. Trois sommets
+            // colinéaires donneraient un contour dont une arête est plate,
+            // c'est-à-dire un sommet qui ne dit rien.
+            if tourne(o, a, point) <= 0.0 {
+                pile.pop();
+            } else {
+                break;
+            }
+        }
+        pile.push(point);
+    }
+    pile
+}
+
+/// Le contour du châssis : l'enveloppe des LED, écartée d'une pastille.
+///
+/// L'écart se prend depuis le centre du nuage, ce qui suffit ici : l'enveloppe
+/// contient déjà toutes les LED, et la dilatation ne sert qu'à ne pas dessiner
+/// le trait **sur** celles du bord.
+fn silhouette_du_nuage(nuage: &[Place], marge: f32) -> Vec<Place> {
+    let contour = enveloppe(nuage);
+    if contour.is_empty() {
+        return contour;
+    }
+    let compte = contour.len() as f32;
+    let centre = Place {
+        x: contour.iter().map(|p| p.x).sum::<f32>() / compte,
+        y: contour.iter().map(|p| p.y).sum::<f32>() / compte,
+    };
+    contour
+        .into_iter()
+        .map(|sommet| {
+            let (dx, dy) = (sommet.x - centre.x, sommet.y - centre.y);
+            let norme = dx.hypot(dy);
+            if norme <= f32::EPSILON {
+                return sommet;
+            }
+            Place {
+                x: sommet.x + dx / norme * marge,
+                y: sommet.y + dy / norme * marge,
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// De la géométrie aux commandes de tracé
+// ---------------------------------------------------------------------------
+
+/// Un polygone fermé, en commandes SVG dans le carré unité.
+fn contour(sommets: &[Place]) -> String {
+    let mut sortie = String::new();
+    for (rang, sommet) in sommets.iter().enumerate() {
+        let verbe = if rang == 0 { 'M' } else { 'L' };
+        sortie.push_str(&format!("{verbe} {:.4} {:.4} ", sommet.x, sommet.y));
+    }
+    if !sommets.is_empty() {
+        sortie.push_str("Z ");
+    }
+    sortie
+}
+
+impl Plan {
+    /// Le contour du châssis, en commandes SVG dans le carré unité.
+    ///
+    /// Ces quatre méthodes existent pour que le `.slint` ne porte **aucune
+    /// coordonnée** : un habillage dessiné là-bas marcherait le jour où il est
+    /// écrit et deviendrait faux sans un mot le jour où un ventilateur change de
+    /// place (issue #52).
+    pub fn commandes_silhouette(&self) -> String {
+        contour(&self.silhouette)
+    }
+
+    /// Les parois remplies, en commandes SVG. Vide en vue de face.
+    pub fn commandes_faces(&self) -> String {
+        self.faces
+            .iter()
+            .map(|face| contour(&face.sommets))
+            .collect()
+    }
+
+    /// Les organes internes, en commandes SVG.
+    pub fn commandes_organes(&self) -> String {
+        self.organes
+            .iter()
+            .map(|organe| contour(&organe.sommets))
+            .collect()
+    }
+
+    /// Les dix anneaux et leurs moyeux, en commandes SVG.
+    ///
+    /// Deux arcs par ellipse : un demi-tour chacun. SVG n'a pas de primitive
+    /// « ellipse » dans un chemin, et deux arcs de cent quatre-vingts degrés en
+    /// tiennent lieu sans approximation.
+    pub fn commandes_anneaux(&self) -> String {
+        let mut sortie = String::new();
+        for position in Position::ALL {
+            let centre = self.centre_ventilateur(position);
+            let (rx, ry) = self.demi_axes_anneau(position);
+            for facteur in [1.0, 0.22] {
+                let (rx, ry) = (rx * facteur, ry * facteur);
+                sortie.push_str(&format!(
+                    "M {:.4} {:.4} A {rx:.4} {ry:.4} 0 1 0 {:.4} {:.4} \
+                     A {rx:.4} {ry:.4} 0 1 0 {:.4} {:.4} ",
+                    centre.x - rx,
+                    centre.y,
+                    centre.x + rx,
+                    centre.y,
+                    centre.x - rx,
+                    centre.y,
+                ));
+            }
+        }
+        sortie
     }
 }

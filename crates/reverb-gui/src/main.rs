@@ -590,6 +590,10 @@ fn dessiner(fenetre: &Fenetre, pupitre: &Pupitre) {
             .map(|(debut, fin)| format!("M {} {} L {} {} ", debut.x, debut.y, fin.x, fin.y))
             .collect::<String>(),
     ));
+    fenetre.set_silhouette(SharedString::from(plan.commandes_silhouette()));
+    fenetre.set_faces(SharedString::from(plan.commandes_faces()));
+    fenetre.set_organes(SharedString::from(plan.commandes_organes()));
+    fenetre.set_anneaux(SharedString::from(plan.commandes_anneaux()));
     fenetre.set_cible(SharedString::from(
         match pupitre.visee.borrow().as_deref() {
             Some(zone) => format!("la zone « {zone} »"),

@@ -131,6 +131,14 @@ export component Fenetre inherits Window {
     in property <[PointLed]> leds;
     // Les aretes du boitier, en commandes SVG dans le carre unite. Vide de face.
     in property <string> aretes;
+    // L'habillage, en commandes SVG dans le carre unite (#52). Aucune de ces
+    // formes ne porte de coordonnee ecrite ici : elles viennent toutes de
+    // plan.rs, sinon la maquette divergerait de la geometrie a la premiere
+    // correction.
+    in property <string> silhouette;
+    in property <string> faces;
+    in property <string> organes;
+    in property <string> anneaux;
     in property <[LigneVentilateur]> ventilateurs;
     in property <[LigneTemperature]> temperatures;
     in property <[FamilleAnimation]> familles;
@@ -271,9 +279,42 @@ export component Fenetre inherits Window {
                             x: (parent.width - self.width) / 2;
                             y: (parent.height - self.height) / 2;
 
-                            // Les arêtes du boîtier, derrière tout le reste :
-                            // sans elles, la vue de trois-quarts n'est qu'un
-                            // nuage de points penché.
+                            // L'habillage, du fond vers la surface : le chassis,
+                            // les parois remplies, les organes internes, les
+                            // aretes du volume, puis les anneaux.
+                            if root.silhouette != "": Path {
+                                width: parent.width;
+                                height: parent.height;
+                                viewbox-width: 1;
+                                viewbox-height: 1;
+                                commands: root.silhouette;
+                                fill: #101018;
+                                stroke: #303246;
+                                stroke-width: 1.5px;
+                            }
+                            if root.faces != "": Path {
+                                width: parent.width;
+                                height: parent.height;
+                                viewbox-width: 1;
+                                viewbox-height: 1;
+                                commands: root.faces;
+                                fill: #15151d;
+                            }
+                            if root.organes != "": Path {
+                                width: parent.width;
+                                height: parent.height;
+                                viewbox-width: 1;
+                                viewbox-height: 1;
+                                commands: root.organes;
+                                // Rempli, sans contour : un trait en ferait
+                                // trois cadres vides flottant au milieu de la
+                                // maquette, la ou on veut trois masses sombres
+                                // qu'on ne regarde pas.
+                                fill: #1d1e2a;
+                            }
+
+                            // Les arêtes du boîtier : sans elles, la vue de
+                            // trois-quarts n'est qu'un nuage de points penché.
                             if root.aretes != "": Path {
                                 width: parent.width;
                                 height: parent.height;
@@ -281,6 +322,18 @@ export component Fenetre inherits Window {
                                 viewbox-height: 1;
                                 commands: root.aretes;
                                 stroke: #2f3040;
+                                stroke-width: 1px;
+                            }
+
+                            // Les anneaux : un ventilateur ressemble a un
+                            // ventilateur, et non a huit points libres.
+                            if root.anneaux != "": Path {
+                                width: parent.width;
+                                height: parent.height;
+                                viewbox-width: 1;
+                                viewbox-height: 1;
+                                commands: root.anneaux;
+                                stroke: #343650;
                                 stroke-width: 1px;
                             }
 
