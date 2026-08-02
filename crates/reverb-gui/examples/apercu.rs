@@ -170,6 +170,10 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     }
 
     interface.set_leds(ModelRc::new(VecModel::from(points)));
+    interface.set_silhouette(SharedString::from(plan.commandes_silhouette()));
+    interface.set_faces(SharedString::from(plan.commandes_faces()));
+    interface.set_organes(SharedString::from(plan.commandes_organes()));
+    interface.set_anneaux(SharedString::from(plan.commandes_anneaux()));
     interface.set_aretes(SharedString::from(
         plan.aretes()
             .iter()

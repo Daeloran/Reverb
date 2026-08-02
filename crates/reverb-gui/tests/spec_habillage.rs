@@ -382,14 +382,11 @@ fn la_silhouette_de_chaque_vue_contient_les_cent_vingt_quatre_led() {
     ] {
         for (vue, plan) in vues_de(&geometrie) {
             let silhouette = plan.silhouette();
-            verifie_le_polygone(
-                &format!("la silhouette de la {vue} ({quelle})"),
-                &silhouette,
-            );
+            verifie_le_polygone(&format!("la silhouette de la {vue} ({quelle})"), silhouette);
 
             for (cible, place) in toutes_les_leds(&plan) {
                 assert!(
-                    dans_le_polygone(&silhouette, place),
+                    dans_le_polygone(silhouette, place),
                     "{} est dessinée hors du boîtier en {vue} ({quelle}) : {place:?} n'est pas \
                      dans la silhouette {silhouette:?}",
                     nom(cible)
@@ -407,7 +404,7 @@ fn la_silhouette_de_chaque_vue_contient_les_cent_vingt_quatre_led() {
             .flat_map(|i| (0..=pas).map(move |j| (i, j)))
             .filter(|(i, j)| {
                 !dans_le_polygone(
-                    &silhouette,
+                    silhouette,
                     Place {
                         x: *i as f32 / pas as f32,
                         y: *j as f32 / pas as f32,
@@ -494,7 +491,7 @@ fn l_isometrie_remplit_le_plancher_le_fond_et_le_flanc_et_jamais_le_dessus() {
     // deviendraient invisibles.
     let iso = Plan::isometrique(&Geometrie::mesuree());
     let faces = iso.faces();
-    let mut rendues = parois(&faces);
+    let mut rendues = parois(faces);
     rendues.sort_by_key(|paroi| format!("{paroi:?}"));
 
     let mut attendues = [Paroi::Plancher, Paroi::Fond, Paroi::Flanc];
@@ -510,7 +507,7 @@ fn l_isometrie_remplit_le_plancher_le_fond_et_le_flanc_et_jamais_le_dessus() {
     for (vue, plan) in vues() {
         let faces = plan.faces();
         assert!(
-            !parois(&faces).contains(&Paroi::Plafond),
+            !parois(faces).contains(&Paroi::Plafond),
             "la {vue} remplit la face du dessus : elle masque les trois ventilateurs du plafond, \
              qui sont ce que la vue sert à montrer"
         );
@@ -699,7 +696,7 @@ fn les_organes_internes_sont_poses_dans_le_repere_du_boitier_et_ne_prennent_aucu
 
     for (vue, plan) in vues() {
         let organes = plan.organes();
-        let mut rendues = pieces(&organes);
+        let mut rendues = pieces(organes);
         rendues.sort_by_key(|piece| format!("{piece:?}"));
         assert_eq!(
             rendues,
