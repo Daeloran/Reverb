@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
 use reverb_gui::plan::{Cible, Place, Plan, Vue};
-use reverb_gui::reglages::{Poignee, Reglage};
+use reverb_gui::reglages::{Poignee, Reglage, eclairage_lu};
 use reverb_gui::sondes::{Historique, Releve};
 use reverb_gui::{
     FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointLed,
@@ -401,6 +401,12 @@ fn main() -> ExitCode {
 
     brancher(&fenetre, &pupitre, ordres.clone());
 
+    // **Avant tout le reste** : ce que le boîtier fait déjà. Le démon rétablit
+    // l'éclairage au démarrage, si bien qu'une animation tourne le plus souvent
+    // avant que cette fenêtre existe. Sans cette question, la fenêtre croirait
+    // piloter un boîtier éteint et son curseur de vitesse resterait muet (#41).
+    let _ = ordres.send(Request::Lighting);
+
     // La télémétrie n'a pas de flux : on la redemande, doucement. Une seconde
     // suffit pour des tours par minute, et n'ajoute rien de mesurable au démon.
     let horloge = slint::Timer::default();
@@ -410,6 +416,11 @@ fn main() -> ExitCode {
         move || {
             let _ = ordres.send(Request::Status);
             let _ = ordres.send(Request::ZoneList);
+            // `lighting` aussi : une animation lancée ailleurs — par le socket,
+            // par une seconde fenêtre — doit finir par se voir ici. C'est
+            // `Reglage::adopter` qui décide de ce qu'on en retient, et qui
+            // laisse en place ce que l'utilisateur est en train de régler.
+            let _ = ordres.send(Request::Lighting);
         },
     );
 
@@ -1210,16 +1221,33 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
             false
         }
         Retour::Eclairage(lignes) => {
-            let mut anime = None;
-            for ligne in &lignes {
-                if let ResponseLine::Anim { nom, .. } = ligne {
-                    anime = Some(nom.clone());
-                }
+            // Une zone visée : le panneau édite **sa** couche, pas celle du
+            // boîtier entier. Adopter l'état global ramènerait les curseurs sur
+            // une animation que personne n'est en train de régler.
+            if pupitre.visee.borrow().is_some() {
+                return false;
             }
+            // Rien à faire tant que le démon décrit l'animation que la fenêtre
+            // pilote déjà : réécrire les curseurs chaque seconde les ferait
+            // sauter sous les doigts qui les tirent.
+            let lu = eclairage_lu(&lignes);
+            if !pupitre.reglage.borrow_mut().adopter(&lu) {
+                return false;
+            }
+            let reglage = pupitre.reglage.borrow().clone();
             fenetre.set_animation_courante(SharedString::from(
-                anime.clone().unwrap_or_else(|| "aucune".to_owned()),
+                reglage
+                    .animation
+                    .clone()
+                    .unwrap_or_else(|| "aucune".to_owned()),
             ));
-            pupitre.reglage.borrow_mut().animation = anime;
+            // Les curseurs, ensuite : `relever` les relit à chaque geste, et
+            // les laisser en arrière renverrait au démon les réglages du
+            // sélecteur — régler la vitesse repeindrait le boîtier.
+            fenetre.set_vitesse(i32::from(reglage.vitesse));
+            fenetre.set_direction(i32::try_from(reglage.direction).unwrap_or(0));
+            pupitre.couleur.set(reglage.couleur.en_tsl());
+            poser_couleur(fenetre, pupitre);
             false
         }
         Retour::Zones(lignes) => {
