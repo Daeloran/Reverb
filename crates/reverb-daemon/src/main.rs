@@ -959,6 +959,16 @@ fn ecran_commande(
 
 /// Change ce que la dalle montre, en refusant sans rien casser.
 fn poser_affichage(etat: &mut Etat, affichage: ecran::Affichage) -> Vec<ResponseLine> {
+    // ⚠️ **Le format se vérifie avant que quoi que ce soit bouge** (#69). Un GIF
+    // déclaré sur un `.jpg` était accepté, persisté, et rejoué à chaque
+    // démarrage du service : le démon repartait dans un état cassé sans moyen
+    // d'en sortir seul. La vérification lit un en-tête, pas un fichier entier.
+    if let Err(erreur) = ecran::verifier_fichier(&affichage) {
+        return vec![ResponseLine::Error {
+            message: erreur.to_string(),
+        }];
+    }
+
     let precedent = std::mem::replace(&mut etat.ecran.affichage, affichage);
     match etat.preparer_ecran() {
         Ok(()) => conserver_ecran(etat),

@@ -313,6 +313,113 @@ impl fmt::Display for ImageInvalide {
 
 impl std::error::Error for ImageInvalide {}
 
+/// Le format de ce fichier est-il celui que l'affichage demande ? (issue #69)
+///
+/// # Le défaut que ceci corrige
+///
+/// `/var/lib/reverb/ecran.conf` a contenu, sur SHYNAEL :
+///
+/// ```text
+/// gif:/home/lupink/Images/Wallpapers/pxfuel.jpg
+/// ```
+///
+/// Un **GIF déclaré sur un `.jpg`**. La commande avait été acceptée, l'état
+/// écrit, et le démon rejouait cet affichage impossible à chaque démarrage du
+/// service — trois fois de suite. C'est très probablement ce qui a mis la dalle
+/// dans l'état où elle a cessé de répondre à son pilote noyau.
+///
+/// ⚠️ **Le défaut n'est pas qu'un humain se trompe de format** — la fenêtre
+/// propose « image » et « gif » dans le même menu et le même champ. Le défaut
+/// est qu'on puisse **persister** un état que le démon ne saura jamais
+/// afficher, et donc qu'il redémarre dans un état cassé sans moyen d'en sortir.
+///
+/// ⚠️ **Le verdict vient du contenu, jamais de l'extension.** Un `.png` qui
+/// porte du JPEG est un JPEG, et un fichier sans extension a un format comme
+/// les autres.
+///
+/// `Image` accepte les trois formats du crate — un GIF affiché en image fixe
+/// est un cas légitime, et le refuser serait une régression de capacité. `Gif`
+/// n'accepte que le GIF, puisqu'il promet une animation.
+pub fn verifier_format(affichage: &Affichage, octets: &[u8]) -> Result<(), ImageInvalide> {
+    let (chemin, attendus) = match affichage {
+        // Aucun fichier, donc aucun format à vérifier. C'est la sortie de
+        // secours : `off` et `gauge` doivent rester possibles quoi qu'il arrive.
+        Affichage::Rien | Affichage::Cadran(_) => return Ok(()),
+        Affichage::Image(chemin) => (
+            chemin,
+            &[ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Gif][..],
+        ),
+        Affichage::Gif(chemin) => (chemin, &[ImageFormat::Gif][..]),
+    };
+
+    // Reconnaître, et non décoder : l'en-tête suffit, et un fichier de plusieurs
+    // mégaoctets ne doit pas coûter son décodage complet pour être refusé.
+    match image::guess_format(octets).ok() {
+        Some(format) if attendus.contains(&format) => Ok(()),
+        Some(format) => Err(ImageInvalide {
+            raison: format!(
+                "« {chemin} » n'est pas {} : {} — essaie « {} »",
+                nom_attendu(affichage),
+                nom_de_format(format),
+                if matches!(format, ImageFormat::Gif) {
+                    "gif"
+                } else {
+                    "image"
+                }
+            ),
+        }),
+        None => Err(ImageInvalide {
+            raison: format!("« {chemin} » : aucun format d'image reconnu"),
+        }),
+    }
+}
+
+/// Le même verdict, en lisant le fichier que l'affichage nomme.
+///
+/// C'est ce que le démon appelle : il a un chemin, pas des octets. Seuls les
+/// premiers octets sont lus — reconnaître un format n'en demande pas plus, et
+/// charger cinq mégaoctets pour lire un en-tête irait contre le but.
+pub fn verifier_fichier(affichage: &Affichage) -> Result<(), ImageInvalide> {
+    let chemin = match affichage {
+        Affichage::Rien | Affichage::Cadran(_) => return Ok(()),
+        Affichage::Image(chemin) | Affichage::Gif(chemin) => chemin,
+    };
+    let mut fichier = std::fs::File::open(chemin).map_err(|erreur| ImageInvalide {
+        raison: format!("« {chemin} » illisible : {erreur}"),
+    })?;
+    // Assez pour toutes les signatures que le crate reconnaît, et assez peu pour
+    // que le coût ne dépende pas de la taille du fichier.
+    let mut entete = [0u8; 64];
+    let lus = io::Read::read(&mut fichier, &mut entete).map_err(|erreur| ImageInvalide {
+        raison: format!("« {chemin} » illisible : {erreur}"),
+    })?;
+    verifier_format(affichage, &entete[..lus])
+}
+
+/// Ce que l'affichage attend, dit comme un humain le dirait.
+fn nom_attendu(affichage: &Affichage) -> &'static str {
+    match affichage {
+        Affichage::Gif(_) => "un GIF",
+        _ => "une image (PNG, JPEG ou GIF)",
+    }
+}
+
+/// Le nom d'un format, tel qu'il doit apparaître dans un refus.
+///
+/// Écrit à la main plutôt que tiré du `Debug` du crate : c'est un message que
+/// quelqu'un lit, et « Jpeg » n'est pas ce qu'on écrit quand on parle de JPEG.
+fn nom_de_format(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Png => "décodé comme PNG",
+        ImageFormat::Jpeg => "décodé comme JPEG",
+        ImageFormat::Gif => "décodé comme GIF",
+        ImageFormat::WebP => "décodé comme WebP",
+        ImageFormat::Bmp => "décodé comme BMP",
+        ImageFormat::Tiff => "décodé comme TIFF",
+        _ => "d'un format que ce démon ne sait pas afficher",
+    }
+}
+
 impl Dalle {
     pub fn noire() -> Dalle {
         Dalle {
