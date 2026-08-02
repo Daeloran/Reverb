@@ -21,12 +21,12 @@
 use std::rc::Rc;
 
 use reverb_anim::{CATALOGUE, Geometrie};
-use reverb_gui::plan::Plan;
+use reverb_gui::plan::{Plan, halo};
 use reverb_gui::{
-    FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointLed,
+    FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointHalo, PointLed,
 };
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
-use reverb_proto::{LEDS_PER_FAN, Position};
+use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
 };
@@ -169,7 +169,36 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
         }
     }
 
+    // Le halo de chaque pastille (#64), couche par couche : la plus large
+    // d'abord, donc au fond. C'est `plan::halo` qui décide de tout — combien de
+    // couches, à quel rayon, à quelle opacité — et une LED noire n'en a aucune.
+    let mut halos = Vec::new();
+    for rang in (0..halo(Rgb::new(1, 1, 1)).len()).rev() {
+        for point in &points {
+            let couleur = Rgb::new(
+                point.couleur.red(),
+                point.couleur.green(),
+                point.couleur.blue(),
+            );
+            if let Some(couche) = halo(couleur).get(rang) {
+                halos.push(PointHalo {
+                    x: point.x,
+                    y: point.y,
+                    rayon: point.rayon * couche.rayon,
+                    couleur: Color::from_argb_u8(
+                        (couche.opacite * 255.0).round() as u8,
+                        couleur.r,
+                        couleur.g,
+                        couleur.b,
+                    ),
+                });
+            }
+        }
+    }
+    interface.set_halos(ModelRc::new(VecModel::from(halos)));
+
     interface.set_leds(ModelRc::new(VecModel::from(points)));
+    interface.set_habillage(SharedString::from(plan.commandes_habillage()));
     interface.set_silhouette(SharedString::from(plan.commandes_silhouette()));
     interface.set_faces(SharedString::from(plan.commandes_faces()));
     interface.set_organes(SharedString::from(plan.commandes_organes()));

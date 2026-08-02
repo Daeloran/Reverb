@@ -232,9 +232,24 @@ s'y distinguent. Son plafond reste **ouvert** : une plaque pleine masquerait les
 du dessus, qui sont ce qu'elle sert à montrer. La sélection survit au changement de vue.
 
 Les deux vues sont habillées d'un châssis, de parois et des organes internes — plateau de carte
-mère, carte graphique, cache d'alimentation. **Aucune de ces formes n'a de coordonnée dans le
-`.slint`** : toutes viennent de `plan.rs`, sinon la maquette divergerait de la géométrie à la
-première correction.
+mère, carte graphique, cache d'alimentation —, d'un cadre par ventilateur, du corps des quatre
+barrettes et de la dalle du Kraken. **Aucune de ces formes n'a de coordonnée dans le `.slint`** :
+toutes viennent de `plan.rs`, sinon la maquette divergerait de la géométrie à la première
+correction.
+
+**Chaque LED baigne son entourage de sa couleur.** C'est ce qu'on reconnaît d'un boîtier RGB avant
+la forme des pales, et une LED éteinte ne diffuse rien — un halo sur du noir ferait croire à un
+démon qui n'a pas reçu la commande.
+
+⚠️ **Le halo est dessiné, en disques translucides, et non par une ombre portée.** Le rendu logiciel
+de Slint — celui de l'aperçu ci-dessous — ignore `drop-shadow-blur` : mesuré, pixel par pixel. Le
+halo aurait été invisible dans l'outil même qui sert à vérifier la maquette.
+
+⚠️ **Le cadre d'un ventilateur est une ellipse, pas le carré d'un F140.** Un carré est
+géométriquement impossible ici : en isométrie, les LED d'un ventilateur atteignent **0,998** fois
+son demi-axe quand le centre de son voisin n'est qu'à **0,900**. Aucun rectangle ne peut contenir
+ses propres LED sans avaler le centre d'un autre ventilateur. Le cadre est donc percé et
+elliptique, entre **1,20** et **1,25** — les deux bornes que la mesure laisse.
 
 `cargo run --release --example apercu -p reverb-gui` dessine la fenêtre **sans écran**, dans un
 fichier : c'est ainsi qu'on vérifie une mise en page sans ouvrir de session graphique.

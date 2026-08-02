@@ -41,7 +41,7 @@
 
 use reverb_anim::{Geometrie, Point};
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
-use reverb_proto::{LEDS_PER_FAN, Position};
+use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
 
 /// Nombre de LED d'un ventilateur, comme indice.
 const LEDS: usize = LEDS_PER_FAN as usize;
@@ -163,6 +163,82 @@ pub struct Organe {
     pub sommets: Vec<Place>,
 }
 
+/// Ce qu'une forme d'habillage figure (issue #64).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ornement {
+    CadreVentilateur(Position),
+    CorpsBarrette(usize),
+    DisqueKraken,
+}
+
+/// Une forme d'habillage : un contour, éventuellement percé.
+///
+/// ⚠️ **Le creux est ce qui permet d'entourer sans masquer.** Un cadre plein
+/// recouvrirait les huit LED qu'il entoure, et l'issue interdit qu'une forme
+/// masque une LED : la fenêtre est un instrument, chaque LED doit rester
+/// cliquable. Le boîtier photographié montre la même solution — le cadre d'un
+/// F140 est percé, et l'anneau se voit par le trou.
+///
+/// `creux` est **vide** quand la forme est pleine, ce qui est le cas ordinaire
+/// d'un corps de barrette ou d'une dalle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Forme {
+    pub ornement: Ornement,
+    /// Les sommets dans l'ordre du contour. **La fermeture est implicite**, même
+    /// convention que [`Face`] et [`Organe`].
+    pub contour: Vec<Place>,
+    pub creux: Vec<Place>,
+}
+
+/// Une couche du halo d'une LED.
+///
+/// `rayon` est en multiples du rayon de la pastille, `opacite` de zéro exclu à
+/// un exclu.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CoucheDeHalo {
+    pub couleur: Rgb,
+    pub rayon: f32,
+    pub opacite: f32,
+}
+
+/// Les couches du halo, du plus serré au plus large.
+///
+/// Trois et non deux : avec deux, le débordement garde un bord franc que le
+/// boîtier n'a pas. Les rayons sont en multiples du rayon de la pastille — la
+/// plus large déborde de cinq fois, ce qui est l'ordre de grandeur qu'on voit
+/// sur les photos, où la couleur d'un ventilateur atteint les parois autour.
+const COUCHES_DE_HALO: [(f32, f32); 3] = [(2.1, 0.30), (3.4, 0.15), (5.2, 0.07)];
+
+/// Ce qu'une LED de cette couleur diffuse autour d'elle.
+///
+/// ⚠️ **Une LED éteinte ne diffuse rien**, et « éteinte » veut dire noire —
+/// trois composantes nulles, sans seuil. Un seuil de luminosité serait une
+/// invention, et il ferait disparaître le halo d'une braise en fin de cycle,
+/// qui est justement un endroit où il se voit. Le mode de défaillance inverse
+/// est plus coûteux encore parce qu'il rassure : un boîtier qu'on vient
+/// d'éteindre, et une maquette restée constellée d'auréoles.
+///
+/// ⚠️ **Le halo porte exactement la couleur de sa LED.** Rien ne l'atténue que
+/// son opacité : un halo blanchi « pour éclairer un peu » donnerait un boîtier
+/// dont toutes les LED baignent dans la même lueur, c'est-à-dire qui ne dit
+/// plus ce qu'elles affichent.
+///
+/// C'est **dessiné**, jamais une ombre portée : le rendu logiciel de Slint —
+/// celui de `examples/apercu.rs` — ignore `drop-shadow-blur`, mesuré (#64).
+pub fn halo(couleur: Rgb) -> Vec<CoucheDeHalo> {
+    if couleur == Rgb::BLACK {
+        return Vec::new();
+    }
+    COUCHES_DE_HALO
+        .iter()
+        .map(|&(rayon, opacite)| CoucheDeHalo {
+            couleur,
+            rayon,
+            opacite,
+        })
+        .collect()
+}
+
 /// Où dessiner chaque LED du boîtier.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
@@ -176,6 +252,8 @@ pub struct Plan {
     faces: Vec<Face>,
     /// Les organes internes, dans les deux vues.
     organes: Vec<Organe>,
+    /// L'habillage : dix cadres, quatre corps de barrette, une dalle.
+    habillage: Vec<Forme>,
     /// Les deux demi-axes de chaque anneau, dans l'ordre de `Position::ALL`.
     demi_axes: [(f32, f32); 10],
     rayon: f32,
@@ -238,6 +316,7 @@ impl Plan {
                 // n'encadre rien.
                 aretes: Vec::new(),
                 silhouette: Vec::new(),
+                habillage: Vec::new(),
                 // Pas de paroi remplie de face : la vue écrase la largeur du
                 // boîtier, donc plancher, fond et flanc s'y superposent en un
                 // seul rectangle qui ne dit rien de plus que la silhouette.
@@ -300,6 +379,7 @@ impl Plan {
                 barrettes,
                 aretes: aretes_du_volume(geometrie),
                 silhouette: Vec::new(),
+                habillage: Vec::new(),
                 faces: faces_du_volume(geometrie),
                 organes: organes_projetes(geometrie, en_isometrie),
                 demi_axes: etendues,
@@ -384,6 +464,12 @@ impl Plan {
     /// Les organes internes, dans les deux vues.
     pub fn organes(&self) -> &[Organe] {
         &self.organes
+    }
+
+    /// L'habillage : dix cadres de ventilateur, quatre corps de barrette, une
+    /// dalle. Quinze formes, dans les deux vues.
+    pub fn habillage(&self) -> &[Forme] {
+        &self.habillage
     }
 
     /// Les deux demi-axes de l'anneau d'un ventilateur : horizontal, vertical.
@@ -660,6 +746,10 @@ fn cadrer(plan: Plan, etendues: [(f32, f32); 10]) -> Plan {
     }
     let silhouette = silhouette_du_nuage(&nuage, pastille);
 
+    // L'habillage aussi se calcule avant, et pour la même raison : il dérive des
+    // places brutes et des demi-axes bruts, et il doit entrer dans les bornes.
+    let habillage = habillage_brut(&plan.ventilateurs, &plan.barrettes, etendues, pastille);
+
     let mut bornes = Bornes::vide();
     for ((centre, _), (large, haut)) in plan.ventilateurs.iter().zip(etendues) {
         bornes.ajouter(centre.x - large - pastille, centre.y - haut - pastille);
@@ -689,6 +779,11 @@ fn cadrer(plan: Plan, etendues: [(f32, f32); 10]) -> Plan {
     }
     for organe in &plan.organes {
         for sommet in &organe.sommets {
+            bornes.ajouter(sommet.x, sommet.y);
+        }
+    }
+    for forme in &habillage {
+        for sommet in forme.contour.iter().chain(&forme.creux) {
             bornes.ajouter(sommet.x, sommet.y);
         }
     }
@@ -738,6 +833,14 @@ fn cadrer(plan: Plan, etendues: [(f32, f32); 10]) -> Plan {
             sommets: organe.sommets.into_iter().map(place).collect(),
         })
         .collect();
+    let habillage = habillage
+        .into_iter()
+        .map(|forme| Forme {
+            ornement: forme.ornement,
+            contour: forme.contour.into_iter().map(place).collect(),
+            creux: forme.creux.into_iter().map(place).collect(),
+        })
+        .collect();
     let mut demi_axes = plan.demi_axes;
     for (large, haut) in &mut demi_axes {
         *large *= echelle;
@@ -751,6 +854,7 @@ fn cadrer(plan: Plan, etendues: [(f32, f32); 10]) -> Plan {
         silhouette,
         faces,
         organes,
+        habillage,
         demi_axes,
         rayon: rayon * echelle,
         vue: plan.vue,
@@ -925,6 +1029,212 @@ fn enveloppe(nuage: &[Place]) -> Vec<Place> {
     pile
 }
 
+// ---------------------------------------------------------------------------
+// L'habillage : ce qui fait qu'un ventilateur ressemble à un ventilateur (#64)
+// ---------------------------------------------------------------------------
+
+/// Le contour extérieur d'un cadre, en demi-axes d'anneau.
+///
+/// ⚠️ **Ces deux constantes ne sont pas choisies, elles sont mesurées**, et la
+/// fenêtre entre elles est étroite. Sur la géométrie de SHYNAEL, en isométrie :
+/// les huit LED d'un ventilateur montent à **1,172** fois leur ellipse — l'anneau
+/// y est vu penché — et le centre du voisin le plus proche est à **1,273**. Le
+/// creux doit passer au-dessus de la première valeur pour ne masquer aucune LED,
+/// le contour rester en deçà de la seconde pour ne pas avaler son voisin.
+///
+/// ⚠️ **Le cadre est une ellipse, et non le carré d'un F140**, parce qu'un carré
+/// est géométriquement impossible ici : en isométrie, les LED du ventilateur
+/// atteignent **0,998** en norme rectangle quand le centre du voisin n'est qu'à
+/// **0,900**. Aucun rectangle aligné aux axes ne peut donc contenir ses propres
+/// LED sans contenir le centre d'un autre ventilateur. Mesuré avant d'être écrit.
+const CADRE_EXTERIEUR: f32 = 1.25;
+
+/// Le creux d'un cadre, en demi-axes d'anneau. Voir [`CADRE_EXTERIEUR`].
+const CADRE_INTERIEUR: f32 = 1.20;
+
+/// Sommets d'une ellipse d'habillage.
+///
+/// Assez pour que l'arête reste au-dessus du rayon nominal moins un demi-pour-
+/// cent : les marges du cadre se comptent en deux centièmes, un polygone
+/// grossier les mangerait.
+const SOMMETS_ELLIPSE: usize = 48;
+
+/// Ce qu'une forme laisse au minimum entre elle et la LED la plus proche, en
+/// pastilles.
+///
+/// Le critère est « ne masque aucune LED » ; s'en approcher à moins d'une
+/// pastille masquerait le disque sans masquer son centre — vrai pour le test,
+/// faux pour l'œil.
+const DEGAGEMENT: f32 = 1.2;
+
+/// Un polygone elliptique centré, dans l'ordre du contour.
+fn ellipse(centre: Place, rx: f32, ry: f32) -> Vec<Place> {
+    (0..SOMMETS_ELLIPSE)
+        .map(|rang| {
+            let angle = rang as f32 / SOMMETS_ELLIPSE as f32 * std::f32::consts::TAU;
+            Place {
+                x: centre.x + rx * angle.cos(),
+                y: centre.y + ry * angle.sin(),
+            }
+        })
+        .collect()
+}
+
+/// L'habillage d'un plan **avant cadrage**, dans le repère des places brutes.
+///
+/// Calculé ici et non après, pour la même raison que la silhouette : le cadrage
+/// est une application affine, et il vaut mieux que les formes entrent dans ses
+/// bornes que de déborder du carré unité une fois tout réduit.
+fn habillage_brut(
+    ventilateurs: &[(Place, [Place; LEDS]); 10],
+    barrettes: &[[Place; LEDS_PER_STICK]; SLOT_COUNT],
+    etendues: [(f32, f32); 10],
+    pastille: f32,
+) -> Vec<Forme> {
+    let mut leds: Vec<Place> = Vec::with_capacity(124);
+    for (_, anneau) in ventilateurs {
+        leds.extend_from_slice(anneau);
+    }
+    for reglette in barrettes {
+        leds.extend_from_slice(reglette);
+    }
+
+    let mut formes = Vec::with_capacity(15);
+
+    // Les dix cadres : un anneau épais, percé de son propre trou.
+    for (rang, position) in Position::ALL.into_iter().enumerate() {
+        let (centre, _) = ventilateurs[rang];
+        let (large, haut) = etendues[rang];
+        formes.push(Forme {
+            ornement: Ornement::CadreVentilateur(position),
+            contour: ellipse(centre, large * CADRE_EXTERIEUR, haut * CADRE_EXTERIEUR),
+            creux: ellipse(centre, large * CADRE_INTERIEUR, haut * CADRE_INTERIEUR),
+        });
+    }
+
+    // Les quatre corps de barrette : une bande le long de la colonne de LED,
+    // posée **à côté** d'elle et jamais dessus. Sur la photo, la bande lumineuse
+    // court sur l'arête du corps ; ici elle la longe à une pastille, parce que
+    // les onze LED ne sont pas exactement colinéaires en isométrie et qu'une
+    // arête qui les frôlerait finirait par en avaler une.
+    for (slot, reglette) in barrettes.iter().enumerate() {
+        formes.push(Forme {
+            ornement: Ornement::CorpsBarrette(slot),
+            contour: corps_de_barrette(reglette, &leds, pastille),
+            creux: Vec::new(),
+        });
+    }
+
+    // La dalle du Kraken, **sous le bloc de RAM** : c'est là qu'elle est sur les
+    // photos du boîtier, la pompe étant posée sur le processeur et les quatre
+    // barrettes juste au-dessus de lui. Son rayon n'est pas choisi : c'est ce que
+    // la place permet, et la place est mince — les trois ventilateurs du plafond
+    // se projettent par-dessus en isométrie.
+    let centre = sous_la_ram(barrettes);
+    let libre = leds
+        .iter()
+        .map(|led| distance(centre, *led))
+        .fold(f32::INFINITY, f32::min);
+    let rayon = (libre - DEGAGEMENT * pastille).max(pastille);
+    formes.push(Forme {
+        ornement: Ornement::DisqueKraken,
+        contour: ellipse(centre, rayon, rayon),
+        creux: Vec::new(),
+    });
+
+    formes
+}
+
+/// Juste sous le bloc de RAM, où se trouve la pompe.
+///
+/// **Relevé sur les photos du boîtier**, pas déduit : les quatre barrettes sont
+/// au-dessus du processeur, et la dalle du Kraken se lit juste en dessous
+/// d'elles. Accroché à la RAM plutôt qu'au plateau de carte mère, parce que la
+/// RAM a des LED — donc une place mesurée — là où le plateau n'est qu'un
+/// rectangle décoratif dont le centre ne veut rien dire.
+fn sous_la_ram(barrettes: &[[Place; LEDS_PER_STICK]; SLOT_COUNT]) -> Place {
+    let mut bornes = Bornes::vide();
+    for reglette in barrettes {
+        for place in reglette {
+            bornes.ajouter(place.x, place.y);
+        }
+    }
+    Place {
+        x: (bornes.x_min + bornes.x_max) / 2.0,
+        // Une demi-hauteur de bloc sous son bord bas : assez pour sortir de la
+        // RAM, assez peu pour rester sur la carte mère.
+        y: bornes.y_max + bornes.hauteur() / 2.0,
+    }
+}
+
+/// Une bande le long d'une barrette, du côté où elle ne masque rien.
+///
+/// L'épaisseur n'est pas une constante : c'est **ce que la place permet**. Les
+/// quatre barrettes sont serrées, et une épaisseur choisie une fois marcherait
+/// dans une vue pour recouvrir une LED dans l'autre.
+fn corps_de_barrette(
+    reglette: &[Place; LEDS_PER_STICK],
+    leds: &[Place],
+    pastille: f32,
+) -> Vec<Place> {
+    let debut = reglette[0];
+    let fin = reglette[LEDS_PER_STICK - 1];
+    let (dx, dy) = (fin.x - debut.x, fin.y - debut.y);
+    let norme = dx.hypot(dy).max(f32::MIN_POSITIVE);
+    let (ux, uy) = (dx / norme, dy / norme);
+    // La normale, tournée d'un quart de tour. Le signe est celui qui éloigne du
+    // milieu du nuage : une bande posée vers l'intérieur du bloc de RAM tomberait
+    // sur la barrette voisine.
+    let (nx, ny) = (-uy, ux);
+
+    // Ce qu'on peut prendre de chaque côté avant de toucher une LED. La bande
+    // longe la colonne : un point ne la gêne que s'il se projette dans sa
+    // longueur, débords compris — la bande dépasse d'un retrait à chaque bout.
+    let marge = DEGAGEMENT * pastille;
+    let place_libre = |signe: f32| {
+        leds.iter()
+            .filter_map(|led| {
+                let (ex, ey) = (led.x - debut.x, led.y - debut.y);
+                let le_long = ex * ux + ey * uy;
+                if !(-marge..=norme + marge).contains(&le_long) {
+                    return None;
+                }
+                let en_travers = (ex * nx + ey * ny) * signe;
+                (en_travers > 0.0).then_some(en_travers)
+            })
+            .fold(f32::INFINITY, f32::min)
+    };
+
+    // Le côté le plus dégagé gagne.
+    let (signe, libre) = [1.0f32, -1.0]
+        .into_iter()
+        .map(|signe| (signe, place_libre(signe)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("deux côtés");
+
+    // ⚠️ **Le dégagement cède avant l'épaisseur, et jamais l'inverse.** Un
+    // plancher d'épaisseur forcerait la bande à déborder là où la place manque —
+    // et la place manque : en isométrie les quatre barrettes se projettent
+    // presque l'une sur l'autre. Le retrait suit donc la place quand elle se
+    // resserre, ce qui garde la bande **toujours** entre les deux colonnes,
+    // fût-elle mince.
+    let retrait = marge.min(libre / 3.0);
+    let epaisseur = (libre - 2.0 * retrait).min(pastille * 3.0);
+
+    let bord = |le_long: f32, en_travers: f32| Place {
+        x: debut.x + ux * le_long + nx * signe * en_travers,
+        y: debut.y + uy * le_long + ny * signe * en_travers,
+    };
+    let proche = retrait;
+    let loin = retrait + epaisseur;
+    vec![
+        bord(-retrait, proche),
+        bord(norme + retrait, proche),
+        bord(norme + retrait, loin),
+        bord(-retrait, loin),
+    ]
+}
+
 /// Le contour du châssis : l'enveloppe des LED, écartée d'une pastille.
 ///
 /// L'écart se prend depuis le centre du nuage, ce qui suffit ici : l'enveloppe
@@ -997,6 +1307,19 @@ impl Plan {
         self.organes
             .iter()
             .map(|organe| contour(&organe.sommets))
+            .collect()
+    }
+
+    /// L'habillage, en commandes SVG.
+    ///
+    /// Chaque forme sort en un ou deux sous-chemins : son contour, puis son creux
+    /// s'il en a un. Deux sous-chemins imbriqués dans un même `Path` se rendent en
+    /// anneau — c'est la règle du pair-impair, et c'est ce qui perce le cadre sans
+    /// qu'aucune LED soit masquée.
+    pub fn commandes_habillage(&self) -> String {
+        self.habillage
+            .iter()
+            .map(|forme| format!("{}{}", contour(&forme.contour), contour(&forme.creux)))
             .collect()
     }
 

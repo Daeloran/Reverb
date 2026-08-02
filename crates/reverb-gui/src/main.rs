@@ -28,13 +28,13 @@ use std::time::{Duration, Instant};
 
 use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
-use reverb_gui::plan::{Cible, Place, Plan, Vue};
+use reverb_gui::plan::{Cible, Place, Plan, Vue, halo};
 use reverb_gui::reglages::{
     EcranChoisi, Limiteur, Poignee, Reglage, eclairage_lu, requetes_pour_la_couleur,
 };
 use reverb_gui::sondes::{Historique, ModelesNvme, Releve, modeles_nvme, sondes_retenues};
 use reverb_gui::{
-    FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointLed,
+    FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointHalo, PointLed,
 };
 use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine, ScreenAction};
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
@@ -584,6 +584,8 @@ fn dessiner(fenetre: &Fenetre, pupitre: &Pupitre) {
     let detail = pupitre.detail.get();
 
     fenetre.set_leds(modele_leds(&plan, &tableau, &selection, detail));
+    fenetre.set_habillage(SharedString::from(plan.commandes_habillage()));
+    fenetre.set_halos(modele_halos(&plan, &tableau, detail));
     fenetre.set_aretes(SharedString::from(
         plan.aretes()
             .iter()
@@ -825,6 +827,86 @@ fn modele_leds(
         }
     }
     ModelRc::new(VecModel::from(points))
+}
+
+/// Les couches de halo de toutes les LED allumées (#64).
+///
+/// ⚠️ **De la plus large à la plus serrée, toutes LED confondues.** L'ordre du
+/// modèle est l'ordre de rendu : couche par couche et non LED par LED, sinon le
+/// halo large d'une LED passerait par-dessus le halo serré de sa voisine et le
+/// dégradé aurait des marches là où deux ventilateurs se touchent.
+///
+/// C'est `plan::halo` qui décide de tout — combien de couches, à quel rayon, à
+/// quelle opacité, et qu'une LED noire n'en a aucune. Ici on ne fait que placer.
+fn modele_halos(plan: &Plan, tableau: &Tableau, detail: Detail) -> ModelRc<PointHalo> {
+    let rayon = plan.rayon_anneau() / 8.0;
+    let mut couches: Vec<(usize, PointHalo)> = Vec::new();
+    for point in modele_leds_brut(plan, tableau, detail) {
+        for (rang, couche) in halo(point.1).into_iter().enumerate() {
+            couches.push((
+                rang,
+                PointHalo {
+                    x: point.0.x,
+                    y: point.0.y,
+                    rayon: rayon * couche.rayon,
+                    couleur: avec_opacite(couche.couleur, couche.opacite),
+                },
+            ));
+        }
+    }
+    // Rang décroissant : la plus large d'abord, donc au fond.
+    couches.sort_by_key(|(rang, _)| std::cmp::Reverse(*rang));
+    ModelRc::new(VecModel::from(
+        couches
+            .into_iter()
+            .map(|(_, halo)| halo)
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// Où sont les LED et de quelle couleur, sans rien décider de leur dessin.
+///
+/// Le détail « ventilateur » regroupe : dix anneaux et quatre barrettes valent
+/// alors quatorze halos, et non cent vingt-quatre. Le halo suit ce que la
+/// maquette montre, sinon un boîtier vu en gros porterait le halo de LED qu'on
+/// ne voit pas.
+fn modele_leds_brut(plan: &Plan, tableau: &Tableau, detail: Detail) -> Vec<(Place, Rgb)> {
+    match detail {
+        Detail::Led => Selection::tout()
+            .cibles
+            .into_iter()
+            .filter_map(|cible| {
+                let place = match cible {
+                    Cible::Led { position, led } => plan.led_ventilateur(position, led),
+                    Cible::Barrette { slot, led } => plan.led_barrette(slot, led),
+                };
+                place.map(|place| (place, tableau.couleur(cible)))
+            })
+            .collect(),
+        Detail::Ventilateur => Position::ALL
+            .into_iter()
+            .map(|position| {
+                (
+                    plan.centre_ventilateur(position),
+                    tableau.moyenne(Organe::Ventilateur(position)),
+                )
+            })
+            .chain((0..SLOT_COUNT).filter_map(|slot| {
+                plan.centre_barrette(slot)
+                    .map(|centre| (centre, tableau.moyenne(Organe::Reglette(slot))))
+            }))
+            .collect(),
+    }
+}
+
+/// Une couleur de LED, à l'opacité que le halo demande.
+fn avec_opacite(couleur: Rgb, opacite: f32) -> Color {
+    Color::from_argb_u8(
+        (opacite.clamp(0.0, 1.0) * 255.0).round() as u8,
+        couleur.r,
+        couleur.g,
+        couleur.b,
+    )
 }
 
 /// En deçà de cette fraction du cadre, un glissement est un clic.
