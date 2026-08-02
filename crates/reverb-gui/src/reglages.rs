@@ -21,12 +21,21 @@
 //! [`Poignee`] arbitre : la consigne l'emporte tant qu'elle est fraîche, la
 //! mesure reprend la main ensuite. C'est un état par canal, pas un verrou
 //! global — deux ventilateurs se règlent indépendamment.
+//!
+//! # La fenêtre ne savait pas ce qui tournait déjà
+//!
+//! Le démon rétablit l'éclairage au démarrage : quand la fenêtre s'ouvre, une
+//! animation tourne le plus souvent déjà. La fenêtre l'ignorait, donc
+//! [`Reglage::commande`] rendait `None` et le curseur de vitesse redevenait
+//! muet — le défaut d'au-dessus, revenu par une autre porte. [`eclairage_lu`]
+//! et [`Reglage::adopter`] sont la réponse : la fenêtre lit ce que le démon
+//! rapporte avant de prétendre le piloter.
 
 use std::time::Duration;
 
 use reverb_anim::{Animation, Direction};
 use reverb_proto::Rgb;
-use reverb_proto::ipc::Request;
+use reverb_proto::ipc::{Request, ResponseLine};
 
 /// Combien de temps une consigne l'emporte sur la mesure après le relâchement.
 ///
@@ -79,6 +88,59 @@ impl Reglage {
             reglages,
         })
     }
+
+    /// Adopte ce que le démon rapporte. Rend vrai s'il y a eu changement.
+    ///
+    /// **L'animation nommée décide, et elle seule.** Tant que le démon rapporte
+    /// celle que la fenêtre pilote déjà, rien n'est adopté : les réponses
+    /// arrivent chaque seconde, et adopter à chaque fois ferait sauter le
+    /// curseur de vitesse sous les doigts de celui qui le tire — le défaut
+    /// qu'on a corrigé sur les poignées de ventilateur, refait à l'identique.
+    ///
+    /// Quand le nom change, en revanche, tout ce que le démon rapporte est
+    /// adopté ; ce qu'il ne rapporte pas garde sa valeur. `arc-en-ciel` n'a pas
+    /// de couleur, et lui en inventer une déplacerait le sélecteur pour rien.
+    ///
+    /// Conséquence assumée : un réglage changé **hors** de la fenêtre sur
+    /// l'animation en cours — un `animate comete vitesse=9` par le socket — ne
+    /// remonte pas. Le prix à payer pour que le curseur tienne en place.
+    pub fn adopter(&mut self, venu: &Eclairage) -> bool {
+        let _ = venu;
+        todo!("issue #41")
+    }
+}
+
+/// Ce qu'une réponse `lighting` dit de l'animation en cours.
+///
+/// Chaque réglage est facultatif parce que le démon n'écrit que les clés que
+/// l'animation accepte. Un réglage absent n'est pas un réglage à zéro : c'est
+/// un réglage sur lequel le démon ne s'est pas prononcé, et que la fenêtre doit
+/// donc laisser tel qu'il est.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Eclairage {
+    /// Le nom de l'animation, **tel que le démon l'a écrit**, même s'il est
+    /// inconnu du catalogue : la fenêtre montre ce que le démon dit plutôt
+    /// qu'un « aucune » qui serait faux. [`Reglage::commande`] refusera de son
+    /// côté d'en tirer une commande.
+    pub animation: Option<String>,
+    pub couleur: Option<Rgb>,
+    pub vitesse: Option<u8>,
+    /// Rang dans [`Direction::ALL`].
+    pub direction: Option<usize>,
+}
+
+/// Lit une réponse à `lighting`.
+///
+/// Une réponse sans ligne `anim` dit qu'aucune animation ne tourne — c'est une
+/// information, pas une absence d'information : la fenêtre doit repasser sur
+/// « aucune ».
+///
+/// Une valeur qu'on ne sait pas relire est **ignorée**, jamais remplacée par
+/// une valeur de repli : une vitesse de repli tirerait le curseur ailleurs que
+/// là où le boîtier tourne vraiment, sans rien dire.
+pub fn eclairage_lu(lignes: &[ResponseLine]) -> Eclairage {
+    let _ = lignes;
+    todo!("issue #41")
 }
 
 fn hexa(couleur: Rgb) -> String {
