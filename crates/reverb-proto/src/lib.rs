@@ -16,6 +16,7 @@ pub mod ipc;
 pub mod led;
 pub mod mode;
 pub mod position;
+pub mod profil;
 pub mod ram;
 pub mod screen;
 
@@ -24,6 +25,7 @@ pub use frame::{FRAME_LEN, Frame};
 pub use led::{Apply, Led, LedCountError, LedInconnue};
 pub use mode::{ColorCountError, Mode, UnknownMode};
 pub use position::{Placement, Position, UnknownPosition};
+pub use profil::{NomInvalide, NomProfil};
 pub use screen::{BrightnessError, ImageError, ScreenState, StateError};
 
 // `ram` n'est volontairement pas ré-exporté ici : son `LedCountError` entrerait
