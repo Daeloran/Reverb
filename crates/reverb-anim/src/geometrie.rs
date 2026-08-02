@@ -259,6 +259,21 @@ const RAM_Y: f32 = 240.0;
 /// Écart entre deux LED voisines d'une barrette.
 const RAM_PAS_LED: f32 = 4.0;
 
+/// Le bloc-pompe du Kraken, d'où naît l'onde de `pouls` (#75).
+///
+/// 🔶 **Déduit, pas relevé.** `docs/GEOMETRIE.md` ne donne qu'une indication :
+/// « l'écran du Kraken est immédiatement du côté arrière des barrettes ». Le
+/// bloc est donc posé sur le plateau de carte mère, à la hauteur du milieu des
+/// barrettes, et un peu derrière elles — ce qui recoupe la disposition ATX, où
+/// le socket CPU est du côté du panneau d'E/S arrière par rapport aux slots
+/// DIMM.
+///
+/// La précision importe peu : une onde sphérique se lit à l'œil par sa forme,
+/// pas par son origine au millimètre. Ce qu'il ne faut pas, c'est la placer au
+/// **centre du boîtier** — l'onde y deviendrait indiscernable d'une pulsation
+/// générale, et c'est le seul écart qui se verrait.
+const POMPE: Point = pt(RAM_X, RAM_Y + RAM_PAS_LED * 5.0, RAM_Z + 60.0);
+
 /// Orientations mesurées le 2026-07-31 sur SHYNAEL (`docs/GEOMETRIE.md`).
 ///
 /// Dans l'ordre de [`Position::ALL`]. « bas droite » est monté à un quart de
@@ -410,6 +425,15 @@ impl Geometrie {
             y: RAM_Y + RAM_PAS_LED * led as f32,
             z: RAM_Z - RAM_PAS_SLOT * slot as f32,
         })
+    }
+
+    /// Le bloc-pompe du Kraken, d'où naît l'onde de `pouls` (#75).
+    ///
+    /// Une méthode et non une constante publique : le jour où la pompe sera
+    /// relevée plutôt que déduite, elle pourra dépendre du montage sans que
+    /// personne n'ait à changer d'appel.
+    pub fn pompe(&self) -> Point {
+        POMPE
     }
 
     /// Coin bas-avant-gauche et coin haut-arrière-droit du volume occupé.

@@ -517,6 +517,40 @@ fn catalogue() -> Vec<(&'static str, Animation)> {
         .collect()
 }
 
+/// Les familles qui **suivent une direction du boîtier**.
+///
+/// ⚠️ **Domaine restreint par #75, et l'intention est intacte.** Quand ce fichier a été écrit, les
+/// six familles du catalogue acceptaient toutes le réglage `direction` : « les six familles » et
+/// « le catalogue » désignaient le même ensemble.
+///
+/// #75 en ajoute quatre qui n'en suivent aucune, et le refusent explicitement — `rotation` suit le
+/// montage relevé de chaque anneau, `pouls` la distance à la pompe, `scintillement` le hasard,
+/// `thermique` une sonde. Leur demander de défiler dans le sens d'une direction qu'elles
+/// n'acceptent pas n'aurait aucun sens : la question ne se pose pas pour elles.
+///
+/// Le filtre lit `parametres_acceptes`, seule source de vérité : une famille qui gagnerait un jour
+/// le réglage `direction` rejoindrait ces tests d'elle-même.
+fn dirigees() -> Vec<&'static str> {
+    CATALOGUE
+        .iter()
+        .copied()
+        .filter(|nom| {
+            Animation::par_nom(nom)
+                .expect("le catalogue s'ouvre")
+                .parametres_acceptes()
+                .contains(&"direction")
+        })
+        .collect()
+}
+
+/// Les mêmes, ouvertes.
+fn catalogue_dirige() -> Vec<(&'static str, Animation)> {
+    catalogue()
+        .into_iter()
+        .filter(|(nom, _)| dirigees().contains(nom))
+        .collect()
+}
+
 /// Exige qu'une direction conduise le motif dans le sens attendu, pour les familles données.
 ///
 /// Chaque couple de sondes exploitable doit conclure dans le bon sens, et chaque famille doit être
@@ -591,9 +625,19 @@ fn a_la_vitesse_un_le_motif_boucle_en_cent_vingt_pas_et_bouge_entre_temps() {
     // La seconde moitié du test est aussi importante que la première : une animation figée boucle
     // en 120 pas comme n'importe quelle autre, et satisferait n'importe quelle exigence de sens
     // faute d'en avoir un. Il faut donc qu'elle bouge.
+    // ⚠️ **`scintillement` en est exclue, et c'est sa définition même** (#75) : elle est la seule
+    // famille **sans période**. Son horloge court sur 1021 pas — un nombre premier, donc étranger
+    // à toutes les vitesses — précisément pour qu'aucun cycle ne s'y installe. Lui demander de
+    // boucler en 120 pas serait lui demander de ne plus scintiller.
+    //
+    // Les neuf autres bouclent bien en 120 pas, `thermique` comprise : faute de sonde, elle pulse
+    // en blanc sur le cycle ordinaire.
     let geometrie = boitier();
 
-    for (nom, animation) in catalogue() {
+    for (nom, animation) in catalogue()
+        .into_iter()
+        .filter(|(nom, _)| *nom != "scintillement")
+    {
         for axe in [Axe::Hauteur, Axe::Profondeur] {
             for direction in [axe.vers_les_petites(), axe.vers_les_grandes()] {
                 let reglages = Reglages {
@@ -694,7 +738,7 @@ fn les_six_familles_defilent_dans_le_meme_sens() {
     // volontaire — il reste vrai quelle que soit l'extrémité que l'on décide d'appeler l'avant, et
     // il attrape donc le défaut d'`arc-en-ciel` indépendamment de la correction de l'axe.
     let geometrie = boitier();
-    let familles = catalogue();
+    let familles = catalogue_dirige();
 
     for axe in [Axe::Hauteur, Axe::Profondeur] {
         for direction in [axe.vers_les_petites(), axe.vers_les_grandes()] {
@@ -760,7 +804,7 @@ fn avant_arriere_part_du_grand_z_et_descend_vers_le_radiateur() {
         Axe::Profondeur,
         Direction::AvantArriere,
         Parcours::VersLesPetites,
-        CATALOGUE,
+        &dirigees(),
     );
 }
 
@@ -780,7 +824,7 @@ fn arriere_avant_remonte_vers_le_grand_z() {
         Axe::Profondeur,
         Direction::ArriereAvant,
         Parcours::VersLesGrandes,
-        CATALOGUE,
+        &dirigees(),
     );
 }
 
@@ -793,7 +837,7 @@ fn arriere_avant_est_l_exact_oppose_d_avant_arriere() {
     // qu'une des deux directions, et laisserait les deux descendre le boîtier.
     let geometrie = boitier();
 
-    for (nom, animation) in catalogue() {
+    for (nom, animation) in catalogue_dirige() {
         let mut comparees = 0;
         for couple in banc(Axe::Profondeur) {
             let aller = mesure(&animation, &geometrie, Direction::AvantArriere, couple);
@@ -837,14 +881,13 @@ fn bas_haut_monte_du_plancher_et_haut_bas_descend_du_plafond() {
     // ⚠️ `arc-en-ciel` en est **exclue**, et elle seule : elle est à contresens sur l'axe vertical
     // aussi, donc l'inclure ici ferait de ce garde-fou un rouge de plus et lui ôterait sa fonction.
     // Elle est couverte par le test suivant, qui la nomme.
-    let cinq: Vec<&str> = CATALOGUE
-        .iter()
-        .copied()
+    let cinq: Vec<&str> = dirigees()
+        .into_iter()
         .filter(|nom| *nom != "arc-en-ciel")
         .collect();
     assert_eq!(
         cinq.len(),
-        CATALOGUE.len() - 1,
+        dirigees().len() - 1,
         "« arc-en-ciel » doit être au catalogue pour en être exclue ici"
     );
 
