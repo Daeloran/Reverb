@@ -29,7 +29,9 @@ use std::time::{Duration, Instant};
 use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
 use reverb_gui::plan::{Cible, Place, Plan, Vue};
-use reverb_gui::reglages::{Limiteur, Poignee, Reglage, eclairage_lu, requetes_vers_la_cible};
+use reverb_gui::reglages::{
+    EcranChoisi, Limiteur, Poignee, Reglage, eclairage_lu, requetes_vers_la_cible,
+};
 use reverb_gui::sondes::{Historique, ModelesNvme, Releve, modeles_nvme, sondes_retenues};
 use reverb_gui::{
     FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointLed,
@@ -334,6 +336,9 @@ struct Pupitre {
     /// L'origine des temps de la fenêtre. Les poignées raisonnent en durées
     /// depuis elle, ce qui les rend testables sans horloge.
     depart: Instant,
+    /// L'affichage d'écran que la fenêtre montre, et la poignée qui protège
+    /// ce que l'utilisateur est en train de composer (#48).
+    ecran: RefCell<EcranChoisi>,
     /// Ce qui empêche une jauge traînée d'inonder le démon (#47).
     limiteur: RefCell<Limiteur>,
     /// Le modèle des deux disques, lu **une seule fois** au démarrage.
@@ -363,6 +368,7 @@ impl Pupitre {
             visee: RefCell::new(None),
             canaux: Rc::new(VecModel::default()),
             depart: Instant::now(),
+            ecran: RefCell::new(EcranChoisi::default()),
             limiteur: RefCell::new(Limiteur::nouveau()),
             modeles_nvme: modeles_nvme(),
         }
@@ -1153,6 +1159,13 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         });
     }
     {
+        let pupitre = pupitre.clone();
+        fenetre.on_saisir_ecran(move || {
+            pupitre.ecran.borrow_mut().saisir();
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
         let envoi = ordres.clone();
         let faible = fenetre.as_weak();
         fenetre.on_poser_ecran(move |quoi, argument| {
@@ -1179,6 +1192,10 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
                 }
                 return;
             }
+            // La poignée retombe : l'ordre est parti, et c'est désormais l'état
+            // réel qui doit s'afficher — y compris quand le démon refuse, ce qui
+            // est justement le cas où l'utilisateur doit voir la vérité (#48).
+            pupitre.ecran.borrow_mut().relacher();
             let _ = envoi.send(Request::Screen(action));
             let _ = envoi.send(Request::Screen(ScreenAction::State));
         });
@@ -1420,17 +1437,23 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
                 else {
                     continue;
                 };
-                fenetre.set_luminosite_ecran(i32::from(*luminosite));
-                fenetre.set_affichage_ecran(SharedString::from(affichage.clone()));
                 // Le menu suit ce que la dalle montre vraiment, et le champ
                 // porte son argument : ouvrir la fenêtre sur un cadran doit
                 // montrer **quelle** sonde, pas un champ vide qui perdrait le
                 // réglage au premier « Appliquer ».
-                let (quoi, argument) = affichage
-                    .split_once(':')
-                    .unwrap_or((affichage.as_str(), ""));
-                fenetre.set_affichage_choisi(rang_d_affichage(quoi));
-                fenetre.set_argument_ecran(SharedString::from(argument));
+                //
+                // ⚠️ Mais **rien de tout cela ne s'écrit pendant qu'on compose**
+                // (#48). Seule la luminosité traverse la poignée : elle part à
+                // chaque cran et n'est jamais composée.
+                let mut choisi = pupitre.ecran.borrow_mut();
+                choisi.adopter(*luminosite, affichage);
+                fenetre.set_luminosite_ecran(i32::from(choisi.luminosite));
+                fenetre.set_affichage_ecran(SharedString::from(affichage.clone()));
+                if !choisi.compose() {
+                    let rang = i32::try_from(choisi.affichage).unwrap_or(0);
+                    fenetre.set_affichage_choisi(rang);
+                    fenetre.set_argument_ecran(SharedString::from(choisi.argument.clone()));
+                }
             }
             false
         }
@@ -1614,23 +1637,6 @@ fn familles() -> ModelRc<FamilleAnimation> {
         })
         .collect();
     ModelRc::new(VecModel::from(familles))
-}
-
-/// Les quatre entrées du menu de l'écran, dans l'ordre du modèle Slint.
-const AFFICHAGES: [&str; 4] = ["rien", "cadran", "image", "gif"];
-
-/// Le rang d'un affichage dans ce menu, zéro — « rien » — par défaut.
-///
-/// Le démon écrit `gauge:` là où la fenêtre affiche « cadran » : c'est le mot
-/// du protocole d'un côté, celui de l'utilisateur de l'autre, et le nommage
-/// physique du projet veut que ce soit le second qui s'affiche.
-fn rang_d_affichage(quoi: &str) -> i32 {
-    let attendu = if quoi == "gauge" { "cadran" } else { quoi };
-    AFFICHAGES
-        .iter()
-        .position(|nom| *nom == attendu)
-        .and_then(|rang| i32::try_from(rang).ok())
-        .unwrap_or(0)
 }
 
 /// Le nom que le menu déroulant porte au rang zéro.

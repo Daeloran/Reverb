@@ -191,6 +191,8 @@ export component Fenetre inherits Window {
     // L'ecran : la luminosite part a chaque cran, l'affichage sur un bouton.
     callback regler-luminosite-ecran(int);
     callback poser-ecran(string, string);
+    // L'utilisateur compose un affichage : suspendre l'adoption du releve.
+    callback saisir-ecran();
     callback regler-ventilateur(string, int);
     // La poignée est lâchée : à partir de là, la mesure a le droit de la
     // reprendre — mais pas tout de suite.
@@ -692,6 +694,10 @@ export component Fenetre inherits Window {
                             ComboBox {
                                 model: root.affichages;
                                 current-index <=> root.affichage-choisi;
+                                // Choisir, c'est composer : la poignee se leve,
+                                // et le releve d'une seconde cesse d'ecraser ce
+                                // qu'on est en train de decider (#48).
+                                selected(nom) => { root.saisir-ecran(); }
                             }
                             // Un CHAMP DE TEXTE, pas un selecteur de fichiers :
                             // ouvrir une boite de dialogue demanderait le portail
@@ -703,6 +709,7 @@ export component Fenetre inherits Window {
                                     ? "nom de la sonde, tel qu'il figure dans SONDES"
                                     : "/chemin/absolu/vers/le/fichier";
                                 text <=> root.argument-ecran;
+                                edited => { root.saisir-ecran(); }
                                 // Invisible NE SUFFIT PAS : un element cache
                                 // garde sa place dans une VerticalLayout, et
                                 // laisserait un trou sous le menu.
