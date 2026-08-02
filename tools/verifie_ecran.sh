@@ -12,6 +12,14 @@
 # supposée était le paquet de longueur nulle, que Reverb émet maintenant au bon
 # endroit. Reste à le vérifier.
 #
+# ⚠️ DEPUIS #33, LE DÉMON TIENT L'ÉCRAN. Ce script écrit en direct — la mire
+# n'est pas dans le protocole — et suppose donc le démon arrêté :
+#
+#     sudo systemctl stop reverbd && ./tools/verifie_ecran.sh
+#     sudo systemctl start reverbd
+#
+# Pour ce qui passe par le démon, c'est ./tools/verifie_ecran_demon.sh.
+#
 # Usage : ./tools/verifie_ecran.sh
 
 set -u

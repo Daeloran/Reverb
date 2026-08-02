@@ -70,6 +70,13 @@ pub const FIRMWARE_FALLBACK_SECS: u64 = 30;
 /// Intervalle de réémission d'une image, strictement inférieur au repli.
 pub const REFRESH_INTERVAL_SECS: u64 = 25;
 
+/// Luminosité maximale acceptée par la dalle, en pour cent (spec §3.4).
+///
+/// Nommée pour que le protocole et le bus ne puissent pas border ailleurs l'un
+/// que l'autre : une commande acceptée sur le fil et refusée par le matériel se
+/// verrait comme un écran qui ignore le curseur.
+pub const BRIGHTNESS_MAX: u8 = 100;
+
 /// Mode de diffusion, seule valeur observée sur ce modèle (spec §3.5).
 const BROADCAST: u8 = 0x02;
 
@@ -113,10 +120,10 @@ pub fn query_state() -> Frame {
 ///
 /// # Erreurs
 ///
-/// [`BrightnessError::OutOfRange`] au-delà de 100. Zéro est accepté : éteindre
-/// l'écran est un réglage légitime.
+/// [`BrightnessError::OutOfRange`] au-delà de [`BRIGHTNESS_MAX`]. Zéro est
+/// accepté : éteindre l'écran est un réglage légitime.
 pub fn set_brightness(percent: u8) -> Result<Frame, BrightnessError> {
-    if percent > 100 {
+    if percent > BRIGHTNESS_MAX {
         return Err(BrightnessError::OutOfRange { given: percent });
     }
     Ok(packet(&[
@@ -300,6 +307,45 @@ impl std::fmt::Display for BrightnessError {
 }
 
 impl std::error::Error for BrightnessError {}
+
+/// Offset du verdict dans un accusé du Kraken (spec §3.2).
+///
+/// `liquidctl` lit `response[14] == 0x1` pour conclure au succès, et tous les
+/// accusés de la capture portent bien `01` à cet offset. Une autre valeur
+/// signale donc un refus, qu'il vaut mieux voir que traverser.
+pub const ACK_VERDICT_OFFSET: usize = 14;
+
+/// Vérifie l'accusé d'une étape de transfert d'image.
+///
+/// # Erreurs
+///
+/// [`AckError`] quand l'octet de verdict ne vaut pas `0x01`.
+pub fn check_ack(ack: &Frame) -> Result<(), AckError> {
+    if ack[ACK_VERDICT_OFFSET] == 0x01 {
+        return Ok(());
+    }
+    Err(AckError {
+        found: ack[ACK_VERDICT_OFFSET],
+    })
+}
+
+/// Accusé portant autre chose qu'un succès.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AckError {
+    pub found: u8,
+}
+
+impl std::fmt::Display for AckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "accusé portant {:#04x} à l'offset {ACK_VERDICT_OFFSET}, attendu 0x01",
+            self.found
+        )
+    }
+}
+
+impl std::error::Error for AckError {}
 
 /// Image de taille inattendue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

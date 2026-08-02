@@ -121,6 +121,42 @@ pub fn discover_in(sys_class: &Path, dev: &Path) -> io::Result<Vec<Controller>> 
     Ok(trouves)
 }
 
+/// Le `/dev/hidraw*` d'un périphérique NZXT donné par son identifiant produit.
+///
+/// [`discover`] ne rend que les **contrôleurs d'éclairage** — ceux dont
+/// [`model_from_product_id`] connaît le modèle. Le Kraken en est un autre
+/// usage : son interface HID porte les commandes de l'écran, pas des LED.
+///
+/// ⚠️ Comme partout, le numéro change au redémarrage : cette recherche se
+/// refait à chaque ouverture, elle ne se met jamais en cache dans un fichier.
+pub fn find_path(product_id: u16) -> io::Result<PathBuf> {
+    find_path_in(
+        Path::new("/sys/class/hidraw"),
+        Path::new("/dev"),
+        product_id,
+    )
+}
+
+/// Variante testable de [`find_path`], paramétrée par les racines à parcourir.
+pub fn find_path_in(sys_class: &Path, dev: &Path, product_id: u16) -> io::Result<PathBuf> {
+    for entree in fs::read_dir(sys_class)?.flatten() {
+        let uevent = entree.path().join("device/uevent");
+        let Ok(contenu) = fs::read_to_string(&uevent) else {
+            continue;
+        };
+        let Some(infos) = parse_uevent(&contenu) else {
+            continue;
+        };
+        if infos.vendor_id == VENDOR_ID && infos.product_id == product_id {
+            return Ok(dev.join(entree.file_name()));
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("aucun périphérique {VENDOR_ID:04x}:{product_id:04x} branché"),
+    ))
+}
+
 /// Écrit une trame de 64 octets sur un périphérique.
 ///
 /// ⚠️ **Rouvre le périphérique à chaque appel, et ouvrir coûte 51 ms.** C'est

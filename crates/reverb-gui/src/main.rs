@@ -34,7 +34,7 @@ use reverb_gui::sondes::{Historique, Releve};
 use reverb_gui::{
     FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointLed,
 };
-use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine};
+use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine, ScreenAction};
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
 use reverb_proto::{LEDS_PER_FAN, Led, Position, Rgb, Tsl};
 use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
@@ -407,6 +407,7 @@ fn main() -> ExitCode {
     // avant que cette fenêtre existe. Sans cette question, la fenêtre croirait
     // piloter un boîtier éteint et son curseur de vitesse resterait muet (#41).
     let _ = ordres.send(Request::Lighting);
+    let _ = ordres.send(Request::Screen(ScreenAction::State));
 
     // La télémétrie n'a pas de flux : on la redemande, doucement. Une seconde
     // suffit pour des tours par minute, et n'ajoute rien de mesurable au démon.
@@ -422,6 +423,9 @@ fn main() -> ExitCode {
             // `Reglage::adopter` qui décide de ce qu'on en retient, et qui
             // laisse en place ce que l'utilisateur est en train de régler.
             let _ = ordres.send(Request::Lighting);
+            // L'écran a sa vie propre : une commande passée par le socket, ou
+            // un cadran qui a changé de sonde, doit finir par se voir ici.
+            let _ = ordres.send(Request::Screen(ScreenAction::State));
         },
     );
 
@@ -462,6 +466,7 @@ enum Retour {
     Eclairage(Vec<ResponseLine>),
     Image(Vec<(String, Vec<Rgb>)>),
     Zones(Vec<ResponseLine>),
+    Ecran(Vec<ResponseLine>),
 }
 
 /// Le fil qui agit : il attend les réponses du démon à la place de l'interface.
@@ -1081,6 +1086,50 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         });
     }
 
+    // ── L'écran du Kraken ──────────────────────────────────────────────────
+    //
+    // La fenêtre n'ouvre aucun périphérique (ADR-002) : elle envoie un **chemin
+    // de fichier**, et c'est le démon qui lit. Jamais 1,2 Mo de pixels sur un
+    // protocole texte.
+    {
+        let envoi = ordres.clone();
+        fenetre.on_regler_luminosite_ecran(move |pourcent| {
+            let borne = u8::try_from(pourcent.clamp(0, 100)).unwrap_or(100);
+            let _ = envoi.send(Request::Screen(ScreenAction::Brightness(borne)));
+        });
+    }
+    {
+        let envoi = ordres.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_poser_ecran(move |quoi, argument| {
+            let argument = argument.trim().to_owned();
+            let action = match quoi.as_str() {
+                "rien" => ScreenAction::Off,
+                "cadran" => ScreenAction::Gauge(argument),
+                "image" => ScreenAction::Image(argument),
+                "gif" => ScreenAction::Gif(argument),
+                _ => return,
+            };
+            // Un argument vide est refusé **ici** : l'envoyer ferait refuser la
+            // ligne par le démon avec un message sur le cadrage du protocole,
+            // là où l'utilisateur a simplement oublié de remplir le champ.
+            if matches!(
+                &action,
+                ScreenAction::Gauge(vide) | ScreenAction::Image(vide) | ScreenAction::Gif(vide)
+                    if vide.is_empty()
+            ) {
+                if let Some(fenetre) = faible.upgrade() {
+                    fenetre.set_message(SharedString::from(
+                        "il manque le chemin du fichier, ou le nom de la sonde",
+                    ));
+                }
+                return;
+            }
+            let _ = envoi.send(Request::Screen(action));
+            let _ = envoi.send(Request::Screen(ScreenAction::State));
+        });
+    }
+
     // ── Les ventilateurs ───────────────────────────────────────────────────
     {
         let pupitre = pupitre.clone();
@@ -1215,6 +1264,9 @@ fn repondre(
         Request::ZoneList => {
             let _ = retours.send(Retour::Zones(lignes));
         }
+        Request::Screen(_) => {
+            let _ = retours.send(Retour::Ecran(lignes));
+        }
         _ => {}
     }
 }
@@ -1303,6 +1355,29 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
             drop(visee);
             *pupitre.zones.borrow_mut() = vues;
             poser_zones(fenetre, pupitre);
+            false
+        }
+        Retour::Ecran(lignes) => {
+            for ligne in &lignes {
+                let ResponseLine::Screen {
+                    luminosite,
+                    affichage,
+                } = ligne
+                else {
+                    continue;
+                };
+                fenetre.set_luminosite_ecran(i32::from(*luminosite));
+                fenetre.set_affichage_ecran(SharedString::from(affichage.clone()));
+                // Le menu suit ce que la dalle montre vraiment, et le champ
+                // porte son argument : ouvrir la fenêtre sur un cadran doit
+                // montrer **quelle** sonde, pas un champ vide qui perdrait le
+                // réglage au premier « Appliquer ».
+                let (quoi, argument) = affichage
+                    .split_once(':')
+                    .unwrap_or((affichage.as_str(), ""));
+                fenetre.set_affichage_choisi(rang_d_affichage(quoi));
+                fenetre.set_argument_ecran(SharedString::from(argument));
+            }
             false
         }
         Retour::Image(cadres) => {
@@ -1486,6 +1561,23 @@ fn familles() -> ModelRc<FamilleAnimation> {
         })
         .collect();
     ModelRc::new(VecModel::from(familles))
+}
+
+/// Les quatre entrées du menu de l'écran, dans l'ordre du modèle Slint.
+const AFFICHAGES: [&str; 4] = ["rien", "cadran", "image", "gif"];
+
+/// Le rang d'un affichage dans ce menu, zéro — « rien » — par défaut.
+///
+/// Le démon écrit `gauge:` là où la fenêtre affiche « cadran » : c'est le mot
+/// du protocole d'un côté, celui de l'utilisateur de l'autre, et le nommage
+/// physique du projet veut que ce soit le second qui s'affiche.
+fn rang_d_affichage(quoi: &str) -> i32 {
+    let attendu = if quoi == "gauge" { "cadran" } else { quoi };
+    AFFICHAGES
+        .iter()
+        .position(|nom| *nom == attendu)
+        .and_then(|rang| i32::try_from(rang).ok())
+        .unwrap_or(0)
 }
 
 /// Le nom que le menu déroulant porte au rang zéro.

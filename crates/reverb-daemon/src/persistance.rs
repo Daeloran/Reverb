@@ -402,7 +402,7 @@ pub fn enregistrer_eclairage(chemin: &Path, eclairage: &Eclairage) -> io::Result
 }
 
 /// Écrit un fichier de configuration, en une fois.
-fn ecrire(chemin: &Path, contenu: &str) -> io::Result<()> {
+pub(crate) fn ecrire(chemin: &Path, contenu: &str) -> io::Result<()> {
     if let Some(dossier) = chemin.parent() {
         fs::create_dir_all(dossier)?;
     }

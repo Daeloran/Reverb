@@ -51,6 +51,7 @@ use crate::color::Rgb;
 use crate::led::Led;
 use crate::position::Position;
 use crate::ram::{self, SLOT_COUNT};
+use crate::screen::BRIGHTNESS_MAX as LUMINOSITE_MAX;
 
 /// Longueur maximale d'une ligne acceptée, en octets. `1024` passe, `1025` non.
 ///
@@ -387,7 +388,85 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
             }
         }
 
-        "screen" => todo!("issue #33"),
+        "screen" => {
+            let [action, reste @ ..] = arguments.as_slice() else {
+                return Err(mauvais(
+                    "attend une action : state, brightness, off, image, gauge ou gif",
+                ));
+            };
+            match *action {
+                "state" | "off" => {
+                    if !reste.is_empty() {
+                        return Err(mauvais(&format!(
+                            "« screen {action} » n'attend aucun argument"
+                        )));
+                    }
+                    Ok(Request::Screen(if *action == "state" {
+                        ScreenAction::State
+                    } else {
+                        ScreenAction::Off
+                    }))
+                }
+                "brightness" => {
+                    let [valeur] = reste else {
+                        return Err(mauvais(
+                            "« screen brightness » attend une luminosité, de 0 à 100, et elle \
+                             seule",
+                        ));
+                    };
+                    Ok(Request::Screen(ScreenAction::Brightness(luminosite(
+                        valeur,
+                    )?)))
+                }
+                "gauge" => {
+                    // Une sonde est un **jeton**, à l'inverse d'un chemin : elle
+                    // ne vient pas d'une frappe humaine mais du matériel, et le
+                    // reste du protocole la transporte déjà ainsi
+                    // (`ResponseLine::Temp`). Un second mot derrière elle est
+                    // une faute, pas un nom à rallonge.
+                    let [sonde] = reste else {
+                        return Err(mauvais(
+                            "« screen gauge » attend une sonde, et elle seule — par exemple \
+                             « screen gauge kraken2023elite:coolant »",
+                        ));
+                    };
+                    Ok(Request::Screen(ScreenAction::Gauge((*sonde).to_owned())))
+                }
+                "image" | "gif" => {
+                    // ⚠️ Le chemin est le **dernier champ de sa ligne**, et va
+                    // jusqu'au bout, espaces comprises — la règle du dernier
+                    // champ de #17. On repart donc de `line`, que
+                    // `split_whitespace` a déjà fusionné.
+                    //
+                    // Partout ailleurs, un champ mal cadré donne une commande
+                    // refusée. Ici, `screen image /home/nico/photos anciennes/a.png`
+                    // coupé au premier blanc donnerait `/home/nico/photos` : un
+                    // chemin parfaitement lisible, qui n'est pas celui qu'on
+                    // visait, et que le démon afficherait sans un mot.
+                    let chemin = apres_l_action(line).unwrap_or("");
+                    if chemin.is_empty() {
+                        return Err(mauvais(&format!(
+                            "« screen {action} » attend un chemin de fichier absolu"
+                        )));
+                    }
+                    if !chemin.starts_with('/') {
+                        return Err(mauvais(&format!(
+                            "chemin « {chemin} » relatif : le démon ne partage ni le répertoire \
+                             courant ni le foyer de son client, il faut un chemin absolu"
+                        )));
+                    }
+                    let chemin = chemin.to_owned();
+                    Ok(Request::Screen(if *action == "image" {
+                        ScreenAction::Image(chemin)
+                    } else {
+                        ScreenAction::Gif(chemin)
+                    }))
+                }
+                autre => Err(mauvais(&format!(
+                    "action « {autre} » inconnue : state, brightness, off, image, gauge ou gif"
+                ))),
+            }
+        }
 
         "paint" => {
             let [cible, couleurs] = arguments[..] else {
@@ -525,7 +604,18 @@ pub fn encode_request(request: &Request) -> String {
                 .join(",")
         ),
         Request::Lighting => "lighting".to_owned(),
-        Request::Screen(_) => todo!("issue #33"),
+        Request::Screen(action) => match action {
+            ScreenAction::State => "screen state".to_owned(),
+            ScreenAction::Off => "screen off".to_owned(),
+            ScreenAction::Brightness(pourcent) => format!("screen brightness {pourcent}"),
+            // Le chemin garde ses espaces et perd ses caractères de contrôle :
+            // les premières font partie du nom du fichier, les seconds
+            // scinderaient la commande en deux.
+            ScreenAction::Image(chemin) => format!("screen image {}", sans_controle(chemin)),
+            ScreenAction::Gif(chemin) => format!("screen gif {}", sans_controle(chemin)),
+            // La sonde, elle, est un jeton : ses blancs tombent aussi.
+            ScreenAction::Gauge(sonde) => format!("screen gauge {}", sur_une_ligne(sonde)),
+        },
         Request::ZoneList => "zone list".to_owned(),
         Request::ZoneSet { nom, cibles } => format!(
             "zone set {} {}",
@@ -646,6 +736,56 @@ fn cible_ecrite(target: LightTarget) -> String {
         LightTarget::Ram => "ram".to_owned(),
         LightTarget::RamSlot(slot) => format!("slot:{slot}"),
     }
+}
+
+/// Ce qui reste d'une ligne après son verbe et son action, blancs de tête ôtés.
+///
+/// `None` quand la ligne n'a pas deux mots. Les blancs **internes** sont gardés
+/// tels quels : ce sont ceux d'un chemin, et les fusionner désignerait un
+/// fichier qui n'existe pas.
+fn apres_l_action(line: &str) -> Option<&str> {
+    let (_, reste) = line.trim_start().split_once(char::is_whitespace)?;
+    let (_, dernier) = reste.trim_start().split_once(char::is_whitespace)?;
+    Some(dernier.trim_start())
+}
+
+/// Une luminosité d'écran, de 0 à 100 pour cent.
+///
+/// ⚠️ **Jamais écrêtée.** Ramener 101 à 100 en silence rendrait la fenêtre
+/// incapable de distinguer « réglé à 100 » d'une valeur corrigée derrière son
+/// dos, et masquerait un curseur gradué dans la mauvaise unité — 0-255 au lieu
+/// de 0-100 passerait pour un curseur qui marche.
+///
+/// Les deux fautes se disent séparément : « ce n'est pas un nombre » et « ce
+/// nombre est trop grand » ne se corrigent pas de la même façon.
+fn luminosite(brut: &str) -> Result<u8, RequestError> {
+    let mauvais = |raison: String| RequestError::BadArgument {
+        verb: "screen".to_owned(),
+        reason: raison,
+    };
+    let valeur: u32 = brut.parse().map_err(|_| {
+        mauvais(format!(
+            "luminosité « {brut} » invalide : attendu un entier de 0 à {LUMINOSITE_MAX}"
+        ))
+    })?;
+    if valeur > u32::from(LUMINOSITE_MAX) {
+        return Err(mauvais(format!(
+            "luminosité {valeur} hors bornes : l'écran va de 0 à {LUMINOSITE_MAX} pour cent"
+        )));
+    }
+    u8::try_from(valeur).map_err(|_| mauvais(format!("luminosité {valeur} hors bornes")))
+}
+
+/// Neutralise ce qui casserait le cadrage d'une ligne, **et rien d'autre**.
+///
+/// À la différence de [`sur_une_ligne`], les espaces survivent : un chemin en
+/// porte, et les remplacer le ferait pointer ailleurs. Seuls les caractères de
+/// contrôle tombent — un fichier peut s'appeler `a\nlight all ffffff` sur ext4,
+/// et `screen image` ne doit pas allumer le boîtier en blanc.
+fn sans_controle(brut: &str) -> String {
+    brut.chars()
+        .map(|c| if c.is_control() { '_' } else { c })
+        .collect()
 }
 
 /// Analyse une couleur **strictement** : six chiffres hexadécimaux, rien d'autre.
@@ -871,7 +1011,12 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
             }
             ligne
         }
-        ResponseLine::Screen { .. } => todo!("issue #33"),
+        // L'affichage est le dernier champ, et porte un chemin : ses espaces
+        // restent, ses caractères de contrôle tombent.
+        ResponseLine::Screen {
+            luminosite,
+            affichage,
+        } => format!("screen {luminosite} {}", sans_controle(affichage)),
         ResponseLine::End => "end".to_owned(),
         ResponseLine::Error { message } => format!("err {}", reste(message)),
     }
@@ -904,6 +1049,30 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
             message: String::new(),
         });
     }
+    // `screen` porte lui aussi un dernier champ à espaces — un chemin —, et se
+    // découpe donc avant les lignes à champs fixes. ⚠️ Le préfixe est
+    // « screen␣ » : `screen state` est une **requête**, et la lire ici comme un
+    // état de dalle donnerait une luminosité tirée du mot « state ».
+    if let Some(reste) = line.strip_prefix("screen ") {
+        let (brut, affichage) = reste
+            .split_once(' ')
+            .ok_or_else(|| illisible("« screen » attend une luminosité et un affichage"))?;
+        let luminosite: u32 = brut.parse().map_err(|_| {
+            illisible(&format!(
+                "luminosité « {brut} » invalide : attendu un entier de 0 à {LUMINOSITE_MAX}"
+            ))
+        })?;
+        if luminosite > u32::from(LUMINOSITE_MAX) {
+            return Err(illisible(&format!(
+                "luminosité {luminosite} hors bornes : l'écran va de 0 à {LUMINOSITE_MAX}"
+            )));
+        }
+        return Ok(ResponseLine::Screen {
+            luminosite: u8::try_from(luminosite).unwrap_or(LUMINOSITE_MAX),
+            affichage: affichage.to_owned(),
+        });
+    }
+
     if let Some(reste) = line.strip_prefix("unreadable ") {
         let (sujet, raison) = reste
             .split_once(' ')

@@ -13,6 +13,7 @@ use reverb_hw::hidraw::{self, Controller};
 use reverb_hw::hwmon::{self, FanChannel, Percent};
 use reverb_hw::i2c;
 use reverb_hw::usbfs;
+use reverb_proto::ipc::{self, Request, ResponseLine, ScreenAction};
 use reverb_proto::ram::{self, SlotAddress};
 use reverb_proto::{Apply, Brightness, Mode, Model, Position, Rgb, frame, screen};
 
@@ -83,9 +84,11 @@ const SOCKET_DU_DEMON: &str = "/run/reverb/reverbd.sock";
 /// le même `/dev/i2c-*` — et deux écritures SMBus qui se croisent corrompent
 /// une transaction (SPEC-CORSAIR-RAM §6).
 ///
-/// Le refus ne porte que sur les commandes qui **écrivent**. Énumérer reste
-/// permis, et `screen` aussi : le démon ne tient pas l'écran, précisément pour
-/// que cet outil garde de quoi diagnostiquer quand la fenêtre ne suffit pas.
+/// Le refus ne porte que sur les commandes qui **écrivent en direct**. Énumérer
+/// reste permis, et les commandes d'écran aussi — elles passent désormais par
+/// le socket (#33), donc par le démon lui-même. La seule exception est
+/// `screen --mire`, outil de diagnostic qui n'est pas dans le protocole et qui
+/// écrit donc sur le bus.
 ///
 /// La présence du fichier ne suffit pas à conclure — un socket peut survivre à
 /// un arrêt brutal. On se connecte : c'est le seul test qui distingue un démon
@@ -107,6 +110,13 @@ fn ceder_le_pas(commande: &Command) -> Result<(), String> {
             | Command::Fan { .. }
             | Command::Curve { .. }
             | Command::Ram { .. }
+            // La mire est la seule commande d'écran qui ne passe pas par le
+            // socket : c'est un outil de diagnostic, et elle n'a pas sa place
+            // dans le protocole. Elle écrit donc en direct, ce qui suppose un
+            // démon arrêté — le nœud USB ne se réclame pas deux fois.
+            | Command::Screen {
+                action: ActionEcran::Mire { .. }
+            }
     );
     if !ecrit {
         return Ok(());
@@ -573,10 +583,33 @@ fn hidraw_du_kraken() -> Result<std::path::PathBuf, String> {
     Err("aucun Kraken 1e71:300c branché.".to_owned())
 }
 
+/// Pilote l'écran, par le démon s'il tourne, en direct sinon.
+///
+/// **Le démon détient l'écran depuis #33** : le nœud USB ne se réclamant pas
+/// deux fois, cet outil ne peut plus y écrire en même temps. Il passe donc par
+/// le socket, comme la fenêtre — et y gagne le PNG, le JPEG et le GIF qu'il
+/// n'avait pas.
+///
+/// Sans démon, tout ce qui marchait avant marche encore : l'état, la
+/// luminosité, une image brute de 640 × 640 et la mire. C'est ce qui garde cet
+/// outil utilisable pour diagnostiquer, y compris quand le démon est arrêté.
 fn piloter_ecran(action: ActionEcran) -> Result<(), String> {
+    if let Some(requete) = requete_d_ecran(&action)?
+        && let Some(lignes) = parler_au_demon(&requete)?
+    {
+        return afficher_reponse_d_ecran(&lignes);
+    }
+
     match action {
         ActionEcran::Etat => afficher_etat_ecran(),
         ActionEcran::Luminosite(percent) => regler_luminosite(percent),
+        // Ces trois-là n'existent que par le démon : lui seul décode un GIF et
+        // lit les sondes, et l'extinction n'est que le fait de cesser d'émettre.
+        ActionEcran::Gif { .. } | ActionEcran::Cadran { .. } | ActionEcran::Eteindre => Err(
+            "cette action passe par le démon, qui seul décode les images et lit les \
+                 sondes.\n  Le démarrer :\n    sudo systemctl start reverbd"
+                .to_owned(),
+        ),
         ActionEcran::Image { chemin, once } => {
             let donnees = std::fs::read(&chemin)
                 .map_err(|e| format!("« {} » illisible : {e}", chemin.display()))?;
@@ -593,6 +626,114 @@ fn piloter_ecran(action: ActionEcran) -> Result<(), String> {
         }
         ActionEcran::Mire { once } => diffuser(&screen::test_pattern(), once),
     }
+}
+
+/// La requête à envoyer au démon pour cette action, s'il y en a une.
+///
+/// `None` pour la mire : c'est un outil de diagnostic, elle n'a pas sa place
+/// dans le protocole — et elle reste donc réservée au démon arrêté.
+///
+/// ⚠️ Le chemin est rendu **absolu ici**, dans le processus qui connaît le
+/// répertoire courant de l'utilisateur. Le démon lit sous le sien, et un chemin
+/// relatif y désignerait autre chose — ou rien.
+fn requete_d_ecran(action: &ActionEcran) -> Result<Option<Request>, String> {
+    let absolu = |chemin: &std::path::Path| -> Result<String, String> {
+        let entier = if chemin.is_absolute() {
+            chemin.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("répertoire courant illisible : {e}"))?
+                .join(chemin)
+        };
+        entier
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| format!("chemin « {} » non représentable en UTF-8", entier.display()))
+    };
+
+    Ok(match action {
+        ActionEcran::Etat => Some(Request::Screen(ScreenAction::State)),
+        ActionEcran::Luminosite(percent) => {
+            Some(Request::Screen(ScreenAction::Brightness(*percent)))
+        }
+        ActionEcran::Image { chemin, .. } => {
+            Some(Request::Screen(ScreenAction::Image(absolu(chemin)?)))
+        }
+        ActionEcran::Gif { chemin } => Some(Request::Screen(ScreenAction::Gif(absolu(chemin)?))),
+        ActionEcran::Cadran { sonde } => Some(Request::Screen(ScreenAction::Gauge(sonde.clone()))),
+        ActionEcran::Eteindre => Some(Request::Screen(ScreenAction::Off)),
+        ActionEcran::Mire { .. } => None,
+    })
+}
+
+/// Envoie une requête au démon et rend ses lignes, ou `None` s'il ne tourne pas.
+///
+/// Même prudence que `ceder_le_pas` : seules l'absence de fichier et le refus
+/// de connexion signifient « pas de démon ». Un refus de permission est un
+/// démon **vivant** qui ne veut pas de nous, et le traiter comme une absence
+/// ferait écrire sur un bus déjà tenu.
+fn parler_au_demon(requete: &Request) -> Result<Option<Vec<ResponseLine>>, String> {
+    use std::io::{BufRead, BufReader, ErrorKind, Write};
+
+    let flux = match std::os::unix::net::UnixStream::connect(SOCKET_DU_DEMON) {
+        Ok(flux) => flux,
+        Err(erreur)
+            if matches!(
+                erreur.kind(),
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(erreur) => {
+            return Err(format!(
+                "{SOCKET_DU_DEMON} : {erreur}.\n  \
+                 Si c'est un refus de permission, il manque l'appartenance au groupe :\n    \
+                 sudo usermod -aG reverb \"$USER\"   (puis rouvrir la session)"
+            ));
+        }
+    };
+
+    let mut sortie = flux
+        .try_clone()
+        .map_err(|e| format!("socket illisible : {e}"))?;
+    writeln!(sortie, "{}", ipc::encode_request(requete))
+        .map_err(|e| format!("commande non transmise : {e}"))?;
+    sortie
+        .flush()
+        .map_err(|e| format!("commande non transmise : {e}"))?;
+
+    let mut lignes = Vec::new();
+    for ligne in BufReader::new(flux).lines() {
+        let ligne = ligne.map_err(|e| format!("réponse illisible : {e}"))?;
+        let lue = ipc::parse_response_line(&ligne)
+            .map_err(|e| format!("réponse illisible : {} ({})", e.line, e.reason))?;
+        let terminale = lue.is_terminal();
+        lignes.push(lue);
+        if terminale {
+            break;
+        }
+    }
+    Ok(Some(lignes))
+}
+
+/// Affiche ce que le démon a répondu à une commande d'écran.
+fn afficher_reponse_d_ecran(lignes: &[ResponseLine]) -> Result<(), String> {
+    for ligne in lignes {
+        match ligne {
+            ResponseLine::Screen {
+                luminosite,
+                affichage,
+            } => {
+                println!("Écran du Kraken — tenu par le démon");
+                println!("  luminosité : {luminosite} %");
+                println!("  affichage  : {affichage}");
+            }
+            ResponseLine::Error { message } => return Err(message.clone()),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn afficher_etat_ecran() -> Result<(), String> {
