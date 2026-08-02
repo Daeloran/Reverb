@@ -254,6 +254,8 @@ struct Etat {
     diffusion: Diffusion,
     /// Quand la prochaine image doit partir. `None` : rien à pousser.
     echeance_ecran: Option<Instant>,
+    /// Ce qui compte les refus de la dalle et finit par renoncer (#70).
+    vigie: ecran::Vigie,
 }
 
 impl Etat {
@@ -292,6 +294,7 @@ impl Etat {
             // fichier ne garde qu'un chemin, jamais des pixels.
             diffusion: Diffusion::Rien,
             echeance_ecran: None,
+            vigie: ecran::Vigie::neuve(),
         }
     }
 
@@ -480,16 +483,15 @@ fn tour_d_ecran(etat: &mut Etat, peripheriques: &mut Peripheriques) -> Duration 
     // Le délai jusqu'à l'image suivante est décidé **avant** l'envoi : un
     // envoi qui échoue ne doit pas figer l'horloge, sinon un Kraken débranché
     // ferait tourner cette boucle à plein régime.
-    let prochain = match &mut etat.diffusion {
+    let (octets, prochain) = match &mut etat.diffusion {
         Diffusion::Rien => {
             etat.echeance_ecran = None;
             return REPOS;
         }
-        Diffusion::Fixe(dalle) => {
-            let octets = dalle.octets().to_vec();
-            let _ = peripheriques.afficher_ecran(&octets);
-            Duration::from_secs(reverb_proto::screen::REFRESH_INTERVAL_SECS)
-        }
+        Diffusion::Fixe(dalle) => (
+            dalle.octets().to_vec(),
+            Duration::from_secs(reverb_proto::screen::REFRESH_INTERVAL_SECS),
+        ),
         Diffusion::Anime {
             dalles,
             delais,
@@ -500,19 +502,47 @@ fn tour_d_ecran(etat: &mut Etat, peripheriques: &mut Peripheriques) -> Duration 
                 .get(courant)
                 .map(|dalle| dalle.octets().to_vec())
                 .unwrap_or_default();
-            if !octets.is_empty() {
-                let _ = peripheriques.afficher_ecran(&octets);
-            }
             let delai = delais.get(courant).copied().unwrap_or(PLANCHER_GIF);
             *rang = (courant + 1) % dalles.len().max(1);
-            delai
+            (octets, delai)
         }
-        Diffusion::Cadran(sonde) => {
-            let dalle = cadran_du_moment(sonde, &etat.sondes);
-            let _ = peripheriques.afficher_ecran(dalle.octets());
-            CADENCE_CADRAN
-        }
+        Diffusion::Cadran(sonde) => (
+            cadran_du_moment(sonde, &etat.sondes).octets().to_vec(),
+            CADENCE_CADRAN,
+        ),
     };
+
+    // ⚠️ **Le verdict décide, pas l'appelant** (#70). Un `let _ =` sur l'envoi
+    // — ce qu'il y avait ici — réémettait indéfiniment vers un contrôleur qui
+    // refusait : du bus consommé, cinq secondes de gel par tentative, et une
+    // insistance sur une dalle déjà en difficulté.
+    let verdict = if octets.is_empty() {
+        ecran::Verdict::Emise
+    } else {
+        etat.vigie.tour(|| peripheriques.afficher_ecran(&octets))
+    };
+    match verdict {
+        ecran::Verdict::Emise => {}
+        ecran::Verdict::Refusee { erreur } => {
+            eprintln!("attention : écran : {erreur}");
+        }
+        ecran::Verdict::Abandon { erreur } => {
+            eprintln!(
+                "{} échecs d'affilée sur la dalle : {erreur}\n\
+                 → écran rendu au firmware, émission arrêtée (relancer avec « screen … »)",
+                ecran::ECHECS_AVANT_ABANDON
+            );
+            // L'échéance tombe : la boucle repasse au repos absolu. L'état
+            // persisté, lui, n'est **pas** touché — ce qu'on voulait afficher
+            // reste ce qu'on voulait afficher, et un redémarrage le retente.
+            etat.echeance_ecran = None;
+            return REPOS;
+        }
+        ecran::Verdict::Repos => {
+            etat.echeance_ecran = None;
+            return REPOS;
+        }
+    }
 
     etat.echeance_ecran = Some(maintenant + prochain);
     prochain
@@ -871,6 +901,15 @@ fn ecran_commande(
     peripheriques: &mut Peripheriques,
     action: ScreenAction,
 ) -> Vec<ResponseLine> {
+    // ⚠️ **Une commande explicite relance l'émission** (#70). Après un abandon,
+    // c'est le seul moyen de reprendre : le démon ne réessaie plus de lui-même,
+    // et une dalle qui ne répond plus au noyau ne se répare pas en insistant.
+    // `State` est exclue — la fenêtre l'envoie chaque seconde, et relancer là
+    // rendrait le plafond inopérant.
+    if !matches!(action, ScreenAction::State) {
+        etat.vigie.relancer();
+    }
+
     match action {
         ScreenAction::State => vec![etat.ligne_ecran(), ResponseLine::End],
 

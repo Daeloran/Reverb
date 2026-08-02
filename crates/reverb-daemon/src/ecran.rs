@@ -502,6 +502,121 @@ pub fn cadence(delais: &[Duration], plancher: Duration) -> Vec<Duration> {
 }
 
 // ---------------------------------------------------------------------------
+// Le plafond d'échecs de la dalle (issue #70)
+// ---------------------------------------------------------------------------
+
+/// Le nombre d'échecs **consécutifs** après lequel le démon renonce à la dalle.
+///
+/// Trois, et la valeur se raisonne : à cinq secondes de délai par tentative —
+/// c'est ce qu'a mesuré #68 sur un Kraken qui ne répond plus —, trois refus
+/// valent quinze secondes perdues avant de rendre la main. Assez pour qu'un
+/// contrôleur qui bafouille une fois ou deux s'en remette, trop peu pour qu'une
+/// dalle morte gèle le démon une minute entière.
+pub const ECHECS_AVANT_ABANDON: u32 = 3;
+
+/// Ce qu'un tour de boucle a fait de la dalle.
+///
+/// ⚠️ **Ce vocabulaire ne parle que de la dalle.** Ni l'état persisté, ni
+/// l'éclairage, ni les ventilateurs, ni les zones n'y apparaissent — renoncer à
+/// un écran n'est pas une raison d'éteindre un boîtier, et `ecran.conf` garde ce
+/// qu'on voulait afficher pour qu'un redémarrage le retente.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// L'image est partie.
+    Emise,
+    /// L'écriture a échoué, sous le plafond : l'émission continue.
+    Refusee { erreur: String },
+    /// L'abandon vient d'être prononcé. Rendu **une seule fois** par épisode,
+    /// pour que l'appelant journalise une ligne sans avoir à s'en souvenir.
+    Abandon { erreur: String },
+    /// L'abandon est déjà prononcé : rien n'a été écrit, rien n'est à dire.
+    Repos,
+}
+
+/// Ce qui compte les refus de la dalle et finit par renoncer.
+///
+/// # Le défaut que ceci corrige
+///
+/// Le démon réémettait sans fin vers un Kraken qui refusait — une image fixe
+/// toutes les 25 s, un cadran toutes les 2 s, un GIF toutes les 100 ms — en
+/// journalisant `Connection timed out (os error 110)` à chaque tour. Du bus
+/// consommé, cinq secondes de gel par tentative, et une insistance sur un
+/// contrôleur déjà en difficulté.
+///
+/// ⚠️ **Le compte est celui d'une suite, jamais d'un total.** Un compteur cumulé
+/// passe tous les essais courts et ne se trahit qu'après des jours : quelques
+/// hoquets sans conséquence, espacés de dix minutes, finissent par éteindre un
+/// écran qui marche, et personne ne relie la panne à sa cause.
+///
+/// ⚠️ **Après l'abandon, l'écriture n'est plus tentée du tout** — pas même « pour
+/// voir si ça remarche ». Le rétablissement est explicite, par [`Vigie::relancer`],
+/// ou n'est pas : une dalle qui ne répond plus au noyau lui-même ne se répare pas
+/// en réessayant.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Vigie {
+    echecs: u32,
+    abandonnee: bool,
+}
+
+impl Vigie {
+    /// Une vigie qui n'a essuyé aucun refus : elle émet.
+    pub fn neuve() -> Vigie {
+        Vigie::default()
+    }
+
+    /// Un tour de boucle.
+    ///
+    /// `pousser` n'est appelée **que si** l'émission est encore permise. C'est
+    /// une propriété du type et non une politesse de son appelant : la calculer
+    /// puis jeter le résultat consommerait le bus qu'on cherche à laisser
+    /// tranquille.
+    pub fn tour(&mut self, pousser: impl FnOnce() -> io::Result<()>) -> Verdict {
+        if self.abandonnee {
+            return Verdict::Repos;
+        }
+        match pousser() {
+            Ok(()) => {
+                self.echecs = 0;
+                Verdict::Emise
+            }
+            Err(erreur) => {
+                let erreur = erreur.to_string();
+                self.echecs += 1;
+                if self.echecs >= ECHECS_AVANT_ABANDON {
+                    self.abandonnee = true;
+                    // La **dernière** erreur, pas la première : c'est elle qui a
+                    // fait déborder le compte, et la plus récente information
+                    // qu'on ait sur l'état du bus.
+                    Verdict::Abandon { erreur }
+                } else {
+                    Verdict::Refusee { erreur }
+                }
+            }
+        }
+    }
+
+    /// Une commande `screen` explicite : l'émission reprend, le compte repart de
+    /// zéro.
+    ///
+    /// Sans effet visible sur une vigie qui n'a jamais abandonné, hors la remise
+    /// à zéro — une commande `screen` est fréquente, elle ne doit rien casser.
+    pub fn relancer(&mut self) {
+        self.echecs = 0;
+        self.abandonnee = false;
+    }
+
+    /// La dalle est-elle encore servie ?
+    pub fn emet(&self) -> bool {
+        !self.abandonnee
+    }
+
+    /// Combien de refus d'affilée, depuis le dernier succès.
+    pub fn echecs_consecutifs(&self) -> u32 {
+        self.echecs
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Le dessin
 // ---------------------------------------------------------------------------
 
