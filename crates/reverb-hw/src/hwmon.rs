@@ -52,7 +52,7 @@ impl FanChannel {
         };
         let brut = fs::read_to_string(chemin)?;
         match brut.trim().parse::<u8>() {
-            Ok(0) => Ok(Mode::FirmwareCurve),
+            Ok(0) => Ok(Mode::PleinRegime),
             Ok(1) => Ok(Mode::Manual),
             Ok(2) => Ok(Mode::HostCurve),
             Ok(autre) => Ok(Mode::Unknown(autre)),
@@ -62,19 +62,52 @@ impl FanChannel {
             )),
         }
     }
+
+    /// Ce canal sait-il rendre la main à une régulation automatique ?
+    ///
+    /// Répond depuis le **nom du pilote**, déjà lu par la découverte, et jamais
+    /// par une tentative d'écriture : une tentative qui réussit là où il ne
+    /// fallait pas envoie le canal à plein régime, en silence.
+    ///
+    /// ⚠️ **Liste d'autorisation, et non d'exclusion.** Un pilote dont on ne
+    /// sait rien répond non. Les deux erreurs ne coûtent pas la même chose :
+    /// cacher un bouton légitime se répare d'une ligne, le montrer à tort lance
+    /// la pompe à fond.
+    ///
+    /// Le fondement est la lecture des deux pilotes du noyau (issue #50) :
+    ///
+    /// - `nzxt-kraken3` accepte `2`, « exécute la courbe du périphérique » ;
+    /// - `nzxt-smart2` n'a **aucun** mode automatique — son `set_pwm_enable()`
+    ///   ne réaccepte que la valeur déjà portée et rend `-EOPNOTSUPP` sinon.
+    pub fn sait_faire_auto(&self) -> bool {
+        // Sans `pwmN_enable`, il n'y a nulle part où écrire le `2` : le bouton
+        // ne pourrait qu'échouer, quel que soit le pilote.
+        self.enable.is_some() && PILOTES_AUTOMATIQUES.contains(&self.source.as_str())
+    }
 }
+
+/// Les pilotes dont on a **lu** qu'ils exécutent une courbe sur le périphérique.
+///
+/// Une entrée de plus se gagne en lisant le pilote concerné, pas en essayant.
+const PILOTES_AUTOMATIQUES: [&str; 1] = ["kraken2023elite"];
 
 /// Ce que le canal fait de sa consigne, lu dans `pwmN_enable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// `1` — la consigne écrite est appliquée telle quelle.
     Manual,
-    /// `0` — le pilote ne pilote pas ; le firmware décide seul.
+    /// `0` — plein régime, sans régulation.
     ///
-    /// ⚠️ Ce n'est **pas** un retour garanti au profil d'usine. Une fois une
-    /// courbe hôte chargée, le Kraken observé s'y rabat sur du refroidissement
-    /// maximal — voir `docs/VENTILATEURS.md`.
-    FirmwareCurve,
+    /// ⚠️ **Ce n'est pas « laissé au firmware »**, comme cette variante s'est
+    /// appelée jusqu'au 2026-08-02. `nzxt-kraken3` en fait
+    /// `kraken3_write_fixed_duty(priv, 255, channel)` puis cesse de piloter :
+    /// c'est 100 % et la barre lâchée, pas un retour à une courbe (issue #50).
+    /// L'observation de `docs/VENTILATEURS.md` — « le Kraken s'y rabat sur du
+    /// refroidissement maximal » — était donc exacte, et son explication à
+    /// portée de main dans le pilote.
+    ///
+    /// La fenêtre ne le propose nulle part, et « auto » vise [`Mode::HostCurve`].
+    PleinRegime,
     /// `2` — le firmware exécute la courbe téléversée par l'hôte.
     HostCurve,
     /// Une autre valeur, dont on ne sait rien. On la lit, on ne la réécrit pas.
@@ -83,14 +116,24 @@ pub enum Mode {
     Unsupported,
 }
 
+/// ⚠️ **Un mode s'écrit en un seul jeton, sans espace.**
+///
+/// Ce libellé traverse le socket dans le champ `mode` d'une ligne `chan`, et
+/// depuis #50 ce champ n'est plus le dernier — le drapeau « sait faire auto » le
+/// suit. C'est l'arité de la ligne qui distingue un démon d'avant de un démon
+/// d'après (six jetons ou sept) : un mode à espaces la rendrait indécidable.
+///
+/// Les libellés sont donc devenus des mots composés. C'est le prix du champ
+/// gagné, et il se paie une fois : « courbe-de-l'hôte » se lit encore, là où
+/// deviner l'arité d'une ligne ne se lit pas du tout.
 impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Mode::Manual => write!(f, "manuel"),
-            Mode::FirmwareCurve => write!(f, "laissé au firmware"),
-            Mode::HostCurve => write!(f, "courbe de l'hôte"),
-            Mode::Unknown(valeur) => write!(f, "inconnu ({valeur})"),
-            Mode::Unsupported => write!(f, "non réglable"),
+            Mode::PleinRegime => write!(f, "plein-régime-100%"),
+            Mode::HostCurve => write!(f, "courbe-de-l'hôte"),
+            Mode::Unknown(valeur) => write!(f, "inconnu-{valeur}"),
+            Mode::Unsupported => write!(f, "non-réglable"),
         }
     }
 }
@@ -286,13 +329,33 @@ pub fn set_pwm(channel: &FanChannel, percent: Percent) -> io::Result<()> {
 ///
 /// # Erreurs
 ///
-/// Si le canal n'expose pas `pwmN_enable`, ou si le mode demandé est
-/// [`Mode::Unknown`] : on ne réémet pas une valeur qu'on n'a pas comprise.
-/// Dans les deux cas, rien n'est écrit.
+/// Si le canal n'expose pas `pwmN_enable`, si le mode demandé est
+/// [`Mode::Unknown`] — on ne réémet pas une valeur qu'on n'a pas comprise —, ou
+/// si l'on demande [`Mode::HostCurve`] à un canal qui ne sait pas faire auto.
+/// Dans tous les cas, **rien n'est écrit**.
+///
+/// Ce dernier refus est produit ici et non laissé au noyau : `nzxt-smart2` rend
+/// `-EOPNOTSUPP`, que l'utilisateur lisait jusqu'ici sous la forme
+/// « Operation not supported (os error 95) ». Un errno nu n'explique rien
+/// (issue #50).
 pub fn set_mode(channel: &FanChannel, mode: Mode) -> io::Result<()> {
+    // ⚠️ Avant le `match`, et donc avant toute écriture — y compris quand le
+    // fichier porte déjà `2`. Un no-op silencieux dans ce cas ferait dépendre le
+    // refus de l'état courant, alors qu'il dépend du matériel.
+    if mode == Mode::HostCurve && !channel.sait_faire_auto() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "le contrôleur « {} » n'a pas de mode automatique : le canal « {} » garde la \
+                 consigne que l'hôte lui écrit",
+                channel.source, channel.name
+            ),
+        ));
+    }
+
     let valeur = match mode {
         Mode::Manual => "1",
-        Mode::FirmwareCurve => "0",
+        Mode::PleinRegime => "0",
         Mode::HostCurve => "2",
         Mode::Unknown(valeur) => {
             return Err(io::Error::new(

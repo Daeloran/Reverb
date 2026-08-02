@@ -267,10 +267,15 @@ impl Peripheriques {
             })?;
 
         match action {
-            Consigne::Auto => hwmon::set_mode(canal, Mode::FirmwareCurve),
+            // ⚠️ `HostCurve` (2) et non `PleinRegime` (0) : c'est `2` qui rend la
+            // main à la courbe du périphérique. `0` envoie le canal à 100 % et
+            // lâche la barre — sur la pompe, en silence (issue #50). Un canal
+            // dont le pilote n'a aucun mode automatique se voit refuser ici,
+            // avant toute écriture, avec un message qui le nomme.
+            Consigne::Auto => hwmon::set_mode(canal, Mode::HostCurve),
             Consigne::Pwm(percent) => {
-                // Un canal laissé sur sa courbe firmware ignorerait la consigne
-                // en silence : le passer en manuel fait partie de l'ordre.
+                // Un canal laissé sur une courbe ignorerait la consigne en
+                // silence : le passer en manuel fait partie de l'ordre.
                 hwmon::set_mode(canal, Mode::Manual)?;
                 hwmon::set_pwm(canal, percent)
             }

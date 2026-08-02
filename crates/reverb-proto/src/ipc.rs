@@ -821,13 +821,26 @@ fn consigne(brut: &str) -> Result<u8, String> {
 /// Une ligne de réponse du démon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseLine {
-    /// `chan <canal> <position|-> <rpm|-> <pwm|-> <mode>`
+    /// `chan <canal> <position|-> <rpm|-> <pwm|-> <mode> <oui|non>`
     Channel {
         channel: String,
         position: Option<Position>,
         rpm: Option<u32>,
         pwm: Option<u8>,
+        /// Un **seul jeton**, sans espace : c'est l'arité de la ligne qui dit
+        /// si le drapeau qui suit est présent (#50).
         mode: String,
+        /// Ce canal sait-il rendre la main à une régulation automatique.
+        ///
+        /// `oui` ou `non`, jamais `-` : `-` veut dire « absent » dans cette
+        /// grammaire (#17), et un booléen n'est pas une absence. Jamais `0`/`1`
+        /// non plus, qui voisineraient avec `rpm` et `pwm`, où un chiffre a un
+        /// tout autre sens.
+        ///
+        /// **Son absence vaut « non »** : un démon d'avant #50 ne sait rien de
+        /// la question, et la fenêtre doit alors cacher le bouton plutôt que
+        /// d'en montrer un qui ne peut qu'échouer.
+        sait_faire_auto: bool,
     },
     /// `temp <capteur> <millidegres>`
     ///
@@ -938,16 +951,21 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
             rpm,
             pwm,
             mode,
+            sait_faire_auto,
         } => format!(
-            "chan {} {} {} {} {}",
+            "chan {} {} {} {} {} {}",
             jeton(channel),
             position.map_or_else(|| ABSENT.to_owned(), Position::slug),
             rpm.map_or_else(|| ABSENT.to_owned(), |v| v.to_string()),
             pwm.map_or_else(|| ABSENT.to_owned(), |v| v.to_string()),
-            // Le mode est le **dernier** champ : il a droit à ses espaces, comme
-            // la raison d'un `unreadable`. « courbe de l'hôte » se lit ;
-            // « courbe_de_l'hôte » se déchiffre.
-            reste(mode),
+            // ⚠️ `jeton` et non `reste` depuis #50. Le mode n'est plus le
+            // dernier champ, donc il n'a plus droit à ses espaces : c'est
+            // l'arité de la ligne qui distingue un démon d'avant d'un démon
+            // d'après, et un mode à espaces la rendrait indécidable. Les
+            // libellés de `hwmon::Mode` sont devenus des mots composés en
+            // conséquence.
+            jeton(mode),
+            if *sait_faire_auto { "oui" } else { "non" },
         ),
         ResponseLine::Temp {
             sensor,
@@ -1188,11 +1206,37 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
         });
     }
 
-    // `chan` porte son mode en dernier, donc à espaces : on ne découpe que les
-    // quatre champs qui précèdent, et le reste est le mode.
-    let champs: Vec<&str> = line.splitn(6, ' ').collect();
-    match champs[..] {
-        ["chan", canal, position, rpm, pwm, mode] => Ok(ResponseLine::Channel {
+    // `chan` a sa propre branche depuis #50 : c'est le **nombre de champs** qui
+    // dit si le drapeau « sait faire auto » est là — cinq pour un démon d'avant,
+    // six pour un démon d'après. Un découpage partagé avec les autres lignes
+    // n'aurait pas su compter.
+    if let Some(champs) = line.strip_prefix("chan ") {
+        let mots: Vec<&str> = champs.split(' ').collect();
+        let (canal, position, rpm, pwm, mode, sait_faire_auto) = match mots[..] {
+            // Cinq champs : un démon d'avant #50. Il ne sait rien de la
+            // question, donc on répond « non » — cacher un bouton qui marche se
+            // répare, en montrer un qui ne peut qu'échouer est la panne même que
+            // #50 corrige.
+            [canal, position, rpm, pwm, mode] => (canal, position, rpm, pwm, mode, false),
+            [canal, position, rpm, pwm, mode, drapeau] => {
+                // ⚠️ Un sixième champ qui n'est ni `oui` ni `non` est **refusé**,
+                // et non absorbé dans le mode : l'absorber ferait passer une
+                // incompatibilité de protocole pour un mode exotique, et
+                // l'erreur ne se verrait jamais.
+                let sait = match drapeau {
+                    "oui" => true,
+                    "non" => false,
+                    _ => {
+                        return Err(illisible(
+                            "« chan » attend « oui » ou « non » en dernier champ",
+                        ));
+                    }
+                };
+                (canal, position, rpm, pwm, mode, sait)
+            }
+            _ => return Err(illisible("« chan » attend cinq ou six champs")),
+        };
+        return Ok(ResponseLine::Channel {
             channel: canal.to_owned(),
             position: match position {
                 ABSENT => None,
@@ -1201,7 +1245,12 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
             rpm: absent_ou(rpm).map_err(|r| illisible(&r))?,
             pwm: absent_ou(pwm).map_err(|r| illisible(&r))?,
             mode: mode.to_owned(),
-        }),
+            sait_faire_auto,
+        });
+    }
+
+    let champs: Vec<&str> = line.splitn(6, ' ').collect();
+    match champs[..] {
         ["temp", capteur, millidegres] => Ok(ResponseLine::Temp {
             sensor: capteur.to_owned(),
             millidegrees: millidegres.parse().map_err(|_| {

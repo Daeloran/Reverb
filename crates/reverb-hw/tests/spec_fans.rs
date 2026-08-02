@@ -939,7 +939,7 @@ mod modes {
         for nom in ["kraken2023elite:pump-speed", "kraken2023elite:fan-speed"] {
             let m = mode(canal(&canaux, nom));
             assert!(
-                matches!(m, Mode::FirmwareCurve),
+                matches!(m, Mode::PleinRegime),
                 "{nom} suit sa courbe firmware, lu : {m:?}"
             );
         }
@@ -1015,7 +1015,7 @@ mod modes {
             .count();
         let courbes = canaux
             .iter()
-            .filter(|c| matches!(mode(c), Mode::FirmwareCurve))
+            .filter(|c| matches!(mode(c), Mode::PleinRegime))
             .count();
         assert_eq!(manuels, 3, "les trois canaux de `nzxtsmart2`");
         assert_eq!(courbes, 2, "les deux canaux de `kraken2023elite`");
@@ -1137,7 +1137,7 @@ mod ecriture {
             .expect("`nzxtsmart2` expose `pwm1_enable`");
 
         assert_eq!(lire(enable), "1", "le canal part du mode manuel");
-        set_mode(c, Mode::FirmwareCurve).expect("retour à la courbe firmware");
+        set_mode(c, Mode::PleinRegime).expect("retour à la courbe firmware");
         assert_eq!(lire(enable), "0");
     }
 
@@ -1151,7 +1151,7 @@ mod ecriture {
         let c = canal(&canaux, "nzxtsmart2:fan-1");
 
         let avant = photographie(sysfs.racine());
-        set_mode(c, Mode::FirmwareCurve).expect("retour à la courbe firmware");
+        set_mode(c, Mode::PleinRegime).expect("retour à la courbe firmware");
         let apres = photographie(sysfs.racine());
 
         assert_eq!(
@@ -1175,7 +1175,7 @@ mod ecriture {
         assert!(c.enable.is_none());
 
         let avant = photographie(sysfs.racine());
-        for demande in [Mode::Manual, Mode::FirmwareCurve] {
+        for demande in [Mode::Manual, Mode::PleinRegime] {
             assert!(
                 set_mode(c, demande).is_err(),
                 "{demande:?} sur un canal sans `pwmN_enable`"

@@ -88,6 +88,9 @@ fn canal(channel: &str, mode: &str) -> ResponseLine {
         rpm: Some(1200),
         pwm: Some(60),
         mode: mode.to_owned(),
+        // #50 : le drapeau est le dernier champ. `false` ici parce que ce
+        // fichier fige la grammaire, pas la capacité d'un contrôleur donné.
+        sait_faire_auto: false,
     }
 }
 
@@ -699,6 +702,7 @@ fn aucune_ligne_de_donnees_ne_peut_se_faire_passer_pour_une_fin_de_reponse() {
             rpm: Some(2400),
             pwm: Some(80),
             mode: "firmware".to_owned(),
+            sait_faire_auto: false,
         },
         ResponseLine::Temp {
             sensor: "kraken2023elite:coolant".to_owned(),
@@ -893,6 +897,10 @@ fn un_canal_illisible_ne_se_decode_ni_en_zero_ni_en_rien() {
         rpm,
         pwm,
         mode,
+        // Cette ligne-ci est écrite à cinq champs, comme un démon d'avant #50 :
+        // le drapeau y est donc absent, et son absence vaut « non ». La
+        // grammaire à six champs est figée par `spec_ipc_auto.rs`.
+        sait_faire_auto: _,
     } = &muet
     else {
         panic!("« chan … » doit se décoder en Channel, pas en {muet:?}");
@@ -915,10 +923,11 @@ fn un_canal_illisible_ne_se_decode_ni_en_zero_ni_en_rien() {
         rpm: None,
         pwm: None,
         mode: "firmware".to_owned(),
+        sait_faire_auto: false,
     };
     let encodee = encode_response_line(&muet);
     assert_eq!(
-        encodee, "chan kraken2023elite:pump-speed - - - firmware",
+        encodee, "chan kraken2023elite:pump-speed - - - firmware non",
         "un champ absent s'écrit `-` (contrat d'API), jamais `0`"
     );
     assert_eq!(
@@ -935,6 +944,7 @@ fn un_canal_illisible_ne_se_decode_ni_en_zero_ni_en_rien() {
         rpm: Some(0),
         pwm: Some(0),
         mode: "manual".to_owned(),
+        sait_faire_auto: false,
     };
     let encodee = encode_response_line(&arrete);
     assert_eq!(
@@ -961,9 +971,13 @@ fn un_canal_illisible_ne_se_decode_ni_en_zero_ni_en_rien() {
             millidegrees: 34_200,
         })
     );
+    // ⚠️ Le réencodage ajoute le drapeau de #50 : une ligne relue à cinq champs
+    // se réécrit à six, avec le « non » que son absence valait. Le dialogue
+    // d'exemple de #17 n'a donc plus le dernier mot sur cette ligne — c'est
+    // `spec_ipc_auto.rs` qui fige la grammaire courante.
     assert_eq!(
         encode_response_line(&canal(CANAL, "manual")),
-        "chan nzxtsmart2:fan-1 radiateur-haut 1200 60 manual",
+        "chan nzxtsmart2:fan-1 radiateur-haut 1200 60 manual non",
         "et le réencodage rend le texte du contrat, mot pour mot"
     );
 }
