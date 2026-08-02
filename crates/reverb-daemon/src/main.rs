@@ -15,6 +15,7 @@ use reverb_daemon::cadence::{Cadence, Tick};
 use reverb_daemon::ecran;
 use reverb_daemon::peripheriques::{Consigne, Peripheriques};
 use reverb_daemon::persistance::{self, Eclairage};
+use reverb_daemon::quarantaine::Quarantaine;
 use reverb_daemon::serveur::{self, Ordre};
 use reverb_daemon::telemetrie;
 use reverb_daemon::zones::{self, Rendu, Tampon, Zones};
@@ -256,6 +257,14 @@ struct Etat {
     echeance_ecran: Option<Instant>,
     /// Ce qui compte les refus de la dalle et finit par renoncer (#70).
     vigie: ecran::Vigie,
+    /// Les sondes écartées parce qu'elles ne répondent plus (#68).
+    quarantaine: Quarantaine,
+    /// L'instant du démarrage, seule origine de temps du démon.
+    ///
+    /// La quarantaine ne tient aucune horloge — c'est ce qui la rend
+    /// vérifiable sans attendre. Elle reçoit donc un instant, et il se compte
+    /// depuis ici.
+    naissance: Instant,
 }
 
 impl Etat {
@@ -295,6 +304,8 @@ impl Etat {
             diffusion: Diffusion::Rien,
             echeance_ecran: None,
             vigie: ecran::Vigie::neuve(),
+            quarantaine: Quarantaine::nouvelle(),
+            naissance: Instant::now(),
         }
     }
 
@@ -686,10 +697,14 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
             }
         }
         Request::Status => {
+            let maintenant = etat.naissance.elapsed();
+            let gpu = etat.gpu.lock().ok().and_then(|lu| lu.clone());
             let mut lignes = telemetrie::releve(
                 peripheriques.canaux(),
                 &etat.sondes,
-                etat.gpu.lock().ok().and_then(|lu| lu.clone()),
+                gpu,
+                &mut etat.quarantaine,
+                maintenant,
             );
             lignes.push(ResponseLine::End);
             lignes

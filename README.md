@@ -267,6 +267,8 @@ fichier : c'est ainsi qu'on vérifie une mise en page sans ouvrir de session gra
 - Le bouton **« auto » n'apparaît que sur les deux canaux du Kraken**. Le pilote `nzxt-smart2` n'a
   aucun mode automatique — sa vitesse est celle que l'hôte écrit —, et montrer un bouton qui ne
   peut qu'échouer vaut moins que ne pas le montrer.
+- Une sonde qui cesse de répondre s'affiche **illisible**, et le reste de la fenêtre continue à
+  pleine vitesse. Voir [ci-dessous](#une-sonde-muette-nemporte-pas-le-démon).
 - Une LED peinte à la main (`paint`) **ne survit pas à un redémarrage** : `eclairage.conf` garde
   une couleur par cible, pas une par LED (#21). La cible reprend sa couleur unie au démarrage.
   **Une zone, si** — c'est le moyen de rendre une peinture durable : sélectionner les LED, les
@@ -428,6 +430,53 @@ arrêté : le nœud USB ne se réclame pas deux fois.
 Sans démon, `reverb screen` retrouve tout ce qu'il savait faire seul : l'état lu sur le
 contrôleur, la luminosité, et une image **brute** de 1 228 800 octets en BGR, telle que
 `ffmpeg -i photo.png -vf scale=640:640 -f rawvideo -pix_fmt bgr24 img.raw` la produit.
+
+### Ce que le démon refuse d'afficher
+
+Le format est reconnu **au contenu, avant que rien ne bouge** — jamais à l'extension :
+
+```
+$ reverb screen --gif photo.jpg
+err « /home/nico/photo.jpg » n'est pas un GIF : décodé comme JPEG — essaie « image »
+```
+
+Rien n'est écrit, rien n'est appliqué, la dalle continue ce qu'elle montrait. Ce n'est pas
+une politesse : un affichage impossible **persisté** faisait redémarrer le démon dans un état
+cassé, indéfiniment, sans moyen d'en sortir seul. C'est arrivé, et ça a probablement planté
+la dalle (#69).
+
+⚠️ **Après trois échecs d'affilée sur la dalle, le démon renonce** et la rend au firmware. Il
+le dit une fois, puis se tait. Réémettre sans fin vers un contrôleur qui refuse ne le
+réveille pas : ça consomme le bus et insiste sur un périphérique déjà en difficulté. Une
+commande `screen` relance quand on veut ; le fichier d'état, lui, n'est pas effacé, donc un
+redémarrage retente (#70).
+
+### Une sonde muette n'emporte pas le démon
+
+⚠️ **Une lecture sysfs peut bloquer cinq secondes**, en sommeil non interruptible, quand un
+périphérique cesse de répondre à son pilote noyau. Mesuré sur SHYNAEL le 2026-08-02, Kraken
+planté :
+
+```
+$ time cat /sys/class/hwmon/hwmon5/temp1_input      # kraken2023elite
+cat: … : Connexion terminée par expiration du délai d'attente
+        5,218 total
+$ time cat /sys/class/hwmon/hwmon6/fan1_input       # nzxtsmart2
+716
+        0,001 total
+```
+
+Le démon relève ses sondes dans le fil qui sert aussi le socket et tient les bus (ADR-002) :
+une seule sonde muette **gelait le service entier**, y compris `zone list` et `geometry`, qui
+ne touchent aucun matériel.
+
+Une sonde qui ne répond pas est donc **écartée**. Elle n'est plus lue, la fenêtre l'affiche
+illisible, et elle est retentée après un délai qui **double** — 30 s, 1 min, 2 min… — plafonné
+à cinq minutes. Le délai n'est pas un ornement : chaque retente coûte ses cinq secondes, et
+une retente par minute laisserait le socket muet 8 % du temps.
+
+Une retente réussie la remet en service et remet le délai à zéro. L'écart est **par sonde** :
+celle qui répond continue d'être lue quand sa voisine du même contrôleur se tait.
 
 ## La RAM Corsair
 
