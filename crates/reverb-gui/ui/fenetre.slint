@@ -17,6 +17,22 @@ export struct PointLed {
     choisie: bool,
 }
 
+// Une couche du halo d'une LED (#64). C'est ce qui fait qu'un boitier RGB
+// ressemble a un boitier RGB : sur les photos, la couleur d'un ventilateur
+// deborde largement sur les parois autour de lui.
+//
+// ⚠️ Ce sont des disques DESSINES, pas une ombre portee : le rendu logiciel de
+// Slint — celui de `examples/apercu.rs` — ignore `drop-shadow-blur`, mesure.
+//
+// Rayon et opacite viennent de `plan.rs` : le .slint ne decide de rien, il
+// dessine ce qu'on lui donne. L'opacite est deja dans l'alpha de la couleur.
+export struct PointHalo {
+    x: float,
+    y: float,
+    rayon: float,
+    couleur: color,
+}
+
 export struct LigneVentilateur {
     canal: string,
     position: string,
@@ -139,6 +155,10 @@ export component Fenetre inherits Window {
     in property <string> faces;
     in property <string> organes;
     in property <string> anneaux;
+    // Les cadres de ventilateur, corps de barrette et la dalle du Kraken (#64).
+    in property <string> habillage;
+    // Les couches de halo, de la plus large a la plus serree.
+    in property <[PointHalo]> halos;
     in property <[LigneVentilateur]> ventilateurs;
     in property <[LigneTemperature]> temperatures;
     in property <[FamilleAnimation]> familles;
@@ -325,6 +345,28 @@ export component Fenetre inherits Window {
                                 stroke-width: 1px;
                             }
 
+                            // L'habillage (#64) : les cadres perces des dix
+                            // ventilateurs, les quatre corps de barrette, la
+                            // dalle du Kraken. Rempli, pose SOUS les anneaux et
+                            // sous les LED — un cadre est une piece de chassis,
+                            // il passe derriere ce qui s'allume.
+                            //
+                            // ⚠️ `fill-rule: evenodd` fait le trou : un cadre
+                            // sort en deux sous-chemins imbriques, et sans cette
+                            // regle le second remplirait au lieu de percer, ce
+                            // qui masquerait les huit LED qu'il entoure.
+                            if root.habillage != "": Path {
+                                width: parent.width;
+                                height: parent.height;
+                                viewbox-width: 1;
+                                viewbox-height: 1;
+                                commands: root.habillage;
+                                fill-rule: evenodd;
+                                fill: #33364a;
+                                stroke: #4b4f6b;
+                                stroke-width: 1px;
+                            }
+
                             // Les anneaux : un ventilateur ressemble a un
                             // ventilateur, et non a huit points libres.
                             if root.anneaux != "": Path {
@@ -335,6 +377,19 @@ export component Fenetre inherits Window {
                                 commands: root.anneaux;
                                 stroke: #343650;
                                 stroke-width: 1px;
+                            }
+
+                            // Le halo, juste sous les pastilles : c'est lui qui
+                            // fait qu'une LED baigne son entourage de sa couleur,
+                            // comme sur les photos du boitier.
+                            for couche in root.halos: Rectangle {
+                                property <length> taille: couche.rayon * 2 * parent.width;
+                                width: taille;
+                                height: taille;
+                                border-radius: taille / 2;
+                                x: couche.x * parent.width - self.width / 2;
+                                y: couche.y * parent.height - self.height / 2;
+                                background: couche.couleur;
                             }
 
                             // Une cible visée est plus grosse et cerclée de blanc :
