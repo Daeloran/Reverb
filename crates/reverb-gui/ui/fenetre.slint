@@ -365,7 +365,13 @@ export component Fenetre inherits Window {
                         bandeau := HorizontalLayout {
                             spacing: 8px;
                             for sonde in root.temperatures: Rectangle {
-                                width: 142px;
+                                // Elastique, et non 142px fixes : cinq cartes
+                                // fixes depassaient la largeur du panneau et
+                                // poussaient le second disque hors champ. Le
+                                // Flickable reste le filet, il n'est plus le
+                                // moyen normal de voir la derniere carte.
+                                min-width: 106px;
+                                horizontal-stretch: 1;
                                 background: #191920;
                                 border-radius: 8px;
                                 border-width: 1px;
