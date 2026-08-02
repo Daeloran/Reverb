@@ -8,9 +8,12 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use reverb_hw::hwmon::{FanChannel, Percent, Sonde};
 use reverb_proto::ipc::ResponseLine;
+
+use crate::quarantaine::{Quarantaine, Releve};
 
 /// Relève l'état de tous les canaux et de toutes les sondes.
 ///
@@ -22,6 +25,8 @@ pub fn releve(
     canaux: &[FanChannel],
     sondes: &[Sonde],
     gpu: Option<(String, i32)>,
+    quarantaine: &mut Quarantaine,
+    maintenant: Duration,
 ) -> Vec<ResponseLine> {
     let mut lignes = Vec::new();
 
@@ -66,18 +71,40 @@ pub fn releve(
     }
 
     for sonde in sondes {
-        match sonde.lire() {
-            Ok(millidegres) => lignes.push(ResponseLine::Temp {
+        // ⚠️ **La lecture passe par la quarantaine, elle ne la précède pas**
+        // (#68). Une sonde qui ne répond plus bloque cinq secondes dans le noyau,
+        // en sommeil non interruptible : lire d'abord et consulter ensuite
+        // rendrait le bon verdict et gèlerait le démon exactement comme avant.
+        let mut souci = None;
+        let verdict = quarantaine.tour(&sonde.slug, maintenant, || match sonde.lire() {
+            Ok(millidegres) => Some(millidegres),
+            Err(erreur) => {
+                souci = Some(erreur.to_string());
+                None
+            }
+        });
+        match verdict {
+            Releve::Valeur(millidegres) => lignes.push(ResponseLine::Temp {
                 sensor: sonde.slug.clone(),
                 millidegrees: millidegres,
             }),
-            // Le fichier a disparu — un périphérique débranché. Le dire, plutôt
-            // que d'omettre la sonde et de laisser croire qu'elle n'a jamais
-            // existé.
-            Err(erreur) => lignes.push(ResponseLine::Unreadable {
-                subject: sonde.slug.clone(),
-                reason: erreur.to_string(),
-            }),
+            // Le dire, plutôt que d'omettre la sonde et de laisser croire qu'elle
+            // n'a jamais existé. Une sonde absente et une sonde muette sont deux
+            // choses différentes.
+            Releve::Muette { signaler } => {
+                let raison = souci.unwrap_or_else(|| "écartée après un relevé sans réponse".into());
+                if signaler {
+                    eprintln!(
+                        "attention : sonde « {} » écartée : {raison} — retentée plus tard, \
+                         de plus en plus espacé",
+                        sonde.slug
+                    );
+                }
+                lignes.push(ResponseLine::Unreadable {
+                    subject: sonde.slug.clone(),
+                    reason: raison,
+                });
+            }
         }
     }
 
