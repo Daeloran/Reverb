@@ -15,12 +15,15 @@ use reverb_daemon::cadence::{Cadence, Tick};
 use reverb_daemon::ecran;
 use reverb_daemon::peripheriques::{Consigne, Peripheriques};
 use reverb_daemon::persistance::{self, Eclairage};
+use reverb_daemon::profils::{self, Ecriture, Profil};
 use reverb_daemon::quarantaine::Quarantaine;
 use reverb_daemon::serveur::{self, Ordre};
 use reverb_daemon::telemetrie;
 use reverb_daemon::zones::{self, Rendu, Tampon, Zones};
 use reverb_hw::hwmon::Percent;
-use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine, ScreenAction};
+use reverb_proto::ipc::{
+    FanAction, LightTarget, ProfilAction, Request, ResponseLine, ScreenAction,
+};
 use reverb_proto::ram::{self, SlotAddress};
 use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
 
@@ -108,12 +111,23 @@ fn main() -> ExitCode {
             eclairage: fichier_eclairage,
             zones: fichier_zones,
             ecran: fichier_ecran,
+            profils: std::env::args()
+                .nth(6)
+                .map_or_else(|| PathBuf::from(profils::CHEMIN_PROFILS), PathBuf::from),
         },
         couches,
         sondes,
         lancer_le_fil_du_gpu(),
         dalle,
     );
+
+    // Les ambiances d'exemple, au tout premier démarrage : le répertoire est
+    // absent, personne n'a encore rien enregistré, et une machine neuve a de
+    // quoi montrer ce qu'un profil sait faire sans avoir à en composer un.
+    let poses = profils::poser_les_exemples(&etat.fichiers.profils);
+    if !poses.is_empty() {
+        eprintln!("profils d'exemple posés : {}", poses.join(", "));
+    }
 
     // La dalle retrouve ce qu'elle affichait, si le démon tient l'écran. Un
     // fichier effacé depuis le dernier démarrage se dit **une fois** : la dalle
@@ -180,6 +194,9 @@ struct Fichiers {
     eclairage: PathBuf,
     zones: PathBuf,
     ecran: PathBuf,
+    /// Le **répertoire** des ambiances nommées, et non un fichier : un profil
+    /// par fichier, pour qu'en supprimer un ne réécrive pas les autres (#74).
+    profils: PathBuf,
 }
 
 /// Ce que le démon pousse sur la dalle, et à quel rythme.
@@ -750,6 +767,8 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
 
         Request::Screen(action) => ecran_commande(etat, peripheriques, action),
 
+        Request::Profil(action) => profil_commande(etat, peripheriques, action),
+
         Request::Watch => {
             if let Some(canal) = abonnement {
                 // La première image part **tout de suite** quand rien n'est
@@ -996,6 +1015,171 @@ fn poser_affichage(etat: &mut Etat, affichage: ecran::Affichage) -> Vec<Response
             vec![ResponseLine::Error { message }]
         }
     }
+}
+
+/// Ce qu'une commande `profil` fait des ambiances nommées (#74).
+///
+/// ⚠️ **Aucun second chemin d'écriture vers le matériel.** Rappeler une ambiance
+/// repose l'état puis, pour l'écran, repasse par [`ecran_commande`] — le seul
+/// endroit qui décode, met à l'échelle et pousse. Un profil qui écrirait
+/// lui-même sur la dalle doublerait un chemin dont #69 et #70 ont montré le prix.
+fn profil_commande(
+    etat: &mut Etat,
+    peripheriques: &mut Peripheriques,
+    action: ProfilAction,
+) -> Vec<ResponseLine> {
+    let repertoire = etat.fichiers.profils.clone();
+
+    match action {
+        ProfilAction::List => {
+            let mut lignes: Vec<ResponseLine> = profils::lister(&repertoire)
+                .into_iter()
+                .map(|nom| ResponseLine::Profil {
+                    etat: "connu".to_owned(),
+                    nom: nom.as_str().to_owned(),
+                })
+                .collect();
+            lignes.push(ResponseLine::End);
+            lignes
+        }
+
+        ProfilAction::Save(nom) => {
+            // L'écran fait toujours partie de l'instantané : un profil qui ne
+            // dirait rien de la dalle serait celui d'un boîtier à moitié.
+            let profil = Profil {
+                eclairage: etat.eclairage(),
+                zones: etat.zones.clone(),
+                ecran: Some(etat.ecran.clone()),
+            };
+            match profils::enregistrer(&repertoire, &nom, &profil) {
+                Ok(ecriture) => vec![
+                    ResponseLine::Profil {
+                        etat: match ecriture {
+                            Ecriture::Creee => "cree".to_owned(),
+                            Ecriture::Ecrasee => "ecrase".to_owned(),
+                        },
+                        nom: nom.as_str().to_owned(),
+                    },
+                    ResponseLine::End,
+                ],
+                Err(erreur) => vec![ResponseLine::Error {
+                    message: format!("profil « {nom} » non enregistré : {erreur}"),
+                }],
+            }
+        }
+
+        ProfilAction::Drop(nom) => match profils::oublier(&repertoire, &nom) {
+            Ok(()) => vec![
+                ResponseLine::Profil {
+                    etat: "oublie".to_owned(),
+                    nom: nom.as_str().to_owned(),
+                },
+                ResponseLine::End,
+            ],
+            Err(erreur) => vec![ResponseLine::Error {
+                message: erreur.to_string(),
+            }],
+        },
+
+        ProfilAction::Load(nom) => {
+            let profil = match profils::charger(&repertoire, &nom) {
+                Ok(profil) => profil,
+                Err(erreur) => {
+                    return vec![ResponseLine::Error {
+                        message: erreur.to_string(),
+                    }];
+                }
+            };
+            appliquer_profil(etat, peripheriques, &nom.to_string(), profil.preparer())
+        }
+    }
+}
+
+/// Repose l'éclairage, les zones et l'écran d'une ambiance rappelée.
+///
+/// ⚠️ **Ce qui s'applique s'applique, même si l'écran ne suit pas.** Un profil à
+/// moitié appliqué qui le dit vaut mieux qu'un profil refusé en bloc parce
+/// qu'une photo a été déplacée. Les manques passent en `unreadable` — la ligne
+/// que ce protocole réserve à ce qui existe mais n'a pas pu être lu — et non en
+/// `err`, qui terminerait la réponse en échec alors que le boîtier vient bel et
+/// bien de changer de couleur.
+fn appliquer_profil(
+    etat: &mut Etat,
+    peripheriques: &mut Peripheriques,
+    nom: &str,
+    application: profils::Application,
+) -> Vec<ResponseLine> {
+    let mut lignes: Vec<ResponseLine> = application
+        .signalements
+        .into_iter()
+        .map(|raison| ResponseLine::Unreadable {
+            subject: "ecran".to_owned(),
+            reason: raison,
+        })
+        .collect();
+
+    etat.ventilateurs = application.eclairage.ventilateurs;
+    etat.barrettes = application.eclairage.barrettes;
+    etat.animation = application.eclairage.animation;
+    // La couche globale reprend une couleur unie par cible : `eclairage.conf`
+    // n'a jamais gardé plus fin (#21), et un profil non plus.
+    etat.fixe = Tampon {
+        ventilateurs: application
+            .eclairage
+            .ventilateurs
+            .map(|couleur| [couleur; LEDS_PER_FAN as usize]),
+        barrettes: application
+            .eclairage
+            .barrettes
+            .map(|couleur| [couleur; ram::LEDS_PER_STICK]),
+    };
+    etat.zones = application.zones;
+    etat.a_ecrire = true;
+
+    if let Some(dalle) = application.ecran {
+        for action in [
+            ScreenAction::Brightness(dalle.luminosite),
+            match &dalle.affichage {
+                ecran::Affichage::Rien => ScreenAction::Off,
+                ecran::Affichage::Cadran(sonde) => ScreenAction::Gauge(sonde.clone()),
+                ecran::Affichage::Image(chemin) => ScreenAction::Image(chemin.clone()),
+                ecran::Affichage::Gif(chemin) => ScreenAction::Gif(chemin.clone()),
+            },
+        ] {
+            for ligne in ecran_commande(etat, peripheriques, action) {
+                if let ResponseLine::Error { message } = ligne {
+                    lignes.push(ResponseLine::Unreadable {
+                        subject: "ecran".to_owned(),
+                        reason: message,
+                    });
+                }
+            }
+        }
+    }
+
+    for souci in [
+        persistance::enregistrer_eclairage(&etat.fichiers.eclairage, &etat.eclairage())
+            .err()
+            .map(|erreur| format!("éclairage appliqué mais non conservé : {erreur}")),
+        zones::enregistrer(&etat.fichiers.zones, &etat.zones)
+            .err()
+            .map(|erreur| format!("zones appliquées mais non conservées : {erreur}")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        lignes.push(ResponseLine::Unreadable {
+            subject: "disque".to_owned(),
+            reason: souci,
+        });
+    }
+
+    lignes.push(ResponseLine::Profil {
+        etat: "applique".to_owned(),
+        nom: nom.to_owned(),
+    });
+    lignes.push(ResponseLine::End);
+    lignes
 }
 
 /// Écrit l'état de l'écran sur disque, et répond.

@@ -252,7 +252,16 @@ impl Zones {
     /// `light <nom> <rrggbb>` ou `anim <nom> <animation> [clé=valeur…]`. Une
     /// zone transparente n'a pas de ligne de rendu.
     pub fn encoder(&self) -> String {
-        let mut texte = String::from(EN_TETE);
+        format!("{EN_TETE}{}", self.encoder_entrees())
+    }
+
+    /// Les mêmes lignes, **sans l'en-tête**.
+    ///
+    /// Ce que reprend un profil (#74) : son fichier porte les trois natures à la
+    /// fois, et l'en-tête ci-dessus décrit `zones.conf`. Le recopier là-bas
+    /// documenterait un fichier qui n'est pas celui qu'on lit.
+    pub fn encoder_entrees(&self) -> String {
+        let mut texte = String::new();
         for zone in &self.zones {
             texte.push_str(&format!(
                 "zone {} {}\n",

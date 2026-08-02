@@ -33,6 +33,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Catalogue d'animations | ✅ six familles paramétrables |
 | Interface Slint | ✅ maquette habillée, deux vues, zones, sondes, écran |
 | Écran du Kraken dans le démon | ✅ luminosité, cadran, image, GIF |
+| Profils — une ambiance sous un nom | ✅ éclairage, zones et écran, deux exemples livrés |
 
 ## Ce que les protocoles permettent
 
@@ -178,10 +179,11 @@ animation avec ses réglages. Le démon écrit son état dans `/var/lib/reverb/e
 **chaque changement**, pas à l'arrêt : ce qu'on veut retrouver, c'est justement l'éclairage
 d'avant une coupure de courant, qui ne laisse le temps d'écrire nulle part.
 
-Deux natures, quatre fichiers. La géométrie est une donnée de montage, décidée une fois, et reste
-dans `/etc` ; l'éclairage, les zones et l'écran sont l'état courant du service, réécrits à chaque
-commande, et vont dans `/var/lib` (`StateDirectory=reverb`). Les mêler ferait réécrire à chaque
-changement de couleur le fichier qui a coûté un relevé au sol.
+Deux natures, quatre fichiers et un répertoire. La géométrie est une donnée de montage, décidée une
+fois, et reste dans `/etc` ; l'éclairage, les zones, l'écran et [les profils](#les-profils--une-ambiance-sous-un-nom)
+sont l'état courant du service, réécrits à chaque commande, et vont dans `/var/lib`
+(`StateDirectory=reverb`). Les mêler ferait réécrire à chaque changement de couleur le fichier qui
+a coûté un relevé au sol.
 
 L'écran suit la même règle : `ecran.conf` garde sa luminosité et **le chemin** de ce qu'il montre,
 jamais les pixels. Au redémarrage le démon relit le fichier ; s'il a disparu depuis, la dalle reste
@@ -197,6 +199,48 @@ Un fichier illisible ou tronqué ne bloque pas le démarrage : il est signalé d
 l'accueil s'applique. Une entrée absente ou répétée est refusée **en la nommant** — c'est ce qui
 rend un fichier tronqué détectable, plutôt que complété au jugé par un éclairage plausible et
 faux.
+
+### Les profils — une ambiance sous un nom
+
+Un profil est un **instantané nommé** de tout ce que le boîtier montre : la couche globale, les
+zones avec leurs couleurs et leurs animations, et l'écran. On l'enregistre, on le rappelle, le
+boîtier reprend exactement ce qu'il affichait.
+
+```bash
+echo 'profil save soirée d'\''été'
+echo 'profil load soirée d'\''été'
+echo 'profil list'
+echo 'profil drop soirée d'\''été'
+```
+
+Un profil **n'emporte pas la géométrie**. C'est une donnée de montage, relevée à l'œil sous le
+bureau, et rappeler une ambiance enregistrée avant qu'un ventilateur ait été démonté puis remis
+remettrait l'orientation d'avant — le boîtier se mettrait à tourner à l'envers sans qu'on fasse le
+lien.
+
+⚠️ **Un nom peut porter des espaces et des accents** — « soirée d'été », « LAN party ». Il est donc
+le **dernier champ de sa ligne** et va jusqu'au bout, comme un chemin d'image : coupé au premier
+blanc, il désignerait « soirée », un profil qui n'existe pas.
+
+⚠️ **Un nom ne peut pas désigner un fichier ailleurs.** Le démon est root ; `/`, `\`, `..` et tout
+caractère de contrôle sont refusés **en nommant ce qui cloche**. Ce n'est pas une vérification à
+l'exécution mais un type — comme `SlotAddress` pour la RAM, viser hors du répertoire est
+irreprésentable, et un balayage des 256 valeurs d'octet le vérifie.
+
+**Un profil dont l'image a disparu s'applique quand même.** L'éclairage et les zones sont posés, et
+seul l'écran est signalé : un profil à moitié appliqué qui le dit vaut mieux qu'un profil refusé en
+bloc parce qu'une photo a été déplacée. Le format est reconnu **au contenu avant que rien ne bouge**,
+comme partout depuis #69.
+
+Les profils vivent dans `/var/lib/reverb/profils/`, **un fichier par profil** : en supprimer un ne
+réécrit pas les autres, et un profil corrompu n'emporte pas la collection. `profil list` ne décode
+d'ailleurs rien — un profil abîmé y **reste visible**, sinon on ne saurait pas quoi réparer.
+
+Deux ambiances d'exemple, `abysse` et `forge`, sont **embarquées dans le binaire** et posées au tout
+premier démarrage. `tools/installe.sh` n'y touche pas : il promet de ne jamais écrire dans
+`/var/lib/reverb`, et le répertoire doit être créé par `StateDirectory=reverb` pour l'être au bon
+propriétaire. Un exemple supprimé exprès ne repousse pas — la condition est l'absence du
+**répertoire**, pas celle de chaque fichier.
 
 ## La fenêtre
 

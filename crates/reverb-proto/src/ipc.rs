@@ -50,6 +50,7 @@ use crate::LEDS_PER_FAN;
 use crate::color::Rgb;
 use crate::led::Led;
 use crate::position::Position;
+use crate::profil::NomProfil;
 use crate::ram::{self, SLOT_COUNT};
 use crate::screen::BRIGHTNESS_MAX as LUMINOSITE_MAX;
 
@@ -166,6 +167,8 @@ pub enum Request {
     /// **chemin de fichier** et le démon lit lui-même — jamais 1,2 Mo de pixels
     /// sur un protocole texte.
     Screen(ScreenAction),
+    /// `profil <action>` — les ambiances nommées (#74).
+    Profil(ProfilAction),
     /// `watch` — le démon pousse l'image courante, puis chaque nouvelle.
     ///
     /// Quatorze lignes `frame` puis `end`, et ainsi de suite tant que le client
@@ -213,6 +216,25 @@ pub enum ScreenAction {
     Gauge(String),
     /// `screen gif <chemin>` — une animation, jouée en boucle.
     Gif(String),
+}
+
+/// Ce qu'une commande `profil` demande.
+///
+/// ⚠️ **Le nom est déjà validé** — c'est un [`NomProfil`], pas une chaîne. La
+/// validation appartient au décodage de la requête, en amont de toute
+/// construction de chemin : le démon est root, et un nom qui traverserait
+/// jusqu'à `open()` sans avoir été borné serait une écriture arbitraire sur le
+/// système de fichiers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfilAction {
+    /// `profil list` — les ambiances connues, sans en appliquer aucune.
+    List,
+    /// `profil save <nom>` — enregistre l'état courant sous ce nom.
+    Save(NomProfil),
+    /// `profil load <nom>` — applique cette ambiance.
+    Load(NomProfil),
+    /// `profil drop <nom>` — oublie cette ambiance.
+    Drop(NomProfil),
 }
 
 /// Ce qu'on demande à un canal de vitesse.
@@ -468,6 +490,39 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
             }
         }
 
+        "profil" => {
+            let [action, ..] = arguments.as_slice() else {
+                return Err(mauvais("attend une action : list, save, load ou drop"));
+            };
+            match *action {
+                "list" => {
+                    if arguments.len() > 1 {
+                        return Err(mauvais("« profil list » n'attend aucun argument"));
+                    }
+                    Ok(Request::Profil(ProfilAction::List))
+                }
+                "save" | "load" | "drop" => {
+                    // ⚠️ Le nom est le **dernier champ de sa ligne**, et va
+                    // jusqu'au bout, espaces comprises — la règle de #17, celle
+                    // qui vaut déjà pour un chemin d'image. « soirée d'été » et
+                    // « LAN party » sont des noms légitimes ; coupés au premier
+                    // blanc, ils désigneraient « soirée » et « LAN », deux
+                    // profils qui n'existent pas.
+                    let brut = apres_l_action(line).unwrap_or("");
+                    let nom =
+                        NomProfil::nouveau(brut).map_err(|erreur| mauvais(&erreur.to_string()))?;
+                    Ok(Request::Profil(match *action {
+                        "save" => ProfilAction::Save(nom),
+                        "load" => ProfilAction::Load(nom),
+                        _ => ProfilAction::Drop(nom),
+                    }))
+                }
+                autre => Err(mauvais(&format!(
+                    "action « {autre} » inconnue : list, save, load ou drop"
+                ))),
+            }
+        }
+
         "paint" => {
             let [cible, couleurs] = arguments[..] else {
                 return Err(mauvais(
@@ -586,6 +641,15 @@ pub fn encode_request(request: &Request) -> String {
         Request::Fan { channel, action } => match action {
             FanAction::Auto => format!("fan {channel} auto"),
             FanAction::Pwm(percent) => format!("fan {channel} pwm {percent}"),
+        },
+        // Le nom est le dernier champ : il n'est ni neutralisé ni cité, ses
+        // espaces étant justement ce qu'il faut transmettre. Il a traversé
+        // `NomProfil::nouveau`, qui a déjà refusé tout caractère de contrôle.
+        Request::Profil(action) => match action {
+            ProfilAction::List => "profil list".to_owned(),
+            ProfilAction::Save(nom) => format!("profil save {nom}"),
+            ProfilAction::Load(nom) => format!("profil load {nom}"),
+            ProfilAction::Drop(nom) => format!("profil drop {nom}"),
         },
         Request::Geometry { cible, reglages } => ecrire_paires(
             match cible {
@@ -905,6 +969,17 @@ pub enum ResponseLine {
     /// L'affichage s'écrit `rien`, `gauge:<sonde>`, `image:<chemin>` ou
     /// `gif:<chemin>`.
     Screen { luminosite: u8, affichage: String },
+    /// `profil <etat> <nom>` — ce qu'il est advenu d'une ambiance.
+    ///
+    /// `etat` est un **seul jeton** : `connu` pour une ligne de `profil list`,
+    /// `cree`, `ecrase`, `applique` ou `oublie` pour ce qu'une commande vient de
+    /// faire. C'est ainsi que « `profil save` écrase **et le dit** » se tient
+    /// sans passer par `err`, qui terminerait la réponse en échec là où
+    /// l'écrasement a réussi.
+    ///
+    /// Le nom est en **dernier champ** : il a le droit de porter des espaces,
+    /// comme celui qu'on a tapé pour l'enregistrer.
+    Profil { etat: String, nom: String },
     /// `end` — succès, fin de réponse.
     End,
     /// `err <message>` — échec, fin de réponse.
@@ -1035,6 +1110,12 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
             luminosite,
             affichage,
         } => format!("screen {luminosite} {}", sans_controle(affichage)),
+        // Le nom est le dernier champ, et porte des espaces légitimes : ses
+        // caractères de contrôle tombent, ses espaces restent. L'état, lui, est
+        // un jeton, et se neutralise comme tel.
+        ResponseLine::Profil { etat, nom } => {
+            format!("profil {} {}", jeton(etat), sans_controle(nom))
+        }
         ResponseLine::End => "end".to_owned(),
         ResponseLine::Error { message } => format!("err {}", reste(message)),
     }
@@ -1088,6 +1169,22 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
         return Ok(ResponseLine::Screen {
             luminosite: u8::try_from(luminosite).unwrap_or(LUMINOSITE_MAX),
             affichage: affichage.to_owned(),
+        });
+    }
+
+    // `profil` porte lui aussi un dernier champ à espaces — le nom. ⚠️ Le
+    // préfixe est « profil␣ », l'état est un jeton, et le nom va jusqu'au bout :
+    // `profil connu soirée d'été` porte deux champs, pas quatre.
+    if let Some(reste) = line.strip_prefix("profil ") {
+        let (etat, nom) = reste
+            .split_once(' ')
+            .ok_or_else(|| illisible("« profil » attend un état et un nom"))?;
+        if nom.trim().is_empty() {
+            return Err(illisible("« profil » attend un nom"));
+        }
+        return Ok(ResponseLine::Profil {
+            etat: etat.to_owned(),
+            nom: nom.to_owned(),
         });
     }
 
@@ -1401,4 +1498,122 @@ fn reste(champ: &str) -> String {
         .chars()
         .map(|c| if c.is_control() { NEUTRE } else { c })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests de logique du verbe `profil` (#74).
+    //!
+    //! Les tests d'intention du profil vivent dans `tests/spec_profils.rs` — ils
+    //! portent sur le **nom**, qui est pur. Ceux-ci portent sur son passage par
+    //! le socket, que l'issue n'avait pas spécifié : elle liste quatre commandes
+    //! sans fixer de forme de requête.
+
+    use super::*;
+
+    fn nom(saisi: &str) -> NomProfil {
+        NomProfil::nouveau(saisi).expect("nom valide")
+    }
+
+    #[test]
+    fn les_quatre_actions_traversent_l_aller_retour() {
+        for action in [
+            ProfilAction::List,
+            ProfilAction::Save(nom("nuit")),
+            ProfilAction::Load(nom("nuit")),
+            ProfilAction::Drop(nom("nuit")),
+        ] {
+            let requete = Request::Profil(action);
+            assert_eq!(
+                parse_request(&encode_request(&requete)),
+                Ok(requete.clone()),
+                "{requete:?} doit se relire telle quelle"
+            );
+        }
+    }
+
+    #[test]
+    fn un_nom_a_espaces_traverse_le_socket_entier() {
+        // La règle du dernier champ (#17), celle qui vaut déjà pour un chemin
+        // d'image. Coupé au premier blanc, « soirée d'été » désignerait
+        // « soirée » — un profil qui n'existe pas, et que le démon dirait
+        // absent sans qu'on comprenne pourquoi.
+        for saisi in ["soirée d'été", "LAN party", "très très calme"] {
+            let requete = Request::Profil(ProfilAction::Load(nom(saisi)));
+            let ligne = encode_request(&requete);
+            assert!(
+                ligne.ends_with(saisi),
+                "« {ligne} » doit finir par le nom entier"
+            );
+            assert_eq!(parse_request(&ligne), Ok(requete));
+        }
+    }
+
+    #[test]
+    fn un_nom_hostile_est_refuse_par_le_socket() {
+        // La validation est **en amont** de toute construction de chemin : le
+        // démon ne doit jamais recevoir un `Request::Profil` portant un nom
+        // qu'il n'aurait plus qu'à ouvrir.
+        for hostile in [
+            "profil load ../../etc/shadow",
+            "profil save nuit/jour",
+            "profil drop ",
+            "profil save",
+        ] {
+            let refus =
+                parse_request(hostile).expect_err(&format!("« {hostile} » doit être refusé"));
+            assert!(
+                matches!(refus, RequestError::BadArgument { ref verb, .. } if verb == "profil"),
+                "« {hostile} » doit être refusé au titre de « profil », pas d'un autre verbe : \
+                 {refus:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn une_action_inconnue_est_refusee_en_donnant_les_quatre() {
+        let refus = parse_request("profil sauvegarde nuit").expect_err("action inconnue");
+        let RequestError::BadArgument { reason, .. } = refus else {
+            panic!("attendu un mauvais argument, obtenu {refus:?}");
+        };
+        for connue in ["list", "save", "load", "drop"] {
+            assert!(
+                reason.contains(connue),
+                "le refus doit citer « {connue} » : {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn profil_list_n_attend_aucun_argument() {
+        assert_eq!(
+            parse_request("profil list"),
+            Ok(Request::Profil(ProfilAction::List))
+        );
+        assert!(
+            parse_request("profil list nuit").is_err(),
+            "« profil list nuit » ressemble à un chargement qui n'en est pas un : le refuser \
+             évite qu'il passe pour appliqué"
+        );
+    }
+
+    #[test]
+    fn la_ligne_de_reponse_garde_l_etat_et_le_nom() {
+        for etat in ["connu", "cree", "ecrase", "applique", "oublie"] {
+            let ligne = ResponseLine::Profil {
+                etat: etat.to_owned(),
+                nom: "soirée d'été".to_owned(),
+            };
+            assert_eq!(
+                parse_response_line(&encode_response_line(&ligne)),
+                Ok(ligne.clone()),
+                "{ligne:?} doit se relire"
+            );
+        }
+
+        // Une ligne sans état n'est pas décodable en état vide : ce serait un
+        // nom pris pour un verbe, donc une entrée de liste inventée.
+        assert!(parse_response_line("profil nuit").is_err());
+        assert!(parse_response_line("profil connu ").is_err());
+    }
 }
