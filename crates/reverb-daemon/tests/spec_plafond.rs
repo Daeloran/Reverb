@@ -85,6 +85,14 @@
 //! - **La cause première de la panne.** La reproduire délibérément rejouerait la panne sur le seul
 //!   exemplaire de matériel du projet.
 
+// Les assertions qui **encadrent** `ECHECS_AVANT_ABANDON` sont constantes une
+// fois la constante écrite, et clippy les refuse à ce titre. C'est précisément
+// leur intérêt : elles ne servent pas à observer une exécution mais à casser la
+// compilation le jour où quelqu'un pose un plafond hors des bornes que #70 a
+// raisonnées. Aucune assertion n'a été touchée pour lever ce lint — seul cet
+// `allow` a été ajouté, après l'implémentation.
+#![allow(clippy::assertions_on_constants)]
+
 use std::cell::Cell;
 use std::io;
 
