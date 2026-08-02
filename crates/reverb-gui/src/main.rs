@@ -30,7 +30,7 @@ use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
 use reverb_gui::plan::{Cible, Place, Plan, Vue};
 use reverb_gui::reglages::{
-    EcranChoisi, Limiteur, Poignee, Reglage, eclairage_lu, requetes_vers_la_cible,
+    EcranChoisi, Limiteur, Poignee, Reglage, eclairage_lu, requetes_pour_la_couleur,
 };
 use reverb_gui::sondes::{Historique, ModelesNvme, Releve, modeles_nvme, sondes_retenues};
 use reverb_gui::{
@@ -640,19 +640,40 @@ fn bouger_un_axe(
     }
 }
 
-/// Envoie une couleur là où elle doit aller : la zone visée, ou le boîtier.
+/// Envoie une couleur là où elle doit aller, **sous la forme que l'animation en
+/// cours permet** (#63).
+///
+/// Une couleur posée pendant qu'une animation tourne ne l'éteint plus : elle la
+/// rejoue, changée de couleur. Et une sélection partielle devient une zone, pour
+/// que le reste du boîtier garde la sienne. C'est `reglages.rs` qui décide — ici
+/// on ne fait que lui fournir de quoi décider, et poster ce qu'il rend.
 fn appliquer_la_couleur(pupitre: &Pupitre, envoi: &Sender<Request>, couleur: Rgb) {
     let visee = pupitre.visee.borrow().clone();
-    for requete in requetes_vers_la_cible(visee.as_deref(), couleur, |couleur| {
-        commandes_de_couleur(
-            &pupitre.tableau.borrow(),
-            &pupitre.selection.borrow(),
-            couleur,
+    let selection = pupitre.selection.borrow();
+    let requetes = requetes_pour_la_couleur(
+        &pupitre.reglage.borrow(),
+        couleur,
+        visee.as_deref(),
+        &selection.nom(),
+        &cibles(&selection),
+        *selection == Selection::tout(),
+        |couleur| commandes_de_couleur(&pupitre.tableau.borrow(), &selection, couleur),
+    );
+    drop(selection);
+
+    // La liste des zones se redemande dès qu'une zone a pu bouger — celle qui
+    // était visée, ou celle que la sélection vient de faire naître. Sans quoi le
+    // panneau montrerait une zone de moins que le démon n'en tient.
+    let touche_une_zone = requetes.iter().any(|requete| {
+        matches!(
+            requete,
+            Request::ZoneSet { .. } | Request::ZoneLight { .. } | Request::ZoneAnim { .. }
         )
-    }) {
+    });
+    for requete in requetes {
         let _ = envoi.send(requete);
     }
-    if visee.is_some() {
+    if touche_une_zone {
         let _ = envoi.send(Request::ZoneList);
     }
 }

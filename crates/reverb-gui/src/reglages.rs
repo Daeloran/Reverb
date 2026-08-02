@@ -34,8 +34,8 @@
 use std::time::Duration;
 
 use reverb_anim::{Animation, Direction};
-use reverb_proto::Rgb;
 use reverb_proto::ipc::{Request, ResponseLine};
+use reverb_proto::{Led, Rgb};
 
 /// Combien de temps une consigne l'emporte sur la mesure après le relâchement.
 ///
@@ -415,6 +415,141 @@ pub fn requetes_vers_la_cible(
             couleur,
         }],
         None => sans_zone(couleur),
+    }
+}
+
+/// Ce que la couche visée peut faire de la couleur qu'on vient de poser.
+///
+/// Trois états et non deux : « rien ne tourne » et « ça tourne mais refuse la
+/// couleur » se comportent pareil partout **sauf** sur une sélection partielle,
+/// où le premier se contente du repli et le second doit passer par une zone pour
+/// que le reste du boîtier garde son animation.
+enum Couche {
+    /// Aucune animation exploitable : la couleur se pose telle quelle.
+    ///
+    /// Un nom que le catalogue ne connaît pas compte ici. Le démon peut en
+    /// rapporter un que cette fenêtre ignore ; en tirer une relance émettrait
+    /// une commande qu'elle ne sait pas composer, là où le repli fait ce qu'elle
+    /// a toujours fait.
+    Fixe,
+    /// Une animation tourne et accepte la couleur : elle se rejoue, changée.
+    Rejouee(Request),
+    /// Une animation tourne et refuse la couleur — `arc-en-ciel` les produit
+    /// toutes. Elle cède la place à la couleur demandée, sur la couche visée
+    /// seulement.
+    Figee,
+}
+
+/// L'animation en cours, relancée dans la couleur qu'on vient de poser.
+///
+/// ⚠️ **La couleur vient du sélecteur, pas du réglage.** Le réglage porte encore
+/// celle d'avant le geste : relancer depuis lui rendrait un `animate` valide,
+/// accepté par le démon, et sans le moindre effet visible.
+///
+/// Les clés portées sont celles que l'animation accepte, et [`Reglage::commande`]
+/// les filtre déjà — c'est le catalogue qui décide, jamais une liste recopiée ici
+/// qui divergerait à la première animation ajoutée.
+fn couche_visee(reglage: &Reglage, couleur: Rgb) -> Couche {
+    let Some(nom) = reglage.animation.as_deref() else {
+        return Couche::Fixe;
+    };
+    let Ok(animation) = Animation::par_nom(nom) else {
+        return Couche::Fixe;
+    };
+    if !animation.parametres_acceptes().contains(&"couleur") {
+        return Couche::Figee;
+    }
+    let relance = Reglage {
+        couleur,
+        ..reglage.clone()
+    };
+    match relance.commande() {
+        Some(requete) => Couche::Rejouee(requete),
+        None => Couche::Fixe,
+    }
+}
+
+/// La même requête, adressée à une zone plutôt qu'au boîtier.
+fn pour_la_zone(nom: &str, requete: Request) -> Request {
+    match requete {
+        Request::Animate { name, reglages } => Request::ZoneAnim {
+            nom: nom.to_owned(),
+            animation: name,
+            reglages,
+        },
+        autre => autre,
+    }
+}
+
+/// Où va une couleur, et sous quelle forme (issue #63).
+///
+/// **Une seule règle** : *la couleur va à la couche visée, sous la forme que
+/// l'animation en cours permet.* [`requetes_vers_la_cible`] en devient un cas —
+/// celui où rien ne tourne.
+///
+/// # Le défaut que ceci corrige
+///
+/// Boîtier en `arc-en-ciel`, l'utilisateur sélectionne `haut-milieu` et lui donne
+/// une couleur : les treize autres cibles se figeaient. La fenêtre émettait
+/// `light`, et une couleur fixe arrête l'animation côté démon — à raison sur la
+/// couche globale, où les deux se disputent les mêmes LED, à tort ici où rien ne
+/// dispute `bas-gauche` à qui vient de colorer `haut-milieu`.
+///
+/// ⚠️ **Ce n'est pas l'étendue des LED touchées qui compte, c'est la couche.**
+/// `haut-milieu` est un ventilateur entier : `light fan:haut-milieu` ne vise
+/// aucune LED hors sélection, et fige pourtant les cent seize autres.
+///
+/// ⚠️ **Le repli n'est jamais consulté quand la couleur va ailleurs**, et ce
+/// n'est pas une économie : le calculer puis le jeter rendrait le bon résultat
+/// tout en peignant les LED d'un organe entamé, qui ne sont pas à peindre.
+pub fn requetes_pour_la_couleur(
+    reglage: &Reglage,
+    couleur: Rgb,
+    zone_visee: Option<&str>,
+    selection: &str,
+    cibles: &[Led],
+    entiere: bool,
+    sans_animation: impl FnOnce(Rgb) -> Vec<Request>,
+) -> Vec<Request> {
+    // Une sélection partielle pendant qu'une animation tourne devient une zone :
+    // c'est le seul moyen de lui donner sa couleur sans que le reste du boîtier
+    // perde la sienne. Le nom vient de la sélection, donc il est le même à chaque
+    // geste — sans ce déterminisme, chaque clic empilerait une zone de plus.
+    let en_zone = zone_visee.is_none() && !entiere;
+    let declarer = || Request::ZoneSet {
+        nom: selection.to_owned(),
+        cibles: cibles.to_vec(),
+    };
+
+    match couche_visee(reglage, couleur) {
+        Couche::Rejouee(requete) => match zone_visee {
+            // Une zone visée tient déjà ses LED : la redéclarer les lui
+            // prendrait, une LED n'appartenant qu'à une zone à la fois.
+            Some(zone) => vec![pour_la_zone(zone, requete)],
+            // Tout le boîtier : la couche globale est exactement ce qu'on vise,
+            // et il n'y a rien à préserver à côté.
+            None if entiere => vec![requete],
+            // Déclarer d'abord : une zone qui n'existe pas encore ne se colore
+            // pas.
+            None => vec![declarer(), pour_la_zone(selection, requete)],
+        },
+
+        // L'animation refuse la couleur — `arc-en-ciel` les produit toutes — et
+        // la sélection est partielle : elle cède la place, mais sur sa zone
+        // seulement.
+        Couche::Figee if en_zone => vec![
+            declarer(),
+            Request::ZoneLight {
+                nom: selection.to_owned(),
+                couleur,
+            },
+        ],
+
+        // Tout le reste, c'est le comportement d'avant #63, mot pour mot :
+        // `requetes_vers_la_cible` **en devient un cas**, elle n'est pas doublée.
+        // Rien ne tourne, ou rien ne se rejoue et la couche visée est de toute
+        // façon celle qu'une couleur fixe emporterait.
+        _ => requetes_vers_la_cible(zone_visee, couleur, sans_animation),
     }
 }
 
