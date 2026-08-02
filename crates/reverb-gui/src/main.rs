@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
 use reverb_gui::plan::{Cible, Place, Plan, Vue};
-use reverb_gui::reglages::{Poignee, Reglage, eclairage_lu};
+use reverb_gui::reglages::{Limiteur, Poignee, Reglage, eclairage_lu, requetes_vers_la_cible};
 use reverb_gui::sondes::{Historique, ModelesNvme, Releve, modeles_nvme, sondes_retenues};
 use reverb_gui::{
     FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointLed,
@@ -334,6 +334,8 @@ struct Pupitre {
     /// L'origine des temps de la fenêtre. Les poignées raisonnent en durées
     /// depuis elle, ce qui les rend testables sans horloge.
     depart: Instant,
+    /// Ce qui empêche une jauge traînée d'inonder le démon (#47).
+    limiteur: RefCell<Limiteur>,
     /// Le modèle des deux disques, lu **une seule fois** au démarrage.
     ///
     /// Un modèle ne change pas en cours de session : le relire à chaque seconde
@@ -361,6 +363,7 @@ impl Pupitre {
             visee: RefCell::new(None),
             canaux: Rc::new(VecModel::default()),
             depart: Instant::now(),
+            limiteur: RefCell::new(Limiteur::nouveau()),
             modeles_nvme: modeles_nvme(),
         }
     }
@@ -418,22 +421,25 @@ fn main() -> ExitCode {
     // La télémétrie n'a pas de flux : on la redemande, doucement. Une seconde
     // suffit pour des tours par minute, et n'ajoute rien de mesurable au démon.
     let horloge = slint::Timer::default();
-    horloge.start(
-        slint::TimerMode::Repeated,
-        Duration::from_secs(1),
-        move || {
-            let _ = ordres.send(Request::Status);
-            let _ = ordres.send(Request::ZoneList);
-            // `lighting` aussi : une animation lancée ailleurs — par le socket,
-            // par une seconde fenêtre — doit finir par se voir ici. C'est
-            // `Reglage::adopter` qui décide de ce qu'on en retient, et qui
-            // laisse en place ce que l'utilisateur est en train de régler.
-            let _ = ordres.send(Request::Lighting);
-            // L'écran a sa vie propre : une commande passée par le socket, ou
-            // un cadran qui a changé de sonde, doit finir par se voir ici.
-            let _ = ordres.send(Request::Screen(ScreenAction::State));
-        },
-    );
+    {
+        let ordres = ordres.clone();
+        horloge.start(
+            slint::TimerMode::Repeated,
+            Duration::from_secs(1),
+            move || {
+                let _ = ordres.send(Request::Status);
+                let _ = ordres.send(Request::ZoneList);
+                // `lighting` aussi : une animation lancée ailleurs — par le socket,
+                // par une seconde fenêtre — doit finir par se voir ici. C'est
+                // `Reglage::adopter` qui décide de ce qu'on en retient, et qui
+                // laisse en place ce que l'utilisateur est en train de régler.
+                let _ = ordres.send(Request::Lighting);
+                // L'écran a sa vie propre : une commande passée par le socket, ou
+                // un cadran qui a changé de sonde, doit finir par se voir ici.
+                let _ = ordres.send(Request::Screen(ScreenAction::State));
+            },
+        );
+    }
 
     // Les arrivées se vident plus vite que le démon ne les produit : il pousse
     // vingt images par seconde, ce qui ne doit pas s'accumuler dans le canal.
@@ -441,6 +447,7 @@ fn main() -> ExitCode {
     {
         let pupitre = pupitre.clone();
         let faible = fenetre.as_weak();
+        let envoi = ordres.clone();
         vidange.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(30),
@@ -454,6 +461,15 @@ fn main() -> ExitCode {
                 }
                 if redessiner {
                     dessiner(&fenetre, &pupitre);
+                }
+                // La dernière couleur d'une rafale de jauge part ici, et non à
+                // l'horloge d'une seconde : trente millisecondes après le doigt
+                // relevé, le boîtier montre la couleur choisie. C'est ce qui
+                // rend le limiteur invisible à l'usage (#47).
+                let maintenant = pupitre.maintenant();
+                let restante = pupitre.limiteur.borrow_mut().a_envoyer(maintenant);
+                if let Some(couleur) = restante {
+                    appliquer_la_couleur(&pupitre, &envoi, couleur);
                 }
             },
         );
@@ -584,7 +600,18 @@ fn dessiner(fenetre: &Fenetre, pupitre: &Pupitre) {
 }
 
 /// Bouge un axe de la couleur choisie, puis réécrit les quatre lectures.
-fn bouger_un_axe(faible: &Weak<Fenetre>, pupitre: &Pupitre, changer: impl FnOnce(&mut Tsl)) {
+/// Bouge un axe du sélecteur, et **applique** la couleur obtenue.
+///
+/// L'aperçu suivait déjà le doigt ; les LED non, et c'est tout le défaut de
+/// #47. Le limiteur est là parce qu'une jauge traînée émet bien plus vite que le
+/// démon n'encaisse : il laisse passer la première valeur, retient les
+/// suivantes, et garde la dernière — celle sur laquelle le doigt s'arrête.
+fn bouger_un_axe(
+    faible: &Weak<Fenetre>,
+    pupitre: &Pupitre,
+    envoi: &Sender<Request>,
+    changer: impl FnOnce(&mut Tsl),
+) {
     let Some(fenetre) = faible.upgrade() else {
         return;
     };
@@ -592,6 +619,32 @@ fn bouger_un_axe(faible: &Weak<Fenetre>, pupitre: &Pupitre, changer: impl FnOnce
     changer(&mut tsl);
     pupitre.couleur.set(tsl);
     poser_couleur(&fenetre, pupitre);
+
+    let maintenant = pupitre.maintenant();
+    let a_envoyer = pupitre
+        .limiteur
+        .borrow_mut()
+        .proposer(pupitre.rgb(), maintenant);
+    if let Some(couleur) = a_envoyer {
+        appliquer_la_couleur(pupitre, envoi, couleur);
+    }
+}
+
+/// Envoie une couleur là où elle doit aller : la zone visée, ou le boîtier.
+fn appliquer_la_couleur(pupitre: &Pupitre, envoi: &Sender<Request>, couleur: Rgb) {
+    let visee = pupitre.visee.borrow().clone();
+    for requete in requetes_vers_la_cible(visee.as_deref(), couleur, |couleur| {
+        commandes_de_couleur(
+            &pupitre.tableau.borrow(),
+            &pupitre.selection.borrow(),
+            couleur,
+        )
+    }) {
+        let _ = envoi.send(requete);
+    }
+    if visee.is_some() {
+        let _ = envoi.send(Request::ZoneList);
+    }
 }
 
 /// Écrit dans la fenêtre les quatre façons de lire la couleur choisie.
@@ -957,8 +1010,9 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
     {
         let pupitre = pupitre.clone();
         let faible = fenetre.as_weak();
+        let envoi = ordres.clone();
         fenetre.on_teinte_changee(move |valeur| {
-            bouger_un_axe(&faible, &pupitre, |tsl| {
+            bouger_un_axe(&faible, &pupitre, &envoi, |tsl| {
                 tsl.teinte = valeur.clamp(0.0, 359.0);
             });
         });
@@ -966,8 +1020,9 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
     {
         let pupitre = pupitre.clone();
         let faible = fenetre.as_weak();
+        let envoi = ordres.clone();
         fenetre.on_saturation_changee(move |valeur| {
-            bouger_un_axe(&faible, &pupitre, |tsl| {
+            bouger_un_axe(&faible, &pupitre, &envoi, |tsl| {
                 tsl.saturation = valeur.clamp(0.0, 100.0);
             });
         });
@@ -975,8 +1030,9 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
     {
         let pupitre = pupitre.clone();
         let faible = fenetre.as_weak();
+        let envoi = ordres.clone();
         fenetre.on_luminosite_changee(move |valeur| {
-            bouger_un_axe(&faible, &pupitre, |tsl| {
+            bouger_un_axe(&faible, &pupitre, &envoi, |tsl| {
                 tsl.luminosite = valeur.clamp(0.0, 100.0);
             });
         });
@@ -987,21 +1043,13 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         let pupitre = pupitre.clone();
         let envoi = ordres.clone();
         fenetre.on_appliquer_couleur(move || {
-            let couleur = pupitre.rgb();
-            // Une zone visée reçoit la couleur **à la place** du boîtier : c'est
-            // tout l'intérêt d'en avoir une.
-            if let Some(nom) = pupitre.visee.borrow().clone() {
-                let _ = envoi.send(Request::ZoneLight { nom, couleur });
-                let _ = envoi.send(Request::ZoneList);
-                return;
-            }
-            for requete in commandes_de_couleur(
-                &pupitre.tableau.borrow(),
-                &pupitre.selection.borrow(),
-                couleur,
-            ) {
-                let _ = envoi.send(requete);
-            }
+            // Le bouton et le champ hexadécimal ne passent **pas** par le
+            // limiteur : ce sont des gestes uniques, pas une rafale, et les
+            // retenir ferait attendre un clic pour rien. Une zone visée reçoit
+            // la couleur à la place du boîtier — c'est tout l'intérêt d'en
+            // avoir une, et `requetes_vers_la_cible` porte cette règle pour les
+            // deux chemins (#47).
+            appliquer_la_couleur(&pupitre, &envoi, pupitre.rgb());
         });
     }
 

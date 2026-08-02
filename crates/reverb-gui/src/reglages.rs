@@ -322,3 +322,98 @@ impl Poignee {
         self.en_attente.take()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Le limiteur de débit des jauges de couleur (issue #47)
+// ---------------------------------------------------------------------------
+
+/// Délai minimal entre deux couleurs envoyées au démon.
+///
+/// **Cinquante millisecondes, soit vingt par seconde.** C'est la cadence du
+/// démon quand ses quatorze cibles changent — 29,5 ms de trames HID plus 21,6 ms
+/// de blocs SMBus, un plancher **physique** et non logiciel (README). Poser une
+/// couleur unie sur tout le boîtier est exactement ce cas-là : rien ne sert
+/// d'émettre plus vite que le bus ne prend.
+pub const INTERVALLE: Duration = Duration::from_millis(50);
+
+/// Ce qui empêche une jauge traînée d'inonder le démon.
+///
+/// Une jauge émet des dizaines de valeurs par seconde ; le démon en encaisse
+/// vingt quand tout change. Le limiteur laisse passer la première, retient les
+/// suivantes, et **garde la dernière** — c'est elle qui compte, puisque c'est
+/// sur elle que le doigt s'arrête.
+///
+/// Le temps est un **paramètre**, jamais lu depuis l'horloge : c'est ce qui rend
+/// ce type vérifiable sans attendre, et reproductible à l'identique.
+#[derive(Debug, Clone, Default)]
+pub struct Limiteur {
+    /// La dernière couleur réellement envoyée.
+    posee: Option<Rgb>,
+    /// Quand elle est partie. `None` tant que rien n'est parti — un limiteur
+    /// neuf n'a aucune raison de retenir, et faire démarrer chaque glissement
+    /// par un temps mort serait l'impression même que #47 corrige.
+    dernier_envoi: Option<Duration>,
+    /// La couleur proposée pendant la retenue, s'il y en a une.
+    attente: Option<Rgb>,
+}
+
+impl Limiteur {
+    pub fn nouveau() -> Limiteur {
+        Limiteur::default()
+    }
+
+    /// Propose une couleur. Rend celle à envoyer, ou `None` si elle attend.
+    pub fn proposer(&mut self, couleur: Rgb, maintenant: Duration) -> Option<Rgb> {
+        self.attente = Some(couleur);
+        self.a_envoyer(maintenant)
+    }
+
+    /// Ce qu'il reste à envoyer, si l'intervalle le permet.
+    ///
+    /// Respecte l'intervalle **comme `proposer`** : sans cela, « au plus une
+    /// requête par intervalle » ne serait plus une propriété du limiteur mais
+    /// une politesse de son appelant. L'attente n'est jamais perdue pour
+    /// autant — elle attend, et l'horloge d'une seconde de la fenêtre la trouve
+    /// toujours largement au-delà.
+    pub fn a_envoyer(&mut self, maintenant: Duration) -> Option<Rgb> {
+        let couleur = self.attente?;
+        // Déjà posée : il n'y a rien de nouveau à dire. Le matériel n'a pas de
+        // watchdog, réécrire une couleur identique ne fait que consommer du bus.
+        if self.posee == Some(couleur) {
+            self.attente = None;
+            return None;
+        }
+        // `>=` et non `>` : l'intervalle est un délai **minimal** entre deux
+        // envois, et à l'instant précis où il est écoulé la couleur part.
+        if let Some(precedent) = self.dernier_envoi
+            && maintenant.saturating_sub(precedent) < INTERVALLE
+        {
+            return None;
+        }
+        self.attente = None;
+        self.posee = Some(couleur);
+        self.dernier_envoi = Some(maintenant);
+        Some(couleur)
+    }
+}
+
+/// Où va une couleur : à la zone visée, ou au boîtier entier.
+///
+/// ⚠️ **Le repli est une fermeture, et il n'est pas consulté quand une zone est
+/// visée.** C'est ce qui rend la faute de #47 observable — « ça passe tout en
+/// fixe et couleur unie » alors qu'une zone était visée : une implémentation qui
+/// calculerait les deux branches et choisirait ensuite passerait un test
+/// d'égalité, mais pas un test qui compte les appels.
+pub fn requetes_vers_la_cible(
+    zone: Option<&str>,
+    couleur: Rgb,
+    sans_zone: impl FnOnce(Rgb) -> Vec<Request>,
+) -> Vec<Request> {
+    match zone {
+        Some(nom) => vec![Request::ZoneLight {
+            nom: nom.to_owned(),
+            couleur,
+        }],
+        None => sans_zone(couleur),
+    }
+}
