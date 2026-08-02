@@ -182,11 +182,22 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             .iter()
             .map(|nom| FamilleAnimation {
                 nom: SharedString::from(*nom),
-                effet: SharedString::from("…"),
+                effet: SharedString::from(
+                    "Une phrase qui décrit l'effet, sur deux lignes le cas échéant.",
+                ),
                 accepte_couleur: true,
             })
             .collect::<Vec<FamilleAnimation>>(),
     )));
+    interface.set_animations(ModelRc::new(VecModel::from(
+        std::iter::once("aucune")
+            .chain(CATALOGUE.iter().copied())
+            .map(SharedString::from)
+            .collect::<Vec<SharedString>>(),
+    )));
+    // « comete » : rang 1 dans le catalogue, donc 2 dans un menu qui commence
+    // par « aucune ».
+    interface.set_animation_choisie(2);
     interface.set_ventilateurs(ModelRc::new(VecModel::from(vec![
         LigneVentilateur {
             canal: SharedString::from("nzxtsmart2:fan-1"),
