@@ -28,14 +28,20 @@ use std::time::{Duration, Instant};
 
 use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
-use reverb_gui::plan::{Cible, Place, Plan, Vue, halo};
+use reverb_gui::plan::{Cible, Place, Plan, Vue, halo, places_des_ancres, rayon_du_disque};
 use reverb_gui::reglages::{
-    EcranChoisi, Limiteur, Poignee, Reglage, eclairage_lu, requetes_pour_la_couleur,
+    AFFICHAGES, ChoixDeComposition, ChoixDeProfil, EcranChoisi, Limiteur, Poignee, Reglage,
+    directions_offertes, eclairage_lu, requete_d_animation, requete_de_composition,
+    requete_de_profil, requetes_pour_la_couleur,
 };
-use reverb_gui::sondes::{Historique, ModelesNvme, Releve, modeles_nvme, sondes_retenues};
+use reverb_gui::sondes::{
+    Historique, ModelesNvme, Releve, SondeRetenue, modeles_nvme, sondes_retenues,
+};
 use reverb_gui::{
-    FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointHalo, PointLed,
+    AncreEcran, FamilleAnimation, Fenetre, LigneProfil, LigneTemperature, LigneVentilateur,
+    LigneZone, PointHalo, PointLed,
 };
+use reverb_proto::composition::{Ancre, Fond, Source};
 use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine, ScreenAction};
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
 use reverb_proto::{LEDS_PER_FAN, Led, Position, Rgb, Tsl};
@@ -77,6 +83,29 @@ const EFFETS: &[(&str, &str)] = &[
         "braise",
         "Des points chauds apparaissent et retombent au hasard, comme un feu qui couve. Rien ne \
          traverse : ça respire par endroits.",
+    ),
+    (
+        "rotation",
+        "Chaque anneau tourne sur lui-même, à sa place dans le boîtier. Elle suit l'angle relevé \
+         de chaque ventilateur, jamais le numéro de LED — sans quoi le motif tournerait à \
+         l'envers sur les trois du plafond, montés antihoraire.",
+    ),
+    (
+        "thermique",
+        "La couleur suit une sonde : du bleu au vert, à l'orange, au rouge entre 25 et 60 °C. \
+         Une sonde qui ne répond plus fait pulser le boîtier en blanc — aucune température n'est \
+         achromatique, et aucune ne pulse.",
+    ),
+    (
+        "pouls",
+        "Une onde sphérique naît au bloc-pompe et se propage. Deux LED à égale distance de lui \
+         s'allument ensemble, quels que soient leur organe et leur axe.",
+    ),
+    (
+        "scintillement",
+        "Des LED s'allument au hasard, chacune à sa cadence et à sa phase propres. La seule \
+         famille sans période — et sans horloge : le rendu est tiré d'un hachage du numéro de \
+         LED, donc identique ici et dans le démon.",
     ),
 ];
 
@@ -346,6 +375,31 @@ struct Pupitre {
     /// Un modèle ne change pas en cours de session : le relire à chaque seconde
     /// ferait une ouverture de fichier par tour d'horloge pour une constante.
     modeles_nvme: ModelesNvme,
+    /// Les sondes que le panneau offre, dans l'ordre où il les montre.
+    ///
+    /// C'est la table de conversion des menus : l'utilisateur choisit un **rang**
+    /// — « Liquide » —, et c'est ici qu'on retrouve le `slug` que le socket
+    /// attend. Le slug ne remonte jamais jusqu'à l'interface, ce que le cadran
+    /// imposait encore et que l'issue nomme comme un défaut.
+    sondes: RefCell<Vec<SondeRetenue>>,
+    /// Les ambiances enregistrées, telles que `profil list` les rend (#74).
+    profils: RefCell<Vec<String>>,
+    /// Celle que la fenêtre vient de rappeler, s'il y en a une.
+    ///
+    /// ⚠️ **« Rappelée », et non « active ».** Le protocole ne dit pas quel
+    /// profil est actif — `ResponseLine::Profil` ne survit pas à la réponse qui
+    /// la porte, et `status` n'en garde aucune trace. C'est donc une mémoire de
+    /// fenêtre, et elle s'efface dès qu'une commande change l'éclairage : dire
+    /// « actif » d'un profil dont on vient de changer la couleur serait faux, et
+    /// c'est exactement ce qu'on regarderait pour savoir où on en est.
+    rappele: RefCell<Option<String>>,
+    /// Ce que la dalle compose, tel que le démon vient de le décrire (#80).
+    ///
+    /// Le fond en clair — « noir » ou « image <chemin> » —, puis un champ par
+    /// ancre garnie. La fenêtre ne recompose rien : elle range ce qu'on lui dit.
+    composition: RefCell<(String, Vec<(Ancre, String)>)>,
+    /// L'ancre que le panneau de composition édite.
+    ancre_visee: Cell<Ancre>,
 }
 
 impl Pupitre {
@@ -371,7 +425,34 @@ impl Pupitre {
             ecran: RefCell::new(EcranChoisi::default()),
             limiteur: RefCell::new(Limiteur::nouveau()),
             modeles_nvme: modeles_nvme(),
+            sondes: RefCell::new(Vec::new()),
+            profils: RefCell::new(Vec::new()),
+            rappele: RefCell::new(None),
+            composition: RefCell::new((String::new(), Vec::new())),
+            ancre_visee: Cell::new(Ancre::Haut),
         }
+    }
+
+    /// Le `slug` de la sonde retenue à ce rang, s'il y en a une.
+    ///
+    /// `None` tant que la première télémétrie n'est pas arrivée : le menu est
+    /// alors vide, et inventer un slug enverrait au démon une sonde qu'il
+    /// refuserait en donnant la liste — un message juste, pour une faute qui
+    /// n'est pas celle de l'utilisateur.
+    fn sonde_au_rang(&self, rang: i32) -> Option<String> {
+        let rang = usize::try_from(rang).ok()?;
+        self.sondes
+            .borrow()
+            .get(rang)
+            .map(|retenue| retenue.slug.clone())
+    }
+
+    /// La mémoire du profil rappelé s'efface : l'éclairage vient de changer.
+    ///
+    /// Appelé par **tout** ce qui repeint — couleur, animation, zone. Sans cela,
+    /// la pastille resterait allumée sur une ambiance qu'on ne voit plus.
+    fn oublier_le_rappel(&self) {
+        self.rappele.borrow_mut().take();
     }
 
     fn maintenant(&self) -> Duration {
@@ -404,7 +485,14 @@ fn main() -> ExitCode {
 
     fenetre.set_familles(familles());
     fenetre.set_animations(noms_du_menu());
+    fenetre.set_directions(noms_des_directions());
+    fenetre.set_affichages(noms_des_affichages());
+    fenetre.set_rayon_disque(rayon_du_disque());
+    fenetre.set_champs_max(
+        i32::try_from(reverb_proto::composition::Composition::CHAMPS_MAX).unwrap_or(4),
+    );
     fenetre.set_ventilateurs(ModelRc::from(pupitre.canaux.clone()));
+    poser_ancres(&fenetre, &pupitre);
     dessiner(&fenetre, &pupitre);
 
     let (ordres, file) = channel::<Request>();
@@ -423,6 +511,9 @@ fn main() -> ExitCode {
     // piloter un boîtier éteint et son curseur de vitesse resterait muet (#41).
     let _ = ordres.send(Request::Lighting);
     let _ = ordres.send(Request::Screen(ScreenAction::State));
+    // Les ambiances, une fois : la liste ne change que sur un `save` ou un
+    // `drop`, tous deux passés par cette fenêtre, qui la redemande alors.
+    let _ = ordres.send(Request::Profil(reverb_proto::ipc::ProfilAction::List));
 
     // La télémétrie n'a pas de flux : on la redemande, doucement. Une seconde
     // suffit pour des tours par minute, et n'ajoute rien de mesurable au démon.
@@ -495,6 +586,7 @@ enum Retour {
     Image(Vec<(String, Vec<Rgb>)>),
     Zones(Vec<ResponseLine>),
     Ecran(Vec<ResponseLine>),
+    Profils(Vec<ResponseLine>),
 }
 
 /// Le fil qui agit : il attend les réponses du démon à la place de l'interface.
@@ -650,6 +742,10 @@ fn bouger_un_axe(
 /// que le reste du boîtier garde la sienne. C'est `reglages.rs` qui décide — ici
 /// on ne fait que lui fournir de quoi décider, et poster ce qu'il rend.
 fn appliquer_la_couleur(pupitre: &Pupitre, envoi: &Sender<Request>, couleur: Rgb) {
+    // L'éclairage change : la pastille du profil rappelé s'éteint. Une ambiance
+    // dont on vient de repeindre une LED n'est plus celle qu'on a enregistrée,
+    // et la laisser allumée serait dire le contraire.
+    pupitre.oublier_le_rappel();
     let visee = pupitre.visee.borrow().clone();
     let selection = pupitre.selection.borrow();
     let requetes = requetes_pour_la_couleur(
@@ -1181,9 +1277,20 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
             let mut reglage = pupitre.reglage.borrow_mut();
             reglage.animation = Some(nom.to_string());
             relever(&fenetre, &pupitre, &mut reglage);
-            let Some(requete) = reglage.commande() else {
-                return;
+            // ⚠️ `requete_d_animation` et non `Reglage::commande` : elle porte la
+            // sonde, que `thermique` **exige**, et elle **rend le refus** au
+            // lieu de l'avaler. Un `None` silencieux ici, c'est un panneau qui
+            // ne fait rien quand on choisit `thermique` sans sonde.
+            let sonde = pupitre.sonde_au_rang(fenetre.get_sonde_choisie());
+            let requete = match requete_d_animation(&reglage, sonde.as_deref()) {
+                Ok(requete) => requete,
+                Err(refus) => {
+                    fenetre.set_message(SharedString::from(refus.to_string()));
+                    return;
+                }
             };
+            pupitre.oublier_le_rappel();
+            poser_profils(&fenetre, &pupitre);
             if let Some(zone) = pupitre.visee.borrow().clone() {
                 let _ = envoi.send(vers_la_zone(zone, requete));
                 let _ = envoi.send(Request::ZoneList);
@@ -1210,15 +1317,24 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
             let mut reglage = pupitre.reglage.borrow_mut();
             relever(&fenetre, &pupitre, &mut reglage);
             // `None` quand rien ne tourne : bouger la vitesse à vide ne doit
-            // pas démarrer une animation que personne n'a demandée.
-            if let Some(requete) = reglage.commande() {
-                match pupitre.visee.borrow().clone() {
-                    Some(zone) => {
-                        let _ = envoi.send(vers_la_zone(zone, requete));
-                    }
-                    None => {
-                        let _ = envoi.send(requete);
-                    }
+            // pas démarrer une animation que personne n'a demandée. Cette
+            // garde-là reste sur `commande`, qui la porte depuis #32.
+            if reglage.animation.is_none() {
+                return;
+            }
+            let sonde = pupitre.sonde_au_rang(fenetre.get_sonde_choisie());
+            // Un refus est **tu** ici, et c'est voulu : `regler-animation` part
+            // à chaque cran de curseur, et une phrase d'erreur par cran
+            // clignoterait dans le bandeau. Le clic sur la famille, lui, le dit.
+            let Ok(requete) = requete_d_animation(&reglage, sonde.as_deref()) else {
+                return;
+            };
+            match pupitre.visee.borrow().clone() {
+                Some(zone) => {
+                    let _ = envoi.send(vers_la_zone(zone, requete));
+                }
+                None => {
+                    let _ = envoi.send(requete);
                 }
             }
         });
@@ -1253,6 +1369,80 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         });
     }
 
+    // ── Les ambiances ──────────────────────────────────────────────────────
+    //
+    // ⚠️ **Le nom est validé ici, par `NomProfil`** — le type du démon, appelé
+    // par le même code. Laisser passer « ../etc/passwd » ferait revenir le refus
+    // une seconde plus tard, sans rien dire de plus, et le nom serait perdu.
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_rappeler_profil(move |nom| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            match requete_de_profil(&ChoixDeProfil::Rappeler(nom.to_string())) {
+                Ok(requete) => {
+                    *pupitre.rappele.borrow_mut() = Some(nom.to_string());
+                    poser_profils(&fenetre, &pupitre);
+                    let _ = envoi.send(requete);
+                    // Une ambiance emporte l'éclairage, les zones et l'écran :
+                    // les trois se redemandent, sinon la fenêtre montrerait
+                    // l'ambiance d'avant jusqu'au prochain tour d'horloge.
+                    let _ = envoi.send(Request::Lighting);
+                    let _ = envoi.send(Request::ZoneList);
+                    let _ = envoi.send(Request::Screen(ScreenAction::State));
+                }
+                Err(refus) => fenetre.set_message(SharedString::from(refus.to_string())),
+            }
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_enregistrer_profil(move |nom| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            match requete_de_profil(&ChoixDeProfil::Enregistrer(nom.to_string())) {
+                Ok(requete) => {
+                    // Enregistrer, c'est nommer ce qui est à l'écran : la
+                    // pastille s'allume sur ce nom, et le champ se vide — le
+                    // laisser plein ferait réenregistrer au clic suivant.
+                    *pupitre.rappele.borrow_mut() = Some(nom.to_string());
+                    fenetre.set_nouveau_profil(SharedString::new());
+                    let _ = envoi.send(requete);
+                    let _ = envoi.send(Request::Profil(reverb_proto::ipc::ProfilAction::List));
+                }
+                Err(refus) => fenetre.set_message(SharedString::from(refus.to_string())),
+            }
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_oublier_profil(move |nom| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            match requete_de_profil(&ChoixDeProfil::Oublier(nom.to_string())) {
+                Ok(requete) => {
+                    // Oublier celle qu'on venait de rappeler éteint la pastille :
+                    // elle désignerait sinon une ambiance qui n'existe plus.
+                    if pupitre.rappele.borrow().as_deref() == Some(nom.as_str()) {
+                        pupitre.oublier_le_rappel();
+                    }
+                    let _ = envoi.send(requete);
+                    let _ = envoi.send(Request::Profil(reverb_proto::ipc::ProfilAction::List));
+                }
+                Err(refus) => fenetre.set_message(SharedString::from(refus.to_string())),
+            }
+        });
+    }
+
     // ── L'écran du Kraken ──────────────────────────────────────────────────
     //
     // La fenêtre n'ouvre aucun périphérique (ADR-002) : elle envoie un **chemin
@@ -1277,9 +1467,22 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         let faible = fenetre.as_weak();
         fenetre.on_poser_ecran(move |quoi, argument| {
             let argument = argument.trim().to_owned();
+            // Le cadran ne se tape plus : la sonde se choisit sous son **nom
+            // lisible**, et c'est ici qu'on retrouve le slug. Le README relevait
+            // déjà que le cadran imposait `kraken2023elite:coolant-temp`, et que
+            // c'en était un défaut.
             let action = match quoi.as_str() {
                 "rien" => ScreenAction::Off,
-                "cadran" => ScreenAction::Gauge(argument),
+                "cadran" => {
+                    let Some(fenetre) = faible.upgrade() else {
+                        return;
+                    };
+                    ScreenAction::Gauge(
+                        pupitre
+                            .sonde_au_rang(fenetre.get_sonde_choisie())
+                            .unwrap_or_default(),
+                    )
+                }
                 "image" => ScreenAction::Image(argument),
                 "gif" => ScreenAction::Gif(argument),
                 _ => return,
@@ -1304,6 +1507,108 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
             // est justement le cas où l'utilisateur doit voir la vérité (#48).
             pupitre.ecran.borrow_mut().relacher();
             let _ = envoi.send(Request::Screen(action));
+            let _ = envoi.send(Request::Screen(ScreenAction::State));
+        });
+    }
+
+    // ── La composition (#80) ───────────────────────────────────────────────
+    //
+    // ⚠️ **Une commande par changement**, jamais une ligne unique qui porterait
+    // tout : un chemin de fond et un libellé de champ sur la même ligne seraient
+    // ambigus au premier espace. C'est la règle du dernier champ, celle des
+    // profils et des chemins d'image.
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_viser_ancre(move |nom| {
+            let Ok(ancre) = Ancre::depuis_slug(&nom) else {
+                return;
+            };
+            pupitre.ancre_visee.set(ancre);
+            if let Some(fenetre) = faible.upgrade() {
+                // Le champ déjà posé sur cette ancre remplit le formulaire :
+                // cliquer une ancre garnie pour la retrouver vide obligerait à
+                // retaper son libellé pour n'en changer que la sonde.
+                garnir_le_formulaire(&fenetre, &pupitre, ancre);
+                poser_ancres(&fenetre, &pupitre);
+            }
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_poser_fond(move || {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            let chemin = fenetre.get_chemin_fond().trim().to_owned();
+            let fond = if fenetre.get_fond_choisi() == 0 {
+                Fond::Noir
+            } else if chemin.is_empty() {
+                fenetre.set_message(SharedString::from("il manque le chemin du fond"));
+                return;
+            } else {
+                Fond::Image(chemin)
+            };
+            pupitre.ecran.borrow_mut().relacher();
+            let _ = envoi.send(requete_de_composition(&ChoixDeComposition::Fond(fond)));
+            let _ = envoi.send(Request::Screen(ScreenAction::State));
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_poser_champ(move |libelle| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            let libelle = libelle.trim().to_owned();
+            let source = if fenetre.get_source_choisie() == 0 {
+                let Some(sonde) = pupitre.sonde_au_rang(fenetre.get_sonde_choisie()) else {
+                    fenetre.set_message(SharedString::from(
+                        "aucune sonde n'est encore connue — le démon n'a pas répondu",
+                    ));
+                    return;
+                };
+                Source::Temperature {
+                    sonde,
+                    // Un libellé vide n'est pas un libellé blanc : c'est
+                    // l'absence de libellé, et le démon écrit alors le slug.
+                    libelle: (!libelle.is_empty()).then_some(libelle),
+                }
+            } else if libelle.is_empty() {
+                fenetre.set_message(SharedString::from("il manque le texte à afficher"));
+                return;
+            } else {
+                Source::Texte(libelle)
+            };
+            pupitre.ecran.borrow_mut().relacher();
+            let _ = envoi.send(requete_de_composition(&ChoixDeComposition::Champ(
+                pupitre.ancre_visee.get(),
+                source,
+            )));
+            let _ = envoi.send(Request::Screen(ScreenAction::State));
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        fenetre.on_vider_champ(move |_| {
+            pupitre.ecran.borrow_mut().relacher();
+            let _ = envoi.send(requete_de_composition(&ChoixDeComposition::Vide(
+                pupitre.ancre_visee.get(),
+            )));
+            let _ = envoi.send(Request::Screen(ScreenAction::State));
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        fenetre.on_arreter_composition(move || {
+            pupitre.ecran.borrow_mut().relacher();
+            let _ = envoi.send(requete_de_composition(&ChoixDeComposition::Aucune));
             let _ = envoi.send(Request::Screen(ScreenAction::State));
         });
     }
@@ -1445,6 +1750,13 @@ fn repondre(
         Request::Screen(_) => {
             let _ = retours.send(Retour::Ecran(lignes));
         }
+        // ⚠️ `List` seulement. Une réponse à `save`, `load` ou `drop` porte elle
+        // aussi des lignes `profil`, mais elle décrit **une** ambiance : la
+        // prendre pour la liste réduirait la barre à celle-là. Ces trois-là
+        // redemandent la liste eux-mêmes quand elle a pu changer.
+        Request::Profil(reverb_proto::ipc::ProfilAction::List) => {
+            let _ = retours.send(Retour::Profils(lignes));
+        }
         _ => {}
     }
 }
@@ -1535,7 +1847,55 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
             poser_zones(fenetre, pupitre);
             false
         }
+        Retour::Profils(lignes) => {
+            // ⚠️ **Seule la réponse à `profil list` arrive ici** — c'est
+            // `repondre` qui trie, sur la requête et non sur ce qui revient. Une
+            // réponse à `save` porte elle aussi une ligne `profil`, et la
+            // prendre pour une liste réduirait la barre à cette seule ambiance.
+            //
+            // Seul l'état `connu` fait une entrée : `cree`, `ecrase`, `applique`
+            // et `oublie` disent ce qui vient d'arriver à l'une d'elles.
+            *pupitre.profils.borrow_mut() = lignes
+                .iter()
+                .filter_map(|ligne| match ligne {
+                    ResponseLine::Profil { etat, nom } if etat == "connu" => Some(nom.clone()),
+                    _ => None,
+                })
+                .collect();
+            poser_profils(fenetre, pupitre);
+            false
+        }
         Retour::Ecran(lignes) => {
+            // La composition d'abord : elle vit sur les lignes qui **suivent**
+            // `screen`, et le disque des ancres doit la montrer même quand la
+            // poignée de #48 retient le reste du panneau.
+            if lignes
+                .iter()
+                .any(|ligne| matches!(ligne, ResponseLine::Screen { .. }))
+            {
+                let fond = lignes
+                    .iter()
+                    .find_map(|ligne| match ligne {
+                        ResponseLine::Layout { fond } => Some(fond.clone()),
+                        _ => None,
+                    })
+                    // Un `screen` **sans** ligne `layout` dit que la dalle n'en
+                    // porte pas : leur absence *est* l'information (#80). Garder
+                    // la composition d'avant montrerait des champs disparus.
+                    .unwrap_or_default();
+                let champs = lignes
+                    .iter()
+                    .filter_map(|ligne| match ligne {
+                        ResponseLine::LayoutChamp { ancre, source } => Ancre::depuis_slug(ancre)
+                            .ok()
+                            .map(|ancre| (ancre, source.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                *pupitre.composition.borrow_mut() = (fond, champs);
+                poser_ancres(fenetre, pupitre);
+            }
+
             for ligne in &lignes {
                 let ResponseLine::Screen {
                     luminosite,
@@ -1560,6 +1920,24 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
                     let rang = i32::try_from(choisi.affichage).unwrap_or(0);
                     fenetre.set_affichage_choisi(rang);
                     fenetre.set_argument_ecran(SharedString::from(choisi.argument.clone()));
+                    // Le cadran n'a plus de champ de texte : sa sonde se
+                    // retrouve dans le menu, par son slug.
+                    //
+                    // ⚠️ **Le menu n'offre que les sondes retenues** — quatre
+                    // familles sur seize (#51). Un cadran posé par le socket sur
+                    // une autre laisse donc le menu où il est, et c'est le
+                    // bandeau « ÉCRAN — gauge:… » qui dit la vérité. Le déplacer
+                    // au hasard serait pire : le clic suivant changerait de
+                    // sonde sans qu'on l'ait demandé.
+                    if let Some(rang) = pupitre
+                        .sondes
+                        .borrow()
+                        .iter()
+                        .position(|retenue| retenue.slug == choisi.argument)
+                        .and_then(|rang| i32::try_from(rang).ok())
+                    {
+                        fenetre.set_sonde_choisie(rang);
+                    }
                 }
             }
             false
@@ -1634,7 +2012,21 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
         // ⚠️ **Le démon rend ses seize sondes, la fenêtre en montre quatre.**
         // C'est un choix d'affichage, pas un filtre de relevé : `status` les
         // rend toutes et le cadran de l'écran les vise toutes (issue #51).
-        for retenue in sondes_retenues(&historique.sondes(), &pupitre.modeles_nvme) {
+        let retenues = sondes_retenues(&historique.sondes(), &pupitre.modeles_nvme);
+        // ⚠️ **Le menu des sondes se pose une seule fois**, quand la liste
+        // change vraiment. Le réécrire à chaque seconde recréerait le
+        // `ComboBox` sous les doigts, et remettrait son rang à zéro — le même
+        // défaut que celui des poignées de ventilateur, par une autre porte.
+        if *pupitre.sondes.borrow() != retenues {
+            fenetre.set_sondes_lisibles(ModelRc::new(VecModel::from(
+                retenues
+                    .iter()
+                    .map(|retenue| SharedString::from(retenue.libelle.clone()))
+                    .collect::<Vec<SharedString>>(),
+            )));
+            *pupitre.sondes.borrow_mut() = retenues.clone();
+        }
+        for retenue in retenues {
             let sonde = retenue.slug;
             let lisible = matches!(historique.dernier(&sonde), Some(Releve::Valeur(_)));
             temperatures.push(LigneTemperature {
@@ -1731,19 +2123,156 @@ fn lire_couleur(texte: &str) -> Option<Rgb> {
 fn familles() -> ModelRc<FamilleAnimation> {
     let familles: Vec<FamilleAnimation> = CATALOGUE
         .iter()
-        .map(|nom| FamilleAnimation {
-            nom: SharedString::from(*nom),
-            effet: SharedString::from(
-                EFFETS
-                    .iter()
-                    .find(|(famille, _)| famille == nom)
-                    .map_or("", |(_, effet)| effet),
-            ),
-            accepte_couleur: Animation::par_nom(nom)
-                .is_ok_and(|animation| animation.parametres_acceptes().contains(&"couleur")),
+        .map(|nom| {
+            let acceptees = Animation::par_nom(nom)
+                .map_or(&[] as &[&str], |animation| animation.parametres_acceptes());
+            FamilleAnimation {
+                nom: SharedString::from(*nom),
+                effet: SharedString::from(
+                    EFFETS
+                        .iter()
+                        .find(|(famille, _)| famille == nom)
+                        .map_or("", |(_, effet)| effet),
+                ),
+                accepte_couleur: acceptees.contains(&"couleur"),
+                // ⚠️ **C'est cette clé qui décide de montrer le menu des
+                // directions**, et non une liste de noms écrite ici : `rotation`,
+                // `pouls`, `scintillement` et `thermique` la refusent, et la leur
+                // donner ferait rejeter l'`animate` **entier** — pas seulement
+                // la clé. Le catalogue est le seul juge.
+                suit_une_direction: acceptees.contains(&"direction"),
+                exige_une_sonde: Animation::par_nom(nom)
+                    .is_ok_and(|animation| animation.parametres_obligatoires().contains(&"sonde")),
+            }
         })
         .collect();
     ModelRc::new(VecModel::from(familles))
+}
+
+/// Les huit directions, sous le mot qui les écrit sur le socket.
+///
+/// ⚠️ **L'ordre est celui de `Direction::ALL`**, parce que le rang choisi dans
+/// le menu *est* ce qui part au démon. Une liste écrite dans le `.slint` serait
+/// restée à six quand #75 en a livré deux de plus, et rien ne l'aurait dit.
+fn noms_des_directions() -> ModelRc<SharedString> {
+    let noms: Vec<SharedString> = directions_offertes()
+        .into_iter()
+        .map(|direction| SharedString::from(direction.slug()))
+        .collect();
+    ModelRc::new(VecModel::from(noms))
+}
+
+/// Les cinq affichages d'écran, dans l'ordre où `EcranChoisi` les range.
+fn noms_des_affichages() -> ModelRc<SharedString> {
+    let noms: Vec<SharedString> = AFFICHAGES.iter().copied().map(SharedString::from).collect();
+    ModelRc::new(VecModel::from(noms))
+}
+
+/// Les ambiances, et laquelle vient d'être rappelée.
+fn poser_profils(fenetre: &Fenetre, pupitre: &Pupitre) {
+    let rappele = pupitre.rappele.borrow().clone();
+    let lignes: Vec<LigneProfil> = pupitre
+        .profils
+        .borrow()
+        .iter()
+        .map(|nom| LigneProfil {
+            nom: SharedString::from(nom.clone()),
+            rappele: rappele.as_deref() == Some(nom.as_str()),
+        })
+        .collect();
+    fenetre.set_profils(ModelRc::new(VecModel::from(lignes)));
+}
+
+/// Les cinq ancres de la dalle, garnies de ce que le démon vient de décrire.
+///
+/// ⚠️ **Les places viennent de `Ancre::boite()`** — les boîtes du démon, celles
+/// qu'il assombrit et sur lesquelles il écrit. La fenêtre ne les recalcule pas,
+/// exactement comme elle ne recalcule pas les images du boîtier.
+fn poser_ancres(fenetre: &Fenetre, pupitre: &Pupitre) {
+    let composition = pupitre.composition.borrow();
+    let visee = pupitre.ancre_visee.get();
+    let lignes: Vec<AncreEcran> = places_des_ancres()
+        .into_iter()
+        .map(|place| {
+            let porte = composition
+                .1
+                .iter()
+                .find(|(ancre, _)| *ancre == place.ancre)
+                .map(|(_, source)| lisible(source));
+            AncreEcran {
+                nom: SharedString::from(place.ancre.slug()),
+                porte: SharedString::from(porte.clone().unwrap_or_default()),
+                x: place.x,
+                y: place.y,
+                largeur: place.largeur,
+                hauteur: place.hauteur,
+                occupee: porte.is_some(),
+                choisie: place.ancre == visee,
+            }
+        })
+        .collect();
+    fenetre.set_champs_poses(i32::try_from(composition.1.len()).unwrap_or(0));
+    fenetre.set_ancre_visee(SharedString::from(visee.slug()));
+    fenetre.set_ancres(ModelRc::new(VecModel::from(lignes)));
+}
+
+/// Ce qu'un champ montre, en une étiquette qui tient dans une ancre de 40 px.
+///
+/// La source arrive telle que le protocole l'écrit — `temp <slug> <libellé>` ou
+/// `texte <libellé>`. Le libellé prime quand il existe : c'est précisément ce
+/// pour quoi il existe, `kraken2023elite:coolant-temp` faisant vingt-huit
+/// caractères là où on en lit dix.
+fn lisible(source: &str) -> String {
+    let mut mots = source.split_whitespace();
+    match mots.next() {
+        Some("temp") => {
+            let slug = mots.next().unwrap_or_default();
+            let libelle: Vec<&str> = mots.collect();
+            if libelle.is_empty() {
+                slug.to_owned()
+            } else {
+                libelle.join(" ")
+            }
+        }
+        Some("texte") => source
+            .split_once(char::is_whitespace)
+            .map_or_else(String::new, |(_, reste)| reste.trim().to_owned()),
+        _ => source.to_owned(),
+    }
+}
+
+/// Remet dans le formulaire ce que l'ancre visée porte déjà.
+///
+/// Cliquer une ancre garnie pour la retrouver vide obligerait à retaper son
+/// libellé pour n'en changer que la sonde — et c'est le geste le plus courant.
+fn garnir_le_formulaire(fenetre: &Fenetre, pupitre: &Pupitre, ancre: Ancre) {
+    let composition = pupitre.composition.borrow();
+    let Some((_, source)) = composition.1.iter().find(|(porte, _)| *porte == ancre) else {
+        return;
+    };
+    let mut mots = source.split_whitespace();
+    match mots.next() {
+        Some("temp") => {
+            fenetre.set_source_choisie(0);
+            let slug = mots.next().unwrap_or_default().to_owned();
+            let libelle: Vec<&str> = mots.collect();
+            fenetre.set_libelle_champ(SharedString::from(libelle.join(" ")));
+            if let Some(rang) = pupitre
+                .sondes
+                .borrow()
+                .iter()
+                .position(|retenue| retenue.slug == slug)
+                .and_then(|rang| i32::try_from(rang).ok())
+            {
+                fenetre.set_sonde_choisie(rang);
+            }
+        }
+        Some("texte") => {
+            fenetre.set_source_choisie(1);
+            fenetre.set_libelle_champ(SharedString::from(lisible(source)));
+        }
+        _ => {}
+    }
 }
 
 /// Le nom que le menu déroulant porte au rang zéro.

@@ -40,8 +40,9 @@
 //! l'avant du boîtier et lui a laissé le milieu.
 
 use reverb_anim::{Geometrie, Point};
+use reverb_proto::composition::Ancre;
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
-use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
+use reverb_proto::{LEDS_PER_FAN, Position, Rgb, screen};
 
 /// Nombre de LED d'un ventilateur, comme indice.
 const LEDS: usize = LEDS_PER_FAN as usize;
@@ -1349,4 +1350,60 @@ impl Plan {
         }
         sortie
     }
+}
+
+// ---------------------------------------------------------------------------
+// Les cinq ancres de la dalle (issue #76, protocole de #80)
+// ---------------------------------------------------------------------------
+
+/// Une ancre de composition, ramenée au carré unité.
+///
+/// Les mêmes quatre nombres que [`reverb_proto::composition::Boite`], divisés
+/// par le côté du tampon — le `.slint` place ses rectangles en fraction de sa
+/// largeur, comme il place les LED.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlaceAncre {
+    pub ancre: Ancre,
+    pub x: f32,
+    pub y: f32,
+    pub largeur: f32,
+    pub hauteur: f32,
+}
+
+/// Où les cinq ancres se posent sur la dalle, dans le carré unité.
+///
+/// ⚠️ **Ces places viennent de `Ancre::boite()` — les boîtes du démon**, celles
+/// qu'il assombrit et sur lesquelles il écrit. Ce n'est donc pas une seconde
+/// implémentation qui divergerait à la première correction : c'est la même
+/// donnée, lue de l'autre côté du socket. La règle de #52 pour la maquette,
+/// appliquée à la dalle.
+pub fn places_des_ancres() -> Vec<PlaceAncre> {
+    let cote = f32::from(screen::WIDTH);
+    Ancre::TOUTES
+        .into_iter()
+        .map(|ancre| {
+            let boite = ancre.boite();
+            PlaceAncre {
+                ancre,
+                x: f32::from(boite.x) / cote,
+                y: f32::from(boite.y) / cote,
+                largeur: f32::from(boite.largeur) / cote,
+                hauteur: f32::from(boite.hauteur) / cote,
+            }
+        })
+        .collect()
+}
+
+/// Le rayon du disque visible, en fraction du côté du tampon.
+///
+/// ⚠️ **La dalle est ronde, le tampon est carré** (`SPEC-KRAKEN-LCD` §2.1.1,
+/// observé le 2026-08-08) : 21 % de ce qu'on transmet ne s'affiche nulle part,
+/// et rien ne le signale — le contrôleur accepte l'image entière. Composer sur
+/// un carré, ce serait juger la mise en page sur une surface qui n'existe pas.
+///
+/// Le rayon exact reste 🔶 — la mire de #77 le tranchera. Le prendre de
+/// `screen` plutôt que de l'écrire dans le `.slint` fait qu'il n'y aura ce
+/// jour-là qu'une constante à corriger.
+pub fn rayon_du_disque() -> f32 {
+    f32::from(screen::VISIBLE_DISC_RADIUS) / f32::from(screen::WIDTH)
 }

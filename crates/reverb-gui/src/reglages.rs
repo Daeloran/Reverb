@@ -33,9 +33,10 @@
 
 use std::time::Duration;
 
-use reverb_anim::{Animation, Direction};
-use reverb_proto::ipc::{Request, ResponseLine};
-use reverb_proto::{Led, Rgb};
+use reverb_anim::{Animation, CATALOGUE, Direction, ReglageInvalide, Reglages};
+use reverb_proto::composition::{Ancre, Fond, Source};
+use reverb_proto::ipc::{ProfilAction, Request, ResponseLine, ScreenAction};
+use reverb_proto::{Led, NomInvalide, NomProfil, Rgb};
 
 /// Combien de temps une consigne l'emporte sur la mesure après le relâchement.
 ///
@@ -554,11 +555,169 @@ pub fn requetes_pour_la_couleur(
 }
 
 // ---------------------------------------------------------------------------
+// Ce que la fenêtre offre, et ce qu'un choix envoie (issue #76)
+// ---------------------------------------------------------------------------
+
+/// Les familles d'animation que la fenêtre propose.
+///
+/// [`CATALOGUE`] tel quel, et c'est tout l'intérêt : une liste recopiée dans le
+/// `.slint` serait restée à six quand #75 en a livré quatre de plus, sans
+/// qu'aucun message ne le dise — le grief qui ouvre l'issue.
+pub fn familles_offertes() -> Vec<&'static str> {
+    CATALOGUE.to_vec()
+}
+
+/// Les directions que la fenêtre propose, dans l'ordre de [`Direction::ALL`].
+///
+/// ⚠️ **L'ordre est le contrat**, pas une commodité : [`Reglage::direction`] est
+/// un **rang** dans cette liste. Un ordre à soi ferait choisir une direction
+/// pour une autre, et sans le moindre message — les cent vingt-quatre couleurs
+/// rendues resteraient parfaitement plausibles.
+pub fn directions_offertes() -> Vec<Direction> {
+    Direction::ALL.to_vec()
+}
+
+/// La requête qui pose ce que le panneau d'animation affiche.
+///
+/// Deux différences avec [`Reglage::commande`], et elles font le tour de #76 :
+///
+/// - **la sonde entre par un paramètre.** `thermique` l'exige, et `Reglage`
+///   n'a pas à porter un réglage que neuf familles sur dix refusent — lui
+///   ajouter un cinquième champ casserait par ailleurs les littéraux de deux
+///   fichiers de tests d'intention voisins ;
+/// - **le refus est rendu, jamais avalé.** `commande` répond `None`, ce qui
+///   convient à un curseur qu'on bouge à vide et pas du tout à un clic :
+///   `thermique` sans sonde laisserait un panneau qui ne fait rien, exactement
+///   le défaut de #32.
+///
+/// Les clés portées **et** le refus viennent tous deux de `reverb-anim`, par le
+/// même code que le démon : la fenêtre refuse ce que le démon refuserait,
+/// plutôt que par une liste recopiée qui divergerait à la prochaine famille.
+pub fn requete_d_animation(
+    reglage: &Reglage,
+    sonde: Option<&str>,
+) -> Result<Request, ReglageInvalide> {
+    // « aucune » est un geste, pas une absence d'information : c'est le seul
+    // moyen d'éteindre, et le protocole n'en a qu'un.
+    let Some(nom) = reglage.animation.as_deref() else {
+        return Ok(Request::Animate {
+            name: None,
+            reglages: Vec::new(),
+        });
+    };
+    let animation = Animation::par_nom(nom).map_err(|erreur| ReglageInvalide {
+        cle: "animation".to_owned(),
+        raison: erreur.to_string(),
+        acceptees: &[],
+    })?;
+
+    let acceptees = animation.parametres_acceptes();
+    // Le rang n'est vérifié que s'il va partir. Refuser sur lui pour `pouls`,
+    // qui ne suit aucune direction, bloquerait un panneau parfaitement valide.
+    let direction = if acceptees.contains(&"direction") {
+        *Direction::ALL
+            .get(reglage.direction)
+            .ok_or_else(|| ReglageInvalide {
+                cle: "direction".to_owned(),
+                raison: format!(
+                    "le rang {} ne désigne aucune des {} directions",
+                    reglage.direction,
+                    Direction::ALL.len()
+                ),
+                acceptees,
+            })?
+    } else {
+        Reglages::default().direction
+    };
+
+    // `reglages_ecrits` ne garde que les clés acceptées : une sonde choisie
+    // pour `thermique` ne suit pas jusqu'à `comete`, où elle ferait refuser la
+    // commande **entière**.
+    let reglages = animation.reglages_ecrits(&Reglages {
+        couleur: reglage.couleur,
+        vitesse: reglage.vitesse,
+        direction,
+        sonde: sonde.map(str::to_owned),
+    });
+    // Relu par le juge d'en face avant de partir : c'est lui qui nomme la sonde
+    // manquante, et le dire ici épargne un aller-retour pour l'apprendre.
+    animation.reglages(&reglages)?;
+
+    Ok(Request::Animate {
+        name: Some(nom.to_owned()),
+        reglages,
+    })
+}
+
+/// Ce qu'un geste sur la barre des profils demande (#74).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChoixDeProfil {
+    Lister,
+    Enregistrer(String),
+    Rappeler(String),
+    Oublier(String),
+}
+
+/// La requête qu'un geste de la barre des profils produit.
+///
+/// ⚠️ **Le nom est validé ici, par [`NomProfil`] — le type du démon.** Une
+/// fenêtre qui laisserait passer « ../etc/passwd » se ferait refuser à
+/// l'arrivée, une seconde plus tard, par un message qui ne dirait rien de plus.
+/// Le refuser tout de suite, par le même code, c'est la garantie de #74 tenue
+/// des deux côtés du socket plutôt que d'un seul.
+pub fn requete_de_profil(choix: &ChoixDeProfil) -> Result<Request, NomInvalide> {
+    Ok(Request::Profil(match choix {
+        ChoixDeProfil::Lister => ProfilAction::List,
+        ChoixDeProfil::Enregistrer(nom) => ProfilAction::Save(NomProfil::nouveau(nom)?),
+        ChoixDeProfil::Rappeler(nom) => ProfilAction::Load(NomProfil::nouveau(nom)?),
+        ChoixDeProfil::Oublier(nom) => ProfilAction::Drop(NomProfil::nouveau(nom)?),
+    }))
+}
+
+/// Ce qu'un geste sur le panneau de composition demande (#80).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChoixDeComposition {
+    /// Ce que la dalle compose en ce moment.
+    Etat,
+    Fond(Fond),
+    Champ(Ancre, Source),
+    Vide(Ancre),
+    /// Retour à l'affichage simple.
+    Aucune,
+}
+
+/// La requête qu'un geste du panneau de composition produit.
+///
+/// Rien à refuser ici, et c'est voulu : le chemin d'un fond et le libellé d'un
+/// champ sont **les derniers champs de leur ligne** (#80), donc rien n'y est
+/// ambigu. Ce qui pourrait être refusé — une sonde inconnue, un cinquième champ
+/// — ne l'est que par le démon, seul à savoir quelles sondes existent et ce que
+/// la composition porte déjà.
+pub fn requete_de_composition(choix: &ChoixDeComposition) -> Request {
+    Request::Screen(match choix {
+        ChoixDeComposition::Etat => ScreenAction::LayoutState,
+        ChoixDeComposition::Fond(fond) => ScreenAction::LayoutFond(fond.clone()),
+        ChoixDeComposition::Champ(ancre, source) => {
+            ScreenAction::LayoutChamp(*ancre, source.clone())
+        }
+        ChoixDeComposition::Vide(ancre) => ScreenAction::LayoutVide(*ancre),
+        ChoixDeComposition::Aucune => ScreenAction::LayoutOff,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Ce que la fenêtre compose pour l'écran (issue #48)
 // ---------------------------------------------------------------------------
 
 /// Les affichages du menu de l'écran, dans l'ordre.
-const AFFICHAGES: [&str; 4] = ["rien", "cadran", "image", "gif"];
+///
+/// « composition » est arrivée avec #80, et elle est la seule dont l'argument ne
+/// tient pas sur une ligne : un fond et jusqu'à quatre champs. Le démon la
+/// nomme d'un seul jeton, `layout`, et détaille sur les lignes qui suivent.
+pub const AFFICHAGES: [&str; 5] = ["rien", "cadran", "image", "gif", "composition"];
+
+/// Le rang de « composition » dans [`AFFICHAGES`].
+pub const COMPOSITION: usize = 4;
 
 /// Le rang de « rien », qui est aussi le repli.
 ///
@@ -622,9 +781,14 @@ impl EcranChoisi {
         }
 
         let (quoi, argument) = affichage.split_once(':').unwrap_or((affichage, ""));
-        // Le démon écrit `gauge:` là où la fenêtre affiche « cadran » : le mot
-        // du protocole d'un côté, celui de l'utilisateur de l'autre.
-        let attendu = if quoi == "gauge" { "cadran" } else { quoi };
+        // Le démon écrit `gauge:` là où la fenêtre affiche « cadran », et
+        // `layout` là où elle affiche « composition » : le mot du protocole d'un
+        // côté, celui de l'utilisateur de l'autre.
+        let attendu = match quoi {
+            "gauge" => "cadran",
+            "layout" => "composition",
+            autre => autre,
+        };
         // ⚠️ Un affichage inconnu retombe sur « rien » **et vide l'argument** :
         // laisser un argument orphelin sous « rien » afficherait un chemin que
         // plus rien n'explique.
