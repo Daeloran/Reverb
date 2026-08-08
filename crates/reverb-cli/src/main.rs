@@ -741,6 +741,13 @@ fn afficher_reponse_d_ecran(lignes: &[ResponseLine]) -> Result<(), String> {
                 println!("  luminosité : {luminosite} %");
                 println!("  affichage  : {affichage}");
             }
+            // Une composition (#80) : le fond, puis un champ par ligne. Les
+            // afficher ici plutôt que de les taire — « affichage : layout » ne
+            // dit pas ce que la dalle montre, et c'est la question posée.
+            ResponseLine::Layout { fond } => println!("  fond       : {fond}"),
+            ResponseLine::LayoutChamp { ancre, source } => {
+                println!("  champ {ancre:<7}: {source}");
+            }
             ResponseLine::Error { message } => return Err(message.clone()),
             _ => {}
         }

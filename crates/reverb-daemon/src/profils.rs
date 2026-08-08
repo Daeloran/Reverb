@@ -157,14 +157,16 @@ fn section_de(premier: &str) -> Option<Section> {
     match premier {
         "ventilateur" | "barrette" | "animation" => Some(Section::Eclairage),
         "zone" | "light" | "anim" => Some(Section::Zones),
-        "brightness" | "affiche" => Some(Section::Ecran),
+        // `fond` et `champ` sont les lignes d'une composition d'écran (#80) :
+        // elles suivent `affiche layout`, et n'apparaissent jamais sans lui.
+        "brightness" | "affiche" | "fond" | "champ" => Some(Section::Ecran),
         _ => None,
     }
 }
 
 /// Les mots attendus, pour un refus qui dit quoi écrire.
 const MOTS_CONNUS: &str =
-    "ventilateur, barrette, animation, zone, light, anim, brightness, affiche";
+    "ventilateur, barrette, animation, zone, light, anim, brightness, affiche, fond, champ";
 
 /// Une ligne d'entrée : ni vide, ni commentaire.
 fn est_une_entree(ligne: &str) -> bool {
@@ -184,7 +186,7 @@ fn cle_de(jetons: &[&str]) -> String {
         // Ces entrées se répètent légitimement, une par cible : c'est leur
         // second mot qui les distingue.
         [
-            "ventilateur" | "barrette" | "zone" | "light" | "anim",
+            "ventilateur" | "barrette" | "zone" | "light" | "anim" | "champ",
             nom,
             ..,
         ] => {
@@ -355,10 +357,12 @@ fn blanchir(lignes: &[&str], sections: &[Option<Section>], voulue: Section) -> S
     texte
 }
 
-/// Les deux lignes d'écran, ou leur absence.
+/// Les lignes d'écran, ou leur absence.
 ///
-/// Elles vont ensemble : une luminosité sans affichage ne dit pas ce que la
-/// dalle montre, et un affichage sans luminosité ne dit pas s'il sera visible.
+/// `brightness` et `affiche` vont ensemble : une luminosité sans affichage ne
+/// dit pas ce que la dalle montre, et un affichage sans luminosité ne dit pas
+/// s'il sera visible. Une **composition** y ajoute son `fond` et ses `champ`
+/// (#80), qui suivent dans l'ordre où le fichier les porte.
 fn decoder_ecran(brut: &[(usize, &str)]) -> Result<Option<EtatEcran>, ProfilInvalide> {
     if brut.is_empty() {
         return Ok(None);
@@ -381,16 +385,38 @@ fn decoder_ecran(brut: &[(usize, &str)]) -> Result<Option<EtatEcran>, ProfilInva
                 .to_owned(),
     })?;
 
-    // `Etat::decoder` est positionnel — luminosité en 1, affichage en 2. On le
-    // nourrit dans cet ordre, puis on **remet le vrai numéro de ligne** : celui
-    // de l'extrait n'a aucun sens pour qui ouvre le fichier.
-    EtatEcran::decoder(&format!("{luminosite}\n{affichage}\n"))
+    // Le bloc d'une composition, dans l'ordre du fichier. Vide quand il n'y en a
+    // pas — un profil d'avant #80 n'en porte aucune, et se relit tel quel.
+    let bloc: Vec<&(usize, &str)> = brut
+        .iter()
+        .filter(|(_, ligne)| {
+            matches!(
+                ligne.split_whitespace().next(),
+                Some("fond") | Some("champ")
+            )
+        })
+        .collect();
+
+    // `Etat::decoder` est positionnel — luminosité en 1, affichage en 2, puis la
+    // composition. On le nourrit dans cet ordre, puis on **remet le vrai numéro
+    // de ligne** : celui de l'extrait n'a aucun sens pour qui ouvre le fichier.
+    let mut texte = format!("{luminosite}\n{affichage}\n");
+    for (_, ligne) in &bloc {
+        texte.push_str(ligne);
+        texte.push('\n');
+    }
+
+    EtatEcran::decoder(&texte)
         .map(Some)
         .map_err(|erreur| ProfilInvalide {
-            ligne: if erreur.ligne == 1 {
-                *rang_luminosite
-            } else {
-                *rang_affichage
+            ligne: match erreur.ligne {
+                1 => *rang_luminosite,
+                2 => *rang_affichage,
+                // Au-delà, c'est une ligne du bloc : son rang dans le fichier
+                // est celui qu'elle y occupe, et non le troisième.
+                rang => bloc
+                    .get(rang - 3)
+                    .map_or(*rang_affichage, |(fichier, _)| *fichier),
             },
             raison: erreur.raison,
         })

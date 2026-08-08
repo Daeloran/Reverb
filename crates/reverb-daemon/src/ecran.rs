@@ -38,6 +38,7 @@ use std::time::Duration;
 use image::AnimationDecoder;
 use image::ImageFormat;
 use image::codecs::gif::GifDecoder;
+use reverb_proto::composition::{Ancre, Boite, Composition, Fond};
 use reverb_proto::screen;
 
 use crate::persistance::ecrire;
@@ -56,6 +57,8 @@ pub enum Affichage {
     Image(String),
     /// Une animation, jouée en boucle.
     Gif(String),
+    /// Un fond, et jusqu'à quatre informations posées dessus (#80).
+    Composition(Composition),
 }
 
 /// L'état de l'écran : sa luminosité et ce qu'il montre.
@@ -100,14 +103,24 @@ impl Etat {
     /// un, en commentaires ; celui-ci ne peut pas, parce que [`Etat::decoder`]
     /// nomme la ligne fautive et qu'un en-tête décalerait les rangs qu'il
     /// annonce. Un fichier de deux lignes se relit sans mode d'emploi.
+    ///
+    /// Une **composition** en ajoute : `affiche layout`, puis le bloc que
+    /// `Composition::encoder` produit. C'est la seule nature d'affichage qui ne
+    /// tienne pas sur une ligne, et l'y forcer aurait demandé d'inventer un
+    /// échappement là où le reste du projet n'en a jamais eu besoin.
     pub fn encoder(&self) -> String {
         let affichage = match &self.affichage {
             Affichage::Rien => "rien".to_owned(),
             Affichage::Cadran(sonde) => format!("gauge {sonde}"),
             Affichage::Image(chemin) => format!("image {chemin}"),
             Affichage::Gif(chemin) => format!("gif {chemin}"),
+            Affichage::Composition(_) => "layout".to_owned(),
         };
-        format!("brightness {}\naffiche {affichage}\n", self.luminosite)
+        let mut texte = format!("brightness {}\naffiche {affichage}\n", self.luminosite);
+        if let Affichage::Composition(composition) = &self.affichage {
+            texte.push_str(&composition.encoder());
+        }
+        texte
     }
 
     /// L'inverse, strict, en nommant la ligne fautive.
@@ -125,22 +138,43 @@ impl Etat {
         })?;
         let affichage = affichage_de(seconde)?;
 
-        // « L'inverse, **strict** » : une ligne surnuméraire signale un fichier
-        // d'une version qu'on ne sait pas lire, et l'avaler ferait repartir le
-        // démon sur un état amputé de ce qu'il n'a pas compris.
-        if lignes.len() > 2 {
-            return Err(EtatInvalide {
-                ligne: 3,
-                raison: format!(
-                    "ligne de trop : le fichier d'écran en a deux, celle-ci est la {}e",
-                    lignes.len()
-                ),
+        // Un affichage simple s'arrête à la seconde ligne. « L'inverse,
+        // **strict** » : une ligne surnuméraire signale un fichier d'une version
+        // qu'on ne sait pas lire, et l'avaler ferait repartir le démon sur un
+        // état amputé de ce qu'il n'a pas compris.
+        //
+        // ⚠️ **Une composition, elle, en attend.** C'est ce qui rend un fichier
+        // d'avant #80 lisible tel quel : il ne dit jamais « layout », donc il ne
+        // porte jamais de bloc, donc il se relit comme avant.
+        if !matches!(affichage, Affichage::Composition(_)) {
+            if lignes.len() > 2 {
+                return Err(EtatInvalide {
+                    ligne: 3,
+                    raison: format!(
+                        "ligne de trop : le fichier d'écran en a deux, celle-ci est la {}e",
+                        lignes.len()
+                    ),
+                });
+            }
+            return Ok(Etat {
+                luminosite,
+                affichage,
             });
         }
 
+        // `Composition::decoder` compte ses lignes depuis son propre début : il
+        // ne sait pas qu'il est le troisième d'un fichier, et lui apprendre à le
+        // savoir le rendrait dépendant de qui l'écrit — le profil l'écrit
+        // ailleurs. Le décalage se fait donc ici, où il est connu.
+        let bloc = lignes[2..].join("\n");
+        let composition = Composition::decoder(&bloc).map_err(|erreur| EtatInvalide {
+            ligne: erreur.ligne + 2,
+            raison: erreur.raison,
+        })?;
+
         Ok(Etat {
             luminosite,
-            affichage,
+            affichage: Affichage::Composition(composition),
         })
     }
 }
@@ -200,7 +234,8 @@ fn affichage_de(ligne: &str) -> Result<Affichage, EtatInvalide> {
         Some("affiche") => {}
         Some(autre) => {
             return Err(refus(format!(
-                "« {autre} » inconnu : la seconde ligne est « affiche <rien|gauge|image|gif> »"
+                "« {autre} » inconnu : la seconde ligne est « affiche \
+                 <rien|gauge|image|gif|layout> »"
             )));
         }
         None => {
@@ -213,7 +248,7 @@ fn affichage_de(ligne: &str) -> Result<Affichage, EtatInvalide> {
     }
     let Some(quoi) = mots.next() else {
         return Err(refus(
-            "« affiche » attend rien, gauge, image ou gif".to_owned(),
+            "« affiche » attend rien, gauge, image, gif ou layout".to_owned(),
         ));
     };
     if quoi == "rien" {
@@ -224,6 +259,20 @@ fn affichage_de(ligne: &str) -> Result<Affichage, EtatInvalide> {
             ));
         }
         return Ok(Affichage::Rien);
+    }
+    if quoi == "layout" {
+        if mots.next().is_some() {
+            return Err(refus(
+                "« affiche layout » n'attend rien sur sa ligne : le fond et les champs viennent \
+                 sur les suivantes"
+                    .to_owned(),
+            ));
+        }
+        // Une composition **vide de sens**, que [`Etat::decoder`] remplace par
+        // celle du bloc qui suit. Cette fonction ne lit qu'une ligne : lui
+        // passer le reste du fichier pour qu'elle en décode deux lui ferait
+        // porter le cadrage du fichier, qui n'est pas son affaire.
+        return Ok(Affichage::Composition(Composition::nouvelle(Fond::Noir)));
     }
     let Some(argument) = apres_le_second_mot(ligne) else {
         return Err(refus(format!(
@@ -236,7 +285,7 @@ fn affichage_de(ligne: &str) -> Result<Affichage, EtatInvalide> {
         "image" => Ok(Affichage::Image(argument.to_owned())),
         "gif" => Ok(Affichage::Gif(argument.to_owned())),
         autre => Err(refus(format!(
-            "« {autre} » inconnu : la dalle affiche rien, gauge, image ou gif"
+            "« {autre} » inconnu : la dalle affiche rien, gauge, image, gif ou layout"
         ))),
     }
 }
@@ -345,6 +394,15 @@ pub fn verifier_format(affichage: &Affichage, octets: &[u8]) -> Result<(), Image
         // Aucun fichier, donc aucun format à vérifier. C'est la sortie de
         // secours : `off` et `gauge` doivent rester possibles quoi qu'il arrive.
         Affichage::Rien | Affichage::Cadran(_) => return Ok(()),
+        // Un fond noir non plus : c'est le fond qui ne demande rien à personne,
+        // et celui vers lequel une composition retombe.
+        Affichage::Composition(composition) => match composition.fond() {
+            Fond::Noir => return Ok(()),
+            Fond::Image(chemin) => (
+                chemin,
+                &[ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Gif][..],
+            ),
+        },
         Affichage::Image(chemin) => (
             chemin,
             &[ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Gif][..],
@@ -382,6 +440,10 @@ pub fn verifier_format(affichage: &Affichage, octets: &[u8]) -> Result<(), Image
 pub fn verifier_fichier(affichage: &Affichage) -> Result<(), ImageInvalide> {
     let chemin = match affichage {
         Affichage::Rien | Affichage::Cadran(_) => return Ok(()),
+        Affichage::Composition(composition) => match composition.fond() {
+            Fond::Noir => return Ok(()),
+            Fond::Image(chemin) => chemin,
+        },
         Affichage::Image(chemin) | Affichage::Gif(chemin) => chemin,
     };
     let mut fichier = std::fs::File::open(chemin).map_err(|erreur| ImageInvalide {
@@ -404,6 +466,28 @@ fn nom_attendu(affichage: &Affichage) -> &'static str {
     }
 }
 
+/// Le fond d'une composition, décodé et mis à l'échelle.
+///
+/// Un fond noir ne lit rien : c'est ce qui permet de composer sans image, et
+/// c'est aussi le repli d'une composition dont on retire le fond.
+///
+/// ⚠️ Un **GIF** en fond ne garde que sa première image. Le hors-scope de #80 le
+/// dit : recomposer du texte sur trente images par seconde pour une dalle de six
+/// centimètres ne vaut pas son coût. Le fichier n'est pas refusé pour autant —
+/// un GIF est une image valide, et le refuser serait une régression sur ce que
+/// `screen image` accepte déjà.
+pub fn fond_en_dalle(fond: &Fond) -> Result<Dalle, ImageInvalide> {
+    match fond {
+        Fond::Noir => Ok(Dalle::noire()),
+        Fond::Image(chemin) => Dalle::depuis_fichier(Path::new(chemin))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| ImageInvalide {
+                raison: format!("{chemin} : aucune image"),
+            }),
+    }
+}
+
 /// Le nom d'un format, tel qu'il doit apparaître dans un refus.
 ///
 /// Écrit à la main plutôt que tiré du `Debug` du crate : c'est un message que
@@ -420,10 +504,54 @@ fn nom_de_format(format: ImageFormat) -> &'static str {
     }
 }
 
+/// Ce qu'un champ de la composition montre **au moment du rendu**.
+///
+/// La `Composition` dit quoi afficher ; ceci dit combien ça vaut. Les deux sont
+/// séparés parce que la composition est ce qu'on conserve — elle traverse un
+/// redémarrage — et que la mesure ne l'est jamais : c'est aussi ce qui permet de
+/// dessiner un champ sans matériel, dans un fichier, pour vérifier qu'il se lit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChampRendu {
+    /// Une température, en degrés Celsius.
+    ///
+    /// ⚠️ `valeur: None` — la sonde ne répond plus. Le champ écrit alors des
+    /// tirets, **jamais un zéro** ni la dernière valeur connue : un 34 °C figé
+    /// derrière une pompe arrêtée est le mode de défaillance le plus coûteux du
+    /// projet, parce qu'il est rassurant.
+    Temperature {
+        libelle: Option<String>,
+        valeur: Option<f32>,
+    },
+    /// Un texte fixe.
+    Texte(String),
+}
+
+/// Ce qu'un champ écrit en gros, en clair.
+///
+/// Pure, et publique : c'est ce qui rend « une sonde muette rend des tirets »
+/// vérifiable sans compter des pixels.
+pub fn valeur_du_champ(champ: &ChampRendu) -> String {
+    match champ {
+        ChampRendu::Temperature { valeur, .. } => chiffres(*valeur),
+        ChampRendu::Texte(texte) => texte.clone(),
+    }
+}
+
 impl Dalle {
     pub fn noire() -> Dalle {
+        Dalle::unie((0, 0, 0))
+    }
+
+    /// Une dalle d'une seule couleur, donnée en RGB.
+    pub fn unie(couleur: (u8, u8, u8)) -> Dalle {
+        let triplet = screen::pixel(couleur.0, couleur.1, couleur.2);
         Dalle {
-            octets: vec![0u8; screen::IMAGE_LEN],
+            octets: triplet
+                .iter()
+                .copied()
+                .cycle()
+                .take(screen::IMAGE_LEN)
+                .collect(),
         }
     }
 
@@ -592,6 +720,25 @@ impl Dalle {
 
         toile.dalle()
     }
+
+    /// Le fond recopié, les champs dessinés dessus (#80).
+    ///
+    /// ⚠️ **Sans aucun champ, rend le fond inchangé, octet pour octet.** C'est
+    /// le critère qui garantit qu'ajouter la composition ne change rien à ce
+    /// qu'une image affiche aujourd'hui : une composition vide *est* l'image.
+    ///
+    /// ⚠️ **Aucun pixel n'est écrit hors du disque visible.** Chaque champ est
+    /// borné à sa boîte, et les cinq boîtes tiennent dans le disque — ce que
+    /// `Boite::dans_le_disque` vérifie plutôt que d'en faire la promesse.
+    pub fn composee(fond: &Dalle, champs: &[(Ancre, ChampRendu)]) -> Dalle {
+        let mut toile = Toile {
+            octets: fond.octets.clone(),
+        };
+        for (ancre, rendu) in champs {
+            toile.champ(ancre.boite(), rendu);
+        }
+        toile.dalle()
+    }
 }
 
 /// Les délais d'un GIF, ramenés à ce que le bus tient.
@@ -755,6 +902,49 @@ const CADRAN_LIBELLE_ECHELLE: usize = 2;
 const ANNEAU_INTERIEUR: f32 = 262.0;
 const ANNEAU_EXTERIEUR: f32 = 300.0;
 
+/// La dalle entière, quand un dessin n'a pas à être borné plus étroitement.
+const TOUTE_LA_DALLE: Boite = Boite {
+    x: 0,
+    y: 0,
+    largeur: screen::WIDTH,
+    hauteur: screen::HEIGHT,
+};
+
+/// Ce qu'il reste d'un fond sous un champ, en pour cent.
+///
+/// Trente : un blanc pur y tombe à 76, où du texte blanc se détache nettement,
+/// et un fond déjà sombre ne s'écroule pas à zéro — la photo reste devinable
+/// sous le champ.
+const CHAMP_ASSOMBRISSEMENT: u16 = 30;
+
+/// Hauteur des chiffres d'un champ. Le tiers de ceux du cadran : quatre valeurs
+/// à la taille d'une seule ne tiendraient pas dans un disque de 640 pixels.
+const CHAMP_CHIFFRE_HAUTEUR: usize = 48;
+/// Échelle du libellé d'un champ.
+const CHAMP_LIBELLE_ECHELLE: usize = 2;
+/// Échelle de l'unité d'un champ.
+const CHAMP_UNITE_ECHELLE: usize = 3;
+/// Échelle d'un champ de texte fixe : il n'a rien d'autre à montrer, donc il
+/// prend la place que la mesure aurait prise.
+const CHAMP_TEXTE_ECHELLE: usize = 3;
+/// Entre le libellé et la mesure.
+const CHAMP_INTERLIGNE: usize = 6;
+/// Entre les chiffres et leur unité.
+const CHAMP_ECART_UNITE: usize = 8;
+
+/// Le libellé d'un champ, sur son fond assombri.
+///
+/// Plus clair que le libellé du cadran, qui se pose sur du noir : ici le fond
+/// est ce qu'il reste d'une photo, et un gris sombre s'y noierait — mesuré sur
+/// un fond blanc, où l'assombrissement laisse 76.
+const COULEUR_CHAMP_LIBELLE: (u8, u8, u8) = (0xc4, 0xc6, 0xd4);
+
+/// L'unité d'un champ de température.
+///
+/// Le degré n'est pas de l'ASCII et la police matricielle le porte quand même :
+/// c'est l'unité qui compte le plus sur cette dalle.
+const UNITE: &str = "°C";
+
 const COULEUR_CHIFFRE: (u8, u8, u8) = (0xff, 0xff, 0xff);
 const COULEUR_UNITE: (u8, u8, u8) = (0x9a, 0x9c, 0xb0);
 const COULEUR_LIBELLE: (u8, u8, u8) = (0x6f, 0x71, 0x80);
@@ -819,10 +1009,56 @@ impl Toile {
         self.octets[debut..debut + screen::PIXEL_LEN].copy_from_slice(&triplet);
     }
 
-    fn rectangle(&mut self, x: usize, y: usize, largeur: usize, hauteur: usize, c: (u8, u8, u8)) {
-        for dy in 0..hauteur {
-            for dx in 0..largeur {
-                self.poser(x + dx, y + dy, c);
+    /// Peint un rectangle, **borné** à la boîte donnée.
+    ///
+    /// ⚠️ Le bornage n'est pas une précaution de style : la boîte du champ
+    /// supérieur passe à 2,4 pixels du bord du disque visible, et un arrondi de
+    /// centrage qui déborderait d'un pixel écrirait hors de la dalle — sans
+    /// qu'aucun message ne le dise, puisque le tampon, lui, est carré.
+    fn rectangle(
+        &mut self,
+        clip: Boite,
+        x: usize,
+        y: usize,
+        largeur: usize,
+        hauteur: usize,
+        c: (u8, u8, u8),
+    ) {
+        let (x0, y0) = (usize::from(clip.x), usize::from(clip.y));
+        let (x1, y1) = (
+            x0 + usize::from(clip.largeur),
+            y0 + usize::from(clip.hauteur),
+        );
+        for py in y.max(y0)..(y + hauteur).min(y1) {
+            for px in x.max(x0)..(x + largeur).min(x1) {
+                self.poser(px, py, c);
+            }
+        }
+    }
+
+    /// Assombrit ce qui est déjà peint dans cette boîte.
+    ///
+    /// ⚠️ **C'est ce qui rend un champ lisible sur n'importe quel fond.** Une
+    /// photo claire avale du texte blanc, et une couleur de texte qu'on
+    /// « espère contrastée » n'est pas une garantie : la seule qui en soit une
+    /// est de décider soi-même du fond derrière les caractères.
+    ///
+    /// Assombrir plutôt que peindre un aplat : la photo reste devinable sous le
+    /// champ, ce qu'un rectangle noir opaque perdrait sur une dalle de six
+    /// centimètres où le fond est justement ce qu'on a choisi de montrer.
+    fn assombrir(&mut self, boite: Boite) {
+        let (x0, y0) = (usize::from(boite.x), usize::from(boite.y));
+        let (x1, y1) = (
+            x0 + usize::from(boite.largeur),
+            y0 + usize::from(boite.hauteur),
+        );
+        for y in y0..y1.min(usize::from(screen::HEIGHT)) {
+            for x in x0..x1.min(usize::from(screen::WIDTH)) {
+                let debut = (y * usize::from(screen::WIDTH) + x) * screen::PIXEL_LEN;
+                let (r, v, b) = screen::composantes(&self.octets[debut..debut + screen::PIXEL_LEN]);
+                let sombre =
+                    |composante: u8| ((u16::from(composante) * CHAMP_ASSOMBRISSEMENT) / 100) as u8;
+                self.poser(x, y, (sombre(r), sombre(v), sombre(b)));
             }
         }
     }
@@ -871,16 +1107,27 @@ impl Toile {
             hauteur -= 2;
         }
 
-        let largeur = hauteur / 2;
-        let epaisseur = (hauteur / 10).max(2);
-        let ecart = epaisseur;
         let total = largeur_des_chiffres(texte, hauteur);
-        let mut x = usize::from(screen::WIDTH).saturating_sub(total) / 2;
+        let x = usize::from(screen::WIDTH).saturating_sub(total) / 2;
         let y = usize::from(screen::HEIGHT).saturating_sub(hauteur) / 2;
+        self.sept_segments_a(TOUTE_LA_DALLE, x, y, texte, hauteur);
+    }
+
+    /// Le même nombre, posé où on le demande et borné à une boîte.
+    ///
+    /// La hauteur n'est **pas** réduite ici : c'est l'appelant qui a choisi une
+    /// place, et la réduire sous ses pieds décalerait ce qu'il a centré. Un
+    /// nombre trop large est coupé par le bornage, comme le reste.
+    fn sept_segments_a(&mut self, clip: Boite, x: usize, y: usize, texte: &str, hauteur: usize) {
+        let largeur = largeur_de_chiffre(hauteur);
+        let epaisseur = epaisseur_de_chiffre(hauteur);
+        let ecart = epaisseur;
+        let mut x = x;
 
         for glyphe in texte.chars() {
             if glyphe == '.' {
                 self.rectangle(
+                    clip,
                     x,
                     y + hauteur - epaisseur,
                     epaisseur * 2,
@@ -890,21 +1137,20 @@ impl Toile {
                 x += epaisseur * 2 + ecart;
                 continue;
             }
-            self.chiffre(x, y, largeur, hauteur, epaisseur, segments(glyphe));
+            self.chiffre(clip, x, y, hauteur, segments(glyphe));
             x += largeur + ecart;
         }
     }
 
     /// Un chiffre à sept segments, `a` en poids faible jusqu'à `g`.
-    fn chiffre(
-        &mut self,
-        x: usize,
-        y: usize,
-        largeur: usize,
-        hauteur: usize,
-        epaisseur: usize,
-        masque: u8,
-    ) {
+    ///
+    /// La largeur et l'épaisseur se **déduisent** de la hauteur plutôt que de
+    /// s'ajouter aux arguments : elles n'ont jamais eu d'autre valeur, et deux
+    /// endroits qui les recalculent finissent par ne plus les recalculer
+    /// pareil.
+    fn chiffre(&mut self, clip: Boite, x: usize, y: usize, hauteur: usize, masque: u8) {
+        let largeur = largeur_de_chiffre(hauteur);
+        let epaisseur = epaisseur_de_chiffre(hauteur);
         let milieu = y + hauteur / 2 - epaisseur / 2;
         let bas = y + hauteur - epaisseur;
         let droite = x + largeur - epaisseur;
@@ -920,7 +1166,7 @@ impl Toile {
         ];
         for (allume, bx, by, bl, bh) in barres {
             if allume {
-                self.rectangle(bx, by, bl, bh, COULEUR_CHIFFRE);
+                self.rectangle(clip, bx, by, bl, bh, COULEUR_CHIFFRE);
             }
         }
     }
@@ -931,26 +1177,147 @@ impl Toile {
     /// ne tient pas dans la dalle est **coupé**, jamais replié : un cadran se
     /// lit d'un coup d'œil, pas sur deux lignes.
     fn matriciel(&mut self, texte: &str, y: usize, echelle: usize, c: (u8, u8, u8)) {
-        let pas = (POLICE_LARGEUR + 1) * echelle;
-        let tenables = usize::from(screen::WIDTH) / pas;
-        let visible: Vec<char> = texte.chars().take(tenables).collect();
+        self.matriciel_centre(TOUTE_LA_DALLE, texte, y, echelle, c);
+    }
+
+    /// Le même texte, centré dans une boîte et borné à elle.
+    ///
+    /// ⚠️ Le texte est **coupé à ce qui tient dans la boîte**, jamais replié :
+    /// un champ se lit d'un coup d'œil, et deux lignes dans une boîte prévue
+    /// pour une écraseraient la valeur qu'elle porte.
+    fn matriciel_centre(
+        &mut self,
+        boite: Boite,
+        texte: &str,
+        y: usize,
+        echelle: usize,
+        c: (u8, u8, u8),
+    ) {
+        let visible = tronque(texte, usize::from(boite.largeur), echelle);
         if visible.is_empty() {
             return;
         }
-        let total = visible.len() * pas - echelle;
-        let mut x = usize::from(screen::WIDTH).saturating_sub(total) / 2;
-        for glyphe in visible {
+        let total = largeur_matricielle(&visible, echelle);
+        let x = usize::from(boite.x) + (usize::from(boite.largeur).saturating_sub(total)) / 2;
+        self.matriciel_a(boite, x, y, &visible, echelle, c);
+    }
+
+    /// Le texte posé où on le demande, borné à la boîte.
+    fn matriciel_a(
+        &mut self,
+        clip: Boite,
+        x: usize,
+        y: usize,
+        texte: &str,
+        echelle: usize,
+        c: (u8, u8, u8),
+    ) {
+        let pas = (POLICE_LARGEUR + 1) * echelle;
+        let mut x = x;
+        for glyphe in texte.chars() {
             let colonnes = matrice(glyphe);
             for (dx, colonne) in colonnes.iter().enumerate() {
                 for dy in 0..POLICE_HAUTEUR {
                     if colonne & (1 << dy) != 0 {
-                        self.rectangle(x + dx * echelle, y + dy * echelle, echelle, echelle, c);
+                        self.rectangle(
+                            clip,
+                            x + dx * echelle,
+                            y + dy * echelle,
+                            echelle,
+                            echelle,
+                            c,
+                        );
                     }
                 }
             }
             x += pas;
         }
     }
+
+    /// Un champ de la composition, dessiné dans sa boîte (#80).
+    fn champ(&mut self, boite: Boite, rendu: &ChampRendu) {
+        self.assombrir(boite);
+
+        match rendu {
+            ChampRendu::Texte(texte) => {
+                let y = usize::from(boite.y)
+                    + usize::from(boite.hauteur)
+                        .saturating_sub(POLICE_HAUTEUR * CHAMP_TEXTE_ECHELLE)
+                        / 2;
+                self.matriciel_centre(boite, texte, y, CHAMP_TEXTE_ECHELLE, COULEUR_CHIFFRE);
+            }
+            ChampRendu::Temperature { libelle, valeur: _ } => {
+                let mesure = valeur_du_champ(rendu);
+                let hauteur_libelle = POLICE_HAUTEUR * CHAMP_LIBELLE_ECHELLE;
+
+                // Sans libellé, la mesure occupe seule la boîte et s'y centre.
+                // Avec, les deux forment un bloc qu'on centre ensemble : une
+                // mesure qui garderait sa place laisserait le libellé pendre
+                // au-dessus de la boîte.
+                let (y_libelle, y_mesure) = if libelle.is_some() {
+                    let bloc = hauteur_libelle + CHAMP_INTERLIGNE + CHAMP_CHIFFRE_HAUTEUR;
+                    let haut =
+                        usize::from(boite.y) + usize::from(boite.hauteur).saturating_sub(bloc) / 2;
+                    (haut, haut + hauteur_libelle + CHAMP_INTERLIGNE)
+                } else {
+                    (
+                        0,
+                        usize::from(boite.y)
+                            + usize::from(boite.hauteur).saturating_sub(CHAMP_CHIFFRE_HAUTEUR) / 2,
+                    )
+                };
+
+                if let Some(libelle) = libelle {
+                    self.matriciel_centre(
+                        boite,
+                        libelle,
+                        y_libelle,
+                        CHAMP_LIBELLE_ECHELLE,
+                        COULEUR_CHAMP_LIBELLE,
+                    );
+                }
+
+                // Les chiffres et leur unité forment un groupe qu'on centre
+                // d'un bloc : centrer les chiffres seuls ferait glisser le
+                // « °C » hors de la boîte sur les valeurs longues.
+                let largeur_chiffres = largeur_des_chiffres(&mesure, CHAMP_CHIFFRE_HAUTEUR);
+                let largeur_unite = largeur_matricielle(UNITE, CHAMP_UNITE_ECHELLE);
+                let total = largeur_chiffres + CHAMP_ECART_UNITE + largeur_unite;
+                let x = usize::from(boite.x) + usize::from(boite.largeur).saturating_sub(total) / 2;
+
+                self.sept_segments_a(boite, x, y_mesure, &mesure, CHAMP_CHIFFRE_HAUTEUR);
+                // L'unité s'aligne sur le **bas** des chiffres : alignée en
+                // haut, elle flotterait au-dessus d'un nombre deux fois plus
+                // haut qu'elle.
+                let y_unite =
+                    y_mesure + CHAMP_CHIFFRE_HAUTEUR - POLICE_HAUTEUR * CHAMP_UNITE_ECHELLE;
+                self.matriciel_a(
+                    boite,
+                    x + largeur_chiffres + CHAMP_ECART_UNITE,
+                    y_unite,
+                    UNITE,
+                    CHAMP_UNITE_ECHELLE,
+                    COULEUR_UNITE,
+                );
+            }
+        }
+    }
+}
+
+/// Ce qui tient d'un texte dans une largeur, en police matricielle.
+fn tronque(texte: &str, largeur: usize, echelle: usize) -> String {
+    let pas = (POLICE_LARGEUR + 1) * echelle;
+    let tenables = largeur.checked_div(pas).unwrap_or(0);
+    texte.chars().take(tenables).collect()
+}
+
+/// La largeur qu'occupe un texte matriciel, sans l'écart de fin.
+fn largeur_matricielle(texte: &str, echelle: usize) -> usize {
+    let compte = texte.chars().count();
+    if compte == 0 {
+        return 0;
+    }
+    compte * (POLICE_LARGEUR + 1) * echelle - echelle
 }
 
 /// La largeur qu'occupera un nombre à cette hauteur de chiffre.
@@ -958,8 +1325,8 @@ impl Toile {
 /// Un point ne prend pas la place d'un chiffre : le compter comme tel
 /// décalerait « 34.2 » d'un demi-caractère vers la gauche.
 fn largeur_des_chiffres(texte: &str, hauteur: usize) -> usize {
-    let largeur = hauteur / 2;
-    let epaisseur = (hauteur / 10).max(2);
+    let largeur = largeur_de_chiffre(hauteur);
+    let epaisseur = epaisseur_de_chiffre(hauteur);
     texte
         .chars()
         .map(|glyphe| {
@@ -972,6 +1339,22 @@ fn largeur_des_chiffres(texte: &str, hauteur: usize) -> usize {
         })
         .sum::<usize>()
         .saturating_sub(epaisseur)
+}
+
+/// La largeur d'un chiffre à sept segments, à cette hauteur.
+///
+/// La moitié de sa hauteur — les proportions d'un afficheur, et la seule
+/// définition que le projet en donne.
+fn largeur_de_chiffre(hauteur: usize) -> usize {
+    hauteur / 2
+}
+
+/// L'épaisseur d'un segment, à cette hauteur.
+///
+/// Un dixième, et jamais moins de deux pixels : en deçà, un segment disparaît
+/// à l'arrondi et le chiffre change de valeur à l'œil.
+fn epaisseur_de_chiffre(hauteur: usize) -> usize {
+    (hauteur / 10).max(2)
 }
 
 /// Les sept segments d'un caractère, `a` en poids faible.
