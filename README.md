@@ -36,6 +36,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Profils — une ambiance sous un nom | ✅ éclairage, zones et écran, deux exemples livrés |
 | Composition de l'écran | ✅ un fond, quatre informations, cinq ancres dans le disque |
 | La fenêtre expose tout le protocole | ✅ vérifié par des tests de couverture, pas à l'œil |
+| La dalle n'arrête plus le boîtier | ✅ son propre fil, et toute question HID bornée dans le temps |
 
 ## Ce que les protocoles permettent
 
@@ -64,7 +65,9 @@ reverb-gui  (fenêtre Slint — maquette du boîtier, animations, ventilateurs)
    ▼
 reverb-daemon
    ├── write()      ──►  /dev/hidraw*        ventilateurs, GRB
-   └── I2C_SMBUS    ──►  /dev/i2c-8 0x18..1b RAM Corsair, RGB
+   ├── I2C_SMBUS    ──►  /dev/i2c-8 0x18..1b RAM Corsair, RGB
+   └── fil de l'écran ──► usbfs 1e71:300c    dalle du Kraken, BGR
+          ▲ une image déposée, un verdict rendu — jamais d'attente
 
 reverb  (outil de validation, garde l'usbfs ──► 1e71:300c bulk, écran Kraken, BGR)
    │
@@ -707,6 +710,43 @@ le dit une fois, puis se tait. Réémettre sans fin vers un contrôleur qui refu
 réveille pas : ça consomme le bus et insiste sur un périphérique déjà en difficulté. Une
 commande `screen` relance quand on veut ; le fichier d'état, lui, n'est pas effacé, donc un
 redémarrage retente (#70).
+
+### Une dalle muette n'emporte pas le boîtier
+
+**La dalle a son propre fil, et il la détient seul.** Le fil de rendu compose l'image — c'est du
+calcul — puis la **dépose** ; le verdict revient au tour suivant, lu sans attendre. Le mégaoctet ne
+passe plus jamais par le fil qui anime les LED et sert le socket.
+
+⚠️ **Ce n'était pas un réglage à corriger.** Le cache de #80 — « on ne pousse que ce qui a changé »
+— n'y pouvait rien : quand la température change, il *faut* pousser. Mesuré sur SHYNAEL le
+2026-08-08, composition à deux sondes vivantes sur fond image :
+
+| régime | avant | après |
+|---|---|---|
+| dalle rendue au firmware | 21 img/s · 11 sautées | 21 · 11 |
+| composition à deux sondes vivantes | **15 · 45** | **21 · 11** |
+| dalle qui refuse | **2 · 306** | **21 · 11** |
+| **dalle muette** | **0 — vingt minutes sans un tic de CPU** | **21 · 11** |
+
+Cette dernière ligne se lit telle quelle : le démon est resté vingt minutes gelé, cinq clients
+bloqués sur une réponse qui n'est jamais venue, `status` sans un octet après quinze secondes.
+`hidraw::ask` bornait le nombre de **trames** lues et jamais le **temps** — sur un descripteur
+bloquant, vingt lectures dont la première ne revient jamais font une attente infinie déguisée en
+boucle bornée. Le commentaire promettait pourtant « sans jamais bloquer indéfiniment », et c'est ce
+qui a rendu le défaut si durable.
+
+Toute question HID est désormais bornée : le descripteur s'ouvre en `O_NONBLOCK` et chaque lecture a
+son échéance. **Une demi-seconde par trame**, soit vingt-sept fois le pire acquittement relevé (18 ms,
+spec §3.2). Le délai vaut **par lecture** et non pour la question entière : ces contrôleurs émettent
+sans qu'on leur demande, et un délai global déclarerait mort un périphérique vivant mais bavard — or
+trois questions expirées rendent la dalle au firmware (#70), donc un faux abandon coûte plus cher
+qu'une attente généreuse. Le pire cas reste borné à dix secondes, sous les trente au bout desquelles
+le firmware la reprend de toute façon.
+
+⚠️ **Deux capacités perdues, et c'est le prix du déménagement** : une luminosité refusée ne rend plus
+d'erreur au client, et un échec au démarrage n'est plus dit au démarrage. Les deux reviennent par le
+journal. En attendre le résultat remettrait les 51 ms d'ouverture d'un `hidraw` dans le chemin des
+LED, pour rendre au client une erreur qu'il ne peut de toute façon pas corriger.
 
 ### Une sonde muette n'emporte pas le démon
 
