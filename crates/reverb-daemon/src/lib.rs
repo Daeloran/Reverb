@@ -15,6 +15,7 @@
 
 pub mod cadence;
 pub mod ecran;
+pub mod fil_ecran;
 pub mod peripheriques;
 pub mod persistance;
 pub mod profils;

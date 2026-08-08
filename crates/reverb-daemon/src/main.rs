@@ -134,9 +134,11 @@ fn main() -> ExitCode {
     // fichier effacé depuis le dernier démarrage se dit **une fois** : la dalle
     // reste au firmware plutôt que de réessayer en boucle.
     if peripheriques.a_un_ecran() {
-        if let Err(erreur) = peripheriques.luminosite_ecran(etat.ecran.luminosite) {
-            eprintln!("attention : luminosité de l'écran : {erreur}");
-        }
+        // Déposée, pas tentée (#83) : un refus reviendra par le verdict du
+        // premier tour, et sera journalisé là — jamais ici, où l'attendre
+        // coûterait les cinq secondes d'un Kraken muet avant même que le socket
+        // soit ouvert.
+        peripheriques.luminosite_ecran(etat.ecran.luminosite);
         if let Err(message) = etat.preparer_ecran() {
             eprintln!("attention : écran non rétabli : {message}");
             etat.ecran.affichage = ecran::Affichage::Rien;
@@ -292,9 +294,11 @@ struct Etat {
     /// conserve jamais et qu'on redécode au démarrage.
     diffusion: Diffusion,
     /// Quand la prochaine image doit partir. `None` : rien à pousser.
+    ///
+    /// ⚠️ **Ce n'est pas une horloge d'envoi mais une horloge de dépôt** (#83) :
+    /// l'image est confiée au fil de l'écran, qui la pousse quand il peut. Un
+    /// envoi qui traîne ne décale donc pas le suivant, il le remplace.
     echeance_ecran: Option<Instant>,
-    /// Ce qui compte les refus de la dalle et finit par renoncer (#70).
-    vigie: ecran::Vigie,
     /// Les sondes écartées parce qu'elles ne répondent plus (#68).
     quarantaine: Quarantaine,
     /// La dernière valeur de la sonde que `thermique` suit, en degrés (#75).
@@ -349,7 +353,6 @@ impl Etat {
             // fichier ne garde qu'un chemin, jamais des pixels.
             diffusion: Diffusion::Rien,
             echeance_ecran: None,
-            vigie: ecran::Vigie::neuve(),
             quarantaine: Quarantaine::nouvelle(),
             mesure: None,
             prochaine_mesure: Duration::ZERO,
@@ -643,6 +646,15 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat:
 /// Rend [`REPOS`] quand il n'y a rien à afficher : le démon doit être au repos
 /// absolu quand la dalle est rendue au firmware.
 fn tour_d_ecran(etat: &mut Etat, peripheriques: &mut Peripheriques) -> Duration {
+    // ⚠️ **Les verdicts d'abord, avant même l'échéance** (#83). Ils portent sur
+    // un envoi décidé à un tour précédent, et peuvent tomber alors que
+    // l'échéance a déjà été retirée. Les lire plus bas ferait perdre l'abandon
+    // qui suit un `screen off` — la seule ligne de journal qui dise pourquoi la
+    // dalle s'est tue.
+    if encaisser_les_verdicts(etat, peripheriques) {
+        return REPOS;
+    }
+
     let Some(echeance) = etat.echeance_ecran else {
         return REPOS;
     };
@@ -657,16 +669,16 @@ fn tour_d_ecran(etat: &mut Etat, peripheriques: &mut Peripheriques) -> Duration 
     // n'est lu, et le cas le plus courant ne coûte rien.
     let champs = champs_du_moment(etat);
 
-    // Le délai jusqu'à l'image suivante est décidé **avant** l'envoi : un
+    // Le délai jusqu'à l'image suivante est décidé **avant** le dépôt : un
     // envoi qui échoue ne doit pas figer l'horloge, sinon un Kraken débranché
     // ferait tourner cette boucle à plein régime.
     let repli = Duration::from_secs(reverb_proto::screen::REFRESH_INTERVAL_SECS);
-    let (octets, prochain) = match &mut etat.diffusion {
+    let (image, prochain) = match &mut etat.diffusion {
         Diffusion::Rien => {
             etat.echeance_ecran = None;
             return REPOS;
         }
-        Diffusion::Fixe(dalle) => (dalle.octets().to_vec(), repli),
+        Diffusion::Fixe(dalle) => (Some((**dalle).clone()), repli),
 
         Diffusion::Composee {
             fond,
@@ -695,12 +707,11 @@ fn tour_d_ecran(etat: &mut Etat, peripheriques: &mut Peripheriques) -> Duration 
             let repli_du_firmware = dernier_envoi
                 .is_none_or(|envoi| maintenant.saturating_duration_since(envoi) >= repli);
             if derniere.as_deref() == Some(&image) && !repli_du_firmware {
-                (Vec::new(), prochain)
+                (None, prochain)
             } else {
-                let octets = image.octets().to_vec();
-                *derniere = Some(Box::new(image));
+                *derniere = Some(Box::new(image.clone()));
                 *dernier_envoi = Some(maintenant);
-                (octets, prochain)
+                (Some(image), prochain)
             }
         }
         Diffusion::Anime {
@@ -709,54 +720,55 @@ fn tour_d_ecran(etat: &mut Etat, peripheriques: &mut Peripheriques) -> Duration 
             rang,
         } => {
             let courant = *rang % dalles.len().max(1);
-            let octets = dalles
-                .get(courant)
-                .map(|dalle| dalle.octets().to_vec())
-                .unwrap_or_default();
+            let image = dalles.get(courant).cloned();
             let delai = delais.get(courant).copied().unwrap_or(PLANCHER_GIF);
             *rang = (courant + 1) % dalles.len().max(1);
-            (octets, delai)
+            (image, delai)
         }
-        Diffusion::Cadran(sonde) => (
-            cadran_du_moment(sonde, &etat.sondes).octets().to_vec(),
-            CADENCE_CADRAN,
-        ),
+        Diffusion::Cadran(sonde) => (Some(cadran_du_moment(sonde, &etat.sondes)), CADENCE_CADRAN),
     };
 
-    // ⚠️ **Le verdict décide, pas l'appelant** (#70). Un `let _ =` sur l'envoi
-    // — ce qu'il y avait ici — réémettait indéfiniment vers un contrôleur qui
-    // refusait : du bus consommé, cinq secondes de gel par tentative, et une
-    // insistance sur une dalle déjà en difficulté.
-    let verdict = if octets.is_empty() {
-        ecran::Verdict::Emise
-    } else {
-        etat.vigie.tour(|| peripheriques.afficher_ecran(&octets))
-    };
-    match verdict {
-        ecran::Verdict::Emise => {}
-        ecran::Verdict::Refusee { erreur } => {
-            eprintln!("attention : écran : {erreur}");
-        }
-        ecran::Verdict::Abandon { erreur } => {
-            eprintln!(
-                "{} échecs d'affilée sur la dalle : {erreur}\n\
-                 → écran rendu au firmware, émission arrêtée (relancer avec « screen … »)",
-                ecran::ECHECS_AVANT_ABANDON
-            );
-            // L'échéance tombe : la boucle repasse au repos absolu. L'état
-            // persisté, lui, n'est **pas** touché — ce qu'on voulait afficher
-            // reste ce qu'on voulait afficher, et un redémarrage le retente.
-            etat.echeance_ecran = None;
-            return REPOS;
-        }
-        ecran::Verdict::Repos => {
-            etat.echeance_ecran = None;
-            return REPOS;
-        }
+    // ⚠️ **Déposé, jamais poussé d'ici** (#83). Le `write` de 1 228 800 octets
+    // appartient au fil de l'écran ; ce fil-ci anime les LED et sert le socket,
+    // et il a payé ce mégaoctet pendant tout #80. Le verdict de #70 reviendra au
+    // tour suivant, par `encaisser_les_verdicts`.
+    if let Some(image) = image {
+        peripheriques.afficher_ecran(image);
     }
 
     etat.echeance_ecran = Some(maintenant + prochain);
     prochain
+}
+
+/// Lit ce que la dalle a dit, sans jamais l'attendre, et le journalise.
+///
+/// Rend `true` quand l'abandon de #70 vient d'être prononcé : l'appelant repasse
+/// alors au repos absolu.
+///
+/// ⚠️ **L'état persisté n'est pas touché** — ce qu'on voulait afficher reste ce
+/// qu'on voulait afficher, et un redémarrage le retente.
+fn encaisser_les_verdicts(etat: &mut Etat, peripheriques: &Peripheriques) -> bool {
+    let mut abandonne = false;
+    for verdict in peripheriques.verdicts_ecran() {
+        match verdict {
+            ecran::Verdict::Emise | ecran::Verdict::Repos => {}
+            ecran::Verdict::Refusee { erreur } => {
+                eprintln!("attention : écran : {erreur}");
+            }
+            ecran::Verdict::Abandon { erreur } => {
+                eprintln!(
+                    "{} échecs d'affilée sur la dalle : {erreur}\n\
+                     → écran rendu au firmware, émission arrêtée (relancer avec « screen … »)",
+                    ecran::ECHECS_AVANT_ABANDON
+                );
+                abandonne = true;
+            }
+        }
+    }
+    if abandonne {
+        etat.echeance_ecran = None;
+    }
+    abandonne
 }
 
 /// Ce que les champs de la composition montrent à cet instant (#80).
@@ -1175,7 +1187,7 @@ fn ecran_commande(
     // `State` est exclue — la fenêtre l'envoie chaque seconde, et relancer là
     // rendrait le plafond inopérant.
     if !matches!(action, ScreenAction::State) {
-        etat.vigie.relancer();
+        peripheriques.relancer_ecran();
     }
 
     match action {
@@ -1190,11 +1202,12 @@ fn ecran_commande(
         }
 
         ScreenAction::Brightness(pourcent) => {
-            if let Err(erreur) = peripheriques.luminosite_ecran(pourcent) {
-                return vec![ResponseLine::Error {
-                    message: format!("luminosité refusée : {erreur}"),
-                }];
-            }
+            // ⚠️ **Plus de refus rendu au client** (#83). L'écriture a lieu sur
+            // le fil de la dalle ; en attendre le résultat rendrait au client
+            // une erreur qu'il ne peut de toute façon pas corriger, au prix des
+            // 51 ms d'ouverture d'un `hidraw` payées par la boucle des LED. Un
+            // refus est journalisé par le verdict, comme celui d'une image.
+            peripheriques.luminosite_ecran(pourcent);
             etat.ecran.luminosite = pourcent;
             // ⚠️ `30 02` réinitialise le pipeline d'affichage (spec §3.4) :
             // l'image doit repartir tout de suite derrière, sinon la dalle

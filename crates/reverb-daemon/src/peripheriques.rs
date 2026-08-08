@@ -14,6 +14,13 @@
 //! marche plus pendant que le démon tourne, le nœud USB ne se réclamant pas
 //! deux fois. Elle est compensée — la ligne de commande passe par le socket
 //! comme la fenêtre, et y gagne le PNG, le JPEG et le GIF qu'elle n'avait pas.
+//!
+//! ⚠️ **Depuis #83, l'écran n'est plus ici qu'une poignée.** Le `Kraken` lui-même
+//! a été déplacé dans le fil de [`crate::fil_ecran`], qui le détient seul : un
+//! `write` de 1 228 800 octets sur usbfs gelait sinon les LED et le socket, qui
+//! partagent ce fil-ci. Les deux méthodes d'écran de ce module **ne bloquent
+//! plus et ne rendent plus d'erreur** — elles déposent, et le verdict revient
+//! par [`Peripheriques::verdicts_ecran`].
 
 use std::io;
 use std::path::PathBuf;
@@ -24,6 +31,9 @@ use reverb_hw::i2c;
 use reverb_hw::usbfs;
 use reverb_proto::ram::{self, SlotAddress};
 use reverb_proto::{Apply, Brightness, LEDS_PER_FAN, Position, Rgb, frame, screen};
+
+use crate::ecran::{Dalle, Verdict};
+use crate::fil_ecran::{Afficheur, FilEcran};
 
 /// L'identifiant produit du Kraken Elite 2023.
 const KRAKEN: u16 = 0x300c;
@@ -41,9 +51,10 @@ pub struct Peripheriques {
     /// machine sans elle doit continuer de piloter ses ventilateurs.
     bus: Option<i2c::Bus>,
     canaux: Vec<FanChannel>,
-    /// L'écran du Kraken. Absent si le Kraken n'est pas branché, ou si la règle
-    /// udev manque — une machine sans lui doit continuer de s'éclairer.
-    ecran: Option<Kraken>,
+    /// Le fil qui tient l'écran du Kraken (#83). Absent si le Kraken n'est pas
+    /// branché, ou si la règle udev manque — une machine sans lui doit continuer
+    /// de s'éclairer, et aucun fil n'est alors démarré.
+    ecran: Option<FilEcran>,
     /// Ce qui a été écrit en dernier, pour ne pas le réécrire.
     ///
     /// **Aucune de ces cibles n'a de watchdog** : l'état écrit tient
@@ -124,9 +135,11 @@ impl Peripheriques {
         }
 
         // L'écran est facultatif : une machine sans Kraken doit démarrer, et le
-        // dire **une fois**, sans boucler à le chercher.
+        // dire **une fois**, sans boucler à le chercher. Le fil dédié n'est
+        // lancé que si le périphérique a été ouvert — un fil qui n'aurait rien à
+        // tenir dormirait pour rien jusqu'à l'arrêt du démon.
         let ecran = match Kraken::ouvrir() {
-            Ok(kraken) => Some(kraken),
+            Ok(kraken) => Some(FilEcran::demarrer(kraken)),
             Err(erreur) => {
                 soucis.push(format!("écran du Kraken injoignable : {erreur}"));
                 None
@@ -150,29 +163,46 @@ impl Peripheriques {
         self.ecran.is_some()
     }
 
-    /// Règle la luminosité de la dalle.
+    /// Dépose un ordre de luminosité pour la dalle. **Ne bloque pas.**
     ///
     /// ⚠️ **Avant l'image, jamais après** : `30 02` réinitialise le pipeline
     /// d'affichage (spec §3.4), et l'envoyer ensuite ferait clignoter la dalle
-    /// vers son affichage firmware.
-    pub fn luminosite_ecran(&mut self, pourcent: u8) -> io::Result<()> {
-        let kraken = self.kraken()?;
-        kraken.luminosite(pourcent)
+    /// vers son affichage firmware. L'ordre relatif est préservé par la file du
+    /// fil de l'écran, pas par la chance d'un ordonnancement.
+    ///
+    /// ⚠️ **Aucune erreur n'est rendue ici** (#83) : l'écriture a lieu sur un
+    /// autre fil, et l'attendre remettrait les 51 ms d'ouverture d'un `hidraw`
+    /// dans le chemin critique des LED. Un refus revient par
+    /// [`Peripheriques::verdicts_ecran`], et le journal le dit.
+    pub fn luminosite_ecran(&self, pourcent: u8) {
+        if let Some(ecran) = &self.ecran {
+            ecran.luminosite(pourcent);
+        }
     }
 
-    /// Pousse une image de `screen::IMAGE_LEN` octets sur la dalle.
-    pub fn afficher_ecran(&mut self, image: &[u8]) -> io::Result<()> {
-        let kraken = self.kraken()?;
-        kraken.afficher(image)
+    /// Dépose une image à pousser sur la dalle. **Ne bloque pas.**
+    ///
+    /// Elle **remplace** celle qui attendait encore : une composition périmée
+    /// n'a aucune raison d'atteindre la dalle derrière celle qui la corrige.
+    pub fn afficher_ecran(&self, dalle: Dalle) {
+        if let Some(ecran) = &self.ecran {
+            ecran.afficher(dalle);
+        }
     }
 
-    fn kraken(&mut self) -> io::Result<&mut Kraken> {
-        self.ecran.as_mut().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "aucun écran de Kraken tenu par le démon",
-            )
-        })
+    /// Ce que la dalle a dit depuis le dernier tour. **N'attend rien.**
+    pub fn verdicts_ecran(&self) -> Vec<Verdict> {
+        self.ecran
+            .as_ref()
+            .map(FilEcran::verdicts)
+            .unwrap_or_default()
+    }
+
+    /// Remet la dalle en émission après un abandon (#70).
+    pub fn relancer_ecran(&self) {
+        if let Some(ecran) = &self.ecran {
+            ecran.relancer();
+        }
     }
 
     /// Peint les huit LED d'un ventilateur.
@@ -310,7 +340,13 @@ impl Kraken {
             bulk: usbfs::Screen::open()?,
         })
     }
+}
 
+/// ⚠️ **C'est ici que passe tout ce qui bloque** (#83). Les deux méthodes de ce
+/// bloc sont les seules du démon à écrire vers la dalle, et elles ne sont
+/// appelées que depuis le fil de [`crate::fil_ecran`] — qui a reçu ce `Kraken`
+/// par valeur, et que personne d'autre ne peut donc atteindre.
+impl Afficheur for Kraken {
     fn luminosite(&mut self, pourcent: u8) -> io::Result<()> {
         let trame = screen::set_brightness(pourcent)
             .map_err(|erreur| io::Error::new(io::ErrorKind::InvalidInput, erreur.to_string()))?;
@@ -323,7 +359,8 @@ impl Kraken {
     /// suivante (spec §3.2) : `36 01` → `37 01`, puis les données, puis
     /// `36 02` → `37 02`. Envoyer les 1,2 Mo sans attendre `37 01`, c'est
     /// parler à un contrôleur qui n'écoute pas encore.
-    fn afficher(&mut self, image: &[u8]) -> io::Result<()> {
+    fn image(&mut self, dalle: &Dalle) -> io::Result<()> {
+        let image = dalle.octets();
         screen::check_image(image)
             .map_err(|erreur| io::Error::new(io::ErrorKind::InvalidInput, erreur.to_string()))?;
 
