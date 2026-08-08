@@ -28,7 +28,9 @@ use std::time::{Duration, Instant};
 
 use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
-use reverb_gui::plan::{Cible, Place, Plan, Vue, halo, places_des_ancres, rayon_du_disque};
+use reverb_gui::plan::{
+    Cible, Place, Plan, Vue, halo, nom_de_zone, places_des_ancres, rayon_du_disque,
+};
 use reverb_gui::reglages::{
     AFFICHAGES, ChoixDeComposition, ChoixDeProfil, EcranChoisi, Limiteur, Poignee, Reglage,
     directions_offertes, eclairage_lu, requete_d_animation, requete_de_composition,
@@ -166,6 +168,15 @@ impl Selection {
                 self.cibles.push(cible);
             }
         }
+    }
+
+    /// Le nom de la zone que cette sélection produit quand on la colore.
+    ///
+    /// ⚠️ **Ce n'est pas [`Selection::nom`], et les confondre était un défaut.**
+    /// La règle vit dans `plan.rs`, où elle se teste ; voir
+    /// [`reverb_gui::plan::nom_de_zone`] pour ce qu'elle corrige.
+    fn nom_de_zone(&self) -> String {
+        nom_de_zone(&self.cibles)
     }
 
     /// Comment le dire à l'écran.
@@ -485,8 +496,10 @@ fn main() -> ExitCode {
 
     fenetre.set_familles(familles());
     fenetre.set_animations(noms_du_menu());
+    fenetre.set_animations_lisibles(noms_lisibles_du_menu());
     fenetre.set_directions(noms_des_directions());
     fenetre.set_affichages(noms_des_affichages());
+    fenetre.set_affichages_lisibles(noms_lisibles_des_affichages());
     fenetre.set_rayon_disque(rayon_du_disque());
     fenetre.set_champs_max(
         i32::try_from(reverb_proto::composition::Composition::CHAMPS_MAX).unwrap_or(4),
@@ -752,7 +765,9 @@ fn appliquer_la_couleur(pupitre: &Pupitre, envoi: &Sender<Request>, couleur: Rgb
         &pupitre.reglage.borrow(),
         couleur,
         visee.as_deref(),
-        &selection.nom(),
+        // ⚠️ `nom_de_zone`, jamais `nom` : le second est un libellé pour l'œil,
+        // et deux sélections différentes s'y écrivent pareil.
+        &selection.nom_de_zone(),
         &cibles(&selection),
         *selection == Selection::tout(),
         |couleur| commandes_de_couleur(&pupitre.tableau.borrow(), &selection, couleur),
@@ -1296,7 +1311,7 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
                 let _ = envoi.send(Request::ZoneList);
                 return;
             }
-            fenetre.set_animation_courante(nom.clone());
+            fenetre.set_animation_courante(SharedString::from(lisible_d_animation(&nom)));
             let _ = envoi.send(requete);
         });
     }
@@ -1359,7 +1374,7 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
                 return;
             }
             if let Some(fenetre) = faible.upgrade() {
-                fenetre.set_animation_courante(SharedString::from(AUCUNE));
+                fenetre.set_animation_courante(SharedString::from(lisible_d_animation(AUCUNE)));
             }
             pupitre.reglage.borrow_mut().animation = None;
             let _ = envoi.send(Request::Animate {
@@ -1783,12 +1798,9 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
                 return false;
             }
             let reglage = pupitre.reglage.borrow().clone();
-            fenetre.set_animation_courante(SharedString::from(
-                reglage
-                    .animation
-                    .clone()
-                    .unwrap_or_else(|| AUCUNE.to_owned()),
-            ));
+            fenetre.set_animation_courante(SharedString::from(lisible_d_animation(
+                reglage.animation.as_deref().unwrap_or(AUCUNE),
+            )));
             // Le menu montre ce qui tourne, y compris quand la fenêtre vient de
             // s'ouvrir sur un boîtier qui animait déjà.
             fenetre.set_animation_choisie(rang_dans_le_menu(reglage.animation.as_deref()));
@@ -2157,14 +2169,52 @@ fn familles() -> ModelRc<FamilleAnimation> {
 fn noms_des_directions() -> ModelRc<SharedString> {
     let noms: Vec<SharedString> = directions_offertes()
         .into_iter()
-        .map(|direction| SharedString::from(direction.slug()))
+        .map(|direction| SharedString::from(lisible_de_direction(direction.slug())))
         .collect();
     ModelRc::new(VecModel::from(noms))
 }
 
+/// Une direction telle qu'on la lit — la flèche dit le sens mieux qu'un tiret.
+///
+/// Le slug reste ce qui part au démon ; c'est le **rang** dans la liste qui
+/// relie les deux, jamais le texte. Une direction inconnue se lit sous son slug
+/// plutôt que d'être cachée : un menu plus court que le catalogue mentirait.
+fn lisible_de_direction(slug: &str) -> String {
+    match slug {
+        "bas-haut" => "Bas → haut".to_owned(),
+        "haut-bas" => "Haut → bas".to_owned(),
+        "avant-arriere" => "Avant → arrière".to_owned(),
+        "arriere-avant" => "Arrière → avant".to_owned(),
+        "horaire" => "Horaire".to_owned(),
+        "antihoraire" => "Antihoraire".to_owned(),
+        // Les deux locales de #75 : le motif se répète sur chaque objet, et le
+        // dire ici évite d'avoir à l'apprendre du README.
+        "bords-centre" => "Bords → centre (chaque objet)".to_owned(),
+        "centre-bords" => "Centre → bords (chaque objet)".to_owned(),
+        autre => autre.to_owned(),
+    }
+}
+
 /// Les cinq affichages d'écran, dans l'ordre où `EcranChoisi` les range.
+///
+/// Les mots du protocole : c'est `poser-ecran` qui les reçoit, et il en fait
+/// une `ScreenAction`. Ce qui s'affiche vient de [`noms_lisibles_des_affichages`].
 fn noms_des_affichages() -> ModelRc<SharedString> {
     let noms: Vec<SharedString> = AFFICHAGES.iter().copied().map(SharedString::from).collect();
+    ModelRc::new(VecModel::from(noms))
+}
+
+/// Les mêmes, tels qu'on les lit. « GIF » est un sigle, pas un mot.
+fn noms_lisibles_des_affichages() -> ModelRc<SharedString> {
+    let noms: Vec<SharedString> = AFFICHAGES
+        .iter()
+        .map(|nom| {
+            SharedString::from(match *nom {
+                "gif" => "GIF".to_owned(),
+                autre => lisible_d_animation(autre),
+            })
+        })
+        .collect();
     ModelRc::new(VecModel::from(noms))
 }
 
@@ -2282,13 +2332,48 @@ fn garnir_le_formulaire(fenetre: &Fenetre, pupitre: &Pupitre, ancre: Ancre) {
 /// et un menu vide se lit comme une fenêtre en panne.
 const AUCUNE: &str = "aucune";
 
-/// Ce que le menu déroulant propose : « aucune », puis l'ordre de `CATALOGUE`.
+/// Ce que le menu propose : « aucune », puis l'ordre de `CATALOGUE`.
+///
+/// ⚠️ **Ce sont les noms du protocole**, ceux qui partent sur le socket. Ce que
+/// l'utilisateur lit vient de [`noms_lisibles_du_menu`], et le **rang** relie
+/// les deux — jamais une seconde liste qui divergerait.
 fn noms_du_menu() -> ModelRc<SharedString> {
     let noms: Vec<SharedString> = std::iter::once(AUCUNE)
         .chain(CATALOGUE.iter().copied())
         .map(SharedString::from)
         .collect();
     ModelRc::new(VecModel::from(noms))
+}
+
+/// Les mêmes, tels qu'on les lit : capitale en tête, accents remis.
+///
+/// Le protocole écrit `comete` et `arc-en-ciel` — sans accent, parce qu'une
+/// commande se tape. Une pastille, elle, se lit : « Comète ».
+fn noms_lisibles_du_menu() -> ModelRc<SharedString> {
+    let noms: Vec<SharedString> = std::iter::once(AUCUNE)
+        .chain(CATALOGUE.iter().copied())
+        .map(|nom| SharedString::from(lisible_d_animation(nom)))
+        .collect();
+    ModelRc::new(VecModel::from(noms))
+}
+
+/// Le nom d'une animation tel qu'on le lit.
+///
+/// Une table pour les seuls noms que la capitalisation ne suffit pas à rendre —
+/// les accents que le protocole n'écrit pas —, et la règle générale pour tous
+/// les autres. Une famille ajoutée demain se lit donc correctement sans qu'on
+/// ait à revenir ici.
+fn lisible_d_animation(nom: &str) -> String {
+    match nom {
+        "comete" => return "Comète".to_owned(),
+        "arc-en-ciel" => return "Arc-en-ciel".to_owned(),
+        _ => {}
+    }
+    let mut lettres = nom.chars();
+    match lettres.next() {
+        Some(premiere) => premiere.to_uppercase().chain(lettres).collect(),
+        None => String::new(),
+    }
 }
 
 /// Le rang d'une animation dans le menu — zéro pour « aucune ».

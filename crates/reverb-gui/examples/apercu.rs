@@ -234,13 +234,43 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     interface.set_directions(ModelRc::new(VecModel::from(
         Direction::ALL
             .into_iter()
-            .map(|direction| SharedString::from(direction.slug()))
+            .map(|direction| {
+                SharedString::from(match direction.slug() {
+                    "bas-haut" => "Bas → haut",
+                    "haut-bas" => "Haut → bas",
+                    "avant-arriere" => "Avant → arrière",
+                    "arriere-avant" => "Arrière → avant",
+                    "horaire" => "Horaire",
+                    "antihoraire" => "Antihoraire",
+                    "bords-centre" => "Bords → centre (chaque objet)",
+                    _ => "Centre → bords (chaque objet)",
+                })
+            })
             .collect::<Vec<SharedString>>(),
     )));
     interface.set_animations(ModelRc::new(VecModel::from(
         std::iter::once("aucune")
             .chain(CATALOGUE.iter().copied())
             .map(SharedString::from)
+            .collect::<Vec<SharedString>>(),
+    )));
+    // Ce que les pastilles affichent : capitale en tête, accents remis. Le
+    // protocole, lui, écrit `comete` — sans accent, parce qu'une commande se tape.
+    interface.set_animations_lisibles(ModelRc::new(VecModel::from(
+        std::iter::once("aucune")
+            .chain(CATALOGUE.iter().copied())
+            .map(|nom| {
+                SharedString::from(match nom {
+                    "comete" => "Comète".to_owned(),
+                    "arc-en-ciel" => "Arc-en-ciel".to_owned(),
+                    autre => {
+                        let mut lettres = autre.chars();
+                        lettres.next().map_or_else(String::new, |premiere| {
+                            premiere.to_uppercase().chain(lettres).collect()
+                        })
+                    }
+                })
+            })
             .collect::<Vec<SharedString>>(),
     )));
     // « comete » : rang 1 dans le catalogue, donc 2 dans un menu qui commence
@@ -395,7 +425,7 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
         },
     ])));
     interface.set_cible(SharedString::from("la zone « radiateur »"));
-    interface.set_animation_courante(SharedString::from("comete"));
+    interface.set_animation_courante(SharedString::from("Comète"));
     interface.set_message(SharedString::from(if vraies.is_some() {
         "aperçu de la vraie image, prise sur le socket"
     } else {

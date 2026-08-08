@@ -180,6 +180,11 @@ component Titre inherits Text {
     font-weight: 700;
     color: #6f7180;
     letter-spacing: 0.8px;
+    // ⚠️ Un titre qui porte un slug de sonde — « ECRAN — gauge:kraken2023elite:
+    // coolant-temp » — fait cinquante caracteres. Sans repli, sa largeur
+    // PREFEREE devient la largeur MINIMALE du panneau, et le ScrollView sort
+    // une barre horizontale.
+    wrap: word-wrap;
 }
 
 component Carte inherits Rectangle {
@@ -250,6 +255,10 @@ export component Fenetre inherits Window {
     // familles dans l'ordre de CATALOGUE. Le rang zero n'est pas un trou, c'est
     // un choix — celui d'arreter.
     in property <[string]> animations;
+    // Ce que les pastilles AFFICHENT — « Comete », « Arc-en-ciel ». Le rappel,
+    // lui, envoie le nom du protocole : deux vues d'une meme liste, jamais deux
+    // listes, et le rang les relie.
+    in property <[string]> animations-lisibles;
     in-out property <int> animation-choisie: 0;
     // Les huit directions, dans l'ordre de `Direction::ALL` — le rang EST le
     // contrat. Une liste ecrite ici serait restee a six quand #75 en a livre
@@ -261,6 +270,7 @@ export component Fenetre inherits Window {
     in-out property <int> sonde-choisie: 0;
     // L'ecran du Kraken : ce qu'il montre, et de quoi le changer.
     in property <[string]> affichages: ["rien", "cadran", "image", "gif", "composition"];
+    in property <[string]> affichages-lisibles: ["Rien", "Cadran", "Image", "GIF", "Composition"];
     in-out property <int> affichage-choisi: 0;
     in-out property <string> argument-ecran;
     in-out property <int> luminosite-ecran: 100;
@@ -440,7 +450,7 @@ export component Fenetre inherits Window {
                 width: 130px;
                 height: 28px;
                 text <=> root.nouveau-profil;
-                placeholder-text: "sous ce nom…";
+                placeholder-text: "Enregistrer sous…";
                 accepted => { root.enregistrer-profil(self.text); }
             }
             Button {
@@ -454,7 +464,7 @@ export component Fenetre inherits Window {
 
             // ── Ce qu'on vise ──────────────────────────────────────────────
             Carte {
-                width: 250px;
+                width: 224px;
                 VerticalLayout {
                     padding: 12px;
                     spacing: 14px;
@@ -471,11 +481,11 @@ export component Fenetre inherits Window {
                         HorizontalLayout {
                             spacing: 6px;
                             Button { text: "Tout"; clicked => { root.choisir-cible("all"); } }
-                            Button { text: "Ventilos"; clicked => { root.choisir-cible("fans"); } }
+                            Button { text: "Ventilateurs"; clicked => { root.choisir-cible("fans"); } }
                             Button { text: "RAM"; clicked => { root.choisir-cible("ram"); } }
                         }
                         Text {
-                            text: "Clique une LED sur la maquette pour la viser seule, ou trace un rectangle.";
+                            text: "Clique une LED pour la viser seule. Trace un rectangle pour en prendre plusieurs, Ctrl enfoncé pour les ajouter.";
                             font-size: 11px;
                             color: #6f7180;
                             wrap: word-wrap;
@@ -490,11 +500,11 @@ export component Fenetre inherits Window {
                         Titre { text: "ZONES"; }
                         LineEdit {
                             text <=> root.nouvelle-zone;
-                            placeholder-text: "nom de la zone";
+                            placeholder-text: "Nom de la zone";
                             accepted => { root.creer-zone(self.text); }
                         }
                         Button {
-                            text: "De la sélection";
+                            text: "Créer la zone";
                             clicked => { root.creer-zone(root.nouvelle-zone); }
                         }
                         for couche in root.zones: HorizontalLayout {
@@ -533,7 +543,7 @@ export component Fenetre inherits Window {
                             }
                         }
                         if root.zones.length == 0: Text {
-                            text: "Aucune zone. Sélectionne des LED sur la maquette, nomme-la, et elle prendra sa propre couleur ou sa propre animation sans toucher au reste.";
+                            text: "Aucune zone. Sélectionne des LED sur la maquette, donne-lui un nom, et elle prendra sa propre couleur ou sa propre animation sans toucher au reste.";
                             font-size: 11px;
                             color: #6f7180;
                             wrap: word-wrap;
@@ -693,14 +703,30 @@ export component Fenetre inherits Window {
                                 // Le rectangle en cours de tracé. Il ne vit que pendant
                                 // le geste : ce qu'il attrape n'est décidé qu'au
                                 // relâchement, par `plan.rs`.
+                                // ⚠️ Le trace se voyait a peine : un remplissage
+                                // a 12 % d'opacite et un trait d'un pixel, sur
+                                // une maquette qui brille de cent vingt-quatre
+                                // halos. On ne savait pas qu'on selectionnait.
                                 if zone.trace: Rectangle {
                                     x: min(zone.depart-x, zone.pressed-x);
                                     y: min(zone.depart-y, zone.pressed-y);
                                     width: abs(zone.pressed-x - zone.depart-x);
                                     height: abs(zone.pressed-y - zone.depart-y);
-                                    background: #4d7cff20;
-                                    border-width: 1px;
-                                    border-color: #4d7cff;
+                                    background: #4d7cff38;
+                                    border-width: 2px;
+                                    border-color: #8fb0ff;
+                                    // Quatre poignees aux coins : elles disent
+                                    // « rectangle » la ou un cadre seul se
+                                    // confond avec les aretes du boitier.
+                                    for coin in [{ h: 0.0, v: 0.0 }, { h: 1.0, v: 0.0 },
+                                                 { h: 0.0, v: 1.0 }, { h: 1.0, v: 1.0 }]: Rectangle {
+                                        width: 7px;
+                                        height: 7px;
+                                        border-radius: 3.5px;
+                                        background: #ffffff;
+                                        x: coin.h * parent.width - self.width / 2;
+                                        y: coin.v * parent.height - self.height / 2;
+                                    }
                                 }
 
                                 clavier := FocusScope {
@@ -763,7 +789,11 @@ export component Fenetre inherits Window {
                                     // poussaient le second disque hors champ. Le
                                     // Flickable reste le filet, il n'est plus le
                                     // moyen normal de voir la derniere carte.
-                                    min-width: 106px;
+                                    // 94 px : cinq cartes tiennent dans la
+                                    // colonne centrale retrecie. Le Flickable
+                                    // reste le filet, pas le moyen normal de
+                                    // voir la derniere.
+                                    min-width: 94px;
                                     horizontal-stretch: 1;
                                     background: #14141b;
                                     border-radius: 8px;
@@ -805,8 +835,12 @@ export component Fenetre inherits Window {
             }
 
             // ── Ce qu'on lui fait ──────────────────────────────────────────
+            // 404 px et non 350 : a 350, « Appliquer a la zone « radiateur » »
+            // et « ECRAN — gauge:kraken2023elite:coolant-temp » depassaient, et
+            // le `ScrollView` sortait une barre de defilement HORIZONTALE — la
+            // pire des reponses, puisqu'elle cache ce qu'elle sert a atteindre.
             Carte {
-                width: 350px;
+                width: 404px;
                 VerticalLayout {
                     padding: 12px;
                     spacing: 10px;
@@ -850,9 +884,9 @@ export component Fenetre inherits Window {
                                 // Trois axes qu'on comprend en les bougeant, chacun
                                 // peint par ce qu'il parcourt.
                                 for axe in [
-                                    { nom: "teinte", valeur: root.teinte, maximum: 359 },
-                                    { nom: "saturation", valeur: root.saturation, maximum: 100 },
-                                    { nom: "luminosité", valeur: root.luminosite, maximum: 100 },
+                                    { nom: "Teinte", valeur: root.teinte, maximum: 359 },
+                                    { nom: "Saturation", valeur: root.saturation, maximum: 100 },
+                                    { nom: "Luminosité", valeur: root.luminosite, maximum: 100 },
                                 ]: VerticalLayout {
                                     // ⚠️ Sans ce zéro, l'étiquette se retrouve
                                     // plus près du curseur du DESSOUS que du
@@ -878,16 +912,16 @@ export component Fenetre inherits Window {
                                     Curseur {
                                         valeur: axe.valeur;
                                         maximum: axe.maximum;
-                                        voie: axe.nom == "teinte"
+                                        voie: axe.nom == "Teinte"
                                             ? @linear-gradient(90deg,
                                                 #ff0000 0%, #ffff00 17%, #00ff00 33%,
                                                 #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)
-                                            : axe.nom == "saturation"
+                                            : axe.nom == "Saturation"
                                             ? @linear-gradient(90deg, root.teinte-grise 0%, root.teinte-pure 100%)
                                             : @linear-gradient(90deg, #000000 0%, root.teinte-pure 100%);
                                         change(valeur) => {
-                                            if (axe.nom == "teinte") { root.teinte-changee(valeur); }
-                                            else if (axe.nom == "saturation") { root.saturation-changee(valeur); }
+                                            if (axe.nom == "Teinte") { root.teinte-changee(valeur); }
+                                            else if (axe.nom == "Saturation") { root.saturation-changee(valeur); }
                                             else { root.luminosite-changee(valeur); }
                                         }
                                     }
@@ -915,8 +949,13 @@ export component Fenetre inherits Window {
                                         }
                                     }
                                 }
+                                // ⚠️ Texte FIXE. « Appliquer a la zone
+                                // « radiateur » » elargissait le panneau : un
+                                // Button n'elide pas, sa largeur preferee est
+                                // celle de son texte. La cible se lit dans la
+                                // colonne de gauche, sous CIBLE.
                                 Button {
-                                    text: "Appliquer à " + root.cible;
+                                    text: "Appliquer la couleur";
                                     clicked => { root.appliquer-couleur(); }
                                 }
 
@@ -935,7 +974,7 @@ export component Fenetre inherits Window {
                                         width: (parent.width - (parent.colonnes - 1) * 4px) / parent.colonnes;
                                         x: Math.mod(rang, parent.colonnes) * (self.width + 4px);
                                         y: Math.floor(rang / parent.colonnes) * parent.pas;
-                                        texte: nom;
+                                        texte: root.animations-lisibles[rang];
                                         retenue: root.animation-choisie == rang;
                                         discrete: rang == 0;
                                         choisie => {
@@ -960,7 +999,7 @@ export component Fenetre inherits Window {
                                 HorizontalLayout {
                                     spacing: 8px;
                                     Text {
-                                        text: "vitesse " + root.vitesse;
+                                        text: "Vitesse " + root.vitesse;
                                         font-size: 12px;
                                         color: #8a8c9b;
                                         vertical-alignment: center;
@@ -997,7 +1036,7 @@ export component Fenetre inherits Window {
                                 if root.famille-retenue.exige-une-sonde: VerticalLayout {
                                     spacing: 2px;
                                     Text {
-                                        text: "sonde suivie";
+                                        text: "Sonde suivie";
                                         font-size: 12px;
                                         color: #8a8c9b;
                                     }
@@ -1021,7 +1060,7 @@ export component Fenetre inherits Window {
                                 HorizontalLayout {
                                     spacing: 8px;
                                     Text {
-                                        text: "lumière " + root.luminosite-ecran;
+                                        text: "Lumière " + root.luminosite-ecran;
                                         font-size: 12px;
                                         color: #8a8c9b;
                                         vertical-alignment: center;
@@ -1045,7 +1084,7 @@ export component Fenetre inherits Window {
                                         width: (parent.width - (parent.colonnes - 1) * 4px) / parent.colonnes;
                                         x: Math.mod(rang, parent.colonnes) * (self.width + 4px);
                                         y: Math.floor(rang / parent.colonnes) * parent.pas;
-                                        texte: nom;
+                                        texte: root.affichages-lisibles[rang];
                                         retenue: root.affichage-choisi == rang;
                                         discrete: rang == 0;
                                         // Choisir, c'est composer : la poignee se
@@ -1070,7 +1109,7 @@ export component Fenetre inherits Window {
                                 // donc une dependance de runtime que l'ADR-001
                                 // refuse. Le chemin se colle depuis le gestionnaire.
                                 if root.affichage-choisi == 2 || root.affichage-choisi == 3: LineEdit {
-                                    placeholder-text: "/chemin/absolu/vers/le/fichier";
+                                    placeholder-text: "/chemin/absolu/vers/l'image";
                                     text <=> root.argument-ecran;
                                     edited => { root.saisir-ecran(); }
                                 }
@@ -1130,7 +1169,7 @@ export component Fenetre inherits Window {
 
                                     Text {
                                         text: root.champs-poses + " champ" + (root.champs-poses > 1 ? "s" : "")
-                                            + " sur " + root.champs-max + " — clique une ancre pour la garnir";
+                                            + " sur " + root.champs-max + ". Clique une ancre du disque pour la garnir.";
                                         font-size: 11px;
                                         color: #6f7180;
                                         wrap: word-wrap;
@@ -1139,7 +1178,7 @@ export component Fenetre inherits Window {
                                     Titre { text: "FOND"; }
                                     HorizontalLayout {
                                         spacing: 4px;
-                                        for nom[rang] in ["noir", "image"]: Pastille {
+                                        for nom[rang] in ["Noir", "Image"]: Pastille {
                                             horizontal-stretch: 1;
                                             texte: nom;
                                             retenue: root.fond-choisi == rang;
@@ -1157,10 +1196,10 @@ export component Fenetre inherits Window {
                                     }
 
                                     Rectangle { height: 2px; }
-                                    Titre { text: "LE CHAMP — " + root.ancre-visee; }
+                                    Titre { text: "CHAMP DE L'ANCRE « " + root.ancre-visee + " »"; }
                                     HorizontalLayout {
                                         spacing: 4px;
-                                        for nom[rang] in ["température", "texte"]: Pastille {
+                                        for nom[rang] in ["Température", "Texte"]: Pastille {
                                             horizontal-stretch: 1;
                                             texte: nom;
                                             retenue: root.source-choisie == rang;
@@ -1179,8 +1218,8 @@ export component Fenetre inherits Window {
                                     // regarde.
                                     LineEdit {
                                         placeholder-text: root.source-choisie == 0
-                                            ? "libellé — « LIQUIDE »"
-                                            : "le texte à afficher";
+                                            ? "Libellé affiché — « LIQUIDE »"
+                                            : "Le texte à afficher";
                                         text <=> root.libelle-champ;
                                         edited => { root.saisir-ecran(); }
                                     }

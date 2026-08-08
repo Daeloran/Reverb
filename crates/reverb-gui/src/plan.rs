@@ -1407,3 +1407,56 @@ pub fn places_des_ancres() -> Vec<PlaceAncre> {
 pub fn rayon_du_disque() -> f32 {
     f32::from(screen::VISIBLE_DISC_RADIUS) / f32::from(screen::WIDTH)
 }
+
+// ---------------------------------------------------------------------------
+// Le nom d'une zone née d'une sélection
+// ---------------------------------------------------------------------------
+
+/// Le nom de la zone qu'une sélection produit quand on la colore.
+///
+/// # Le défaut que ceci corrige
+///
+/// Colorer une sélection partielle pendant qu'une animation tourne la déclare
+/// en zone, pour que le reste du boîtier garde la sienne (#63). Ce nom-là était
+/// le **libellé d'affichage** de la sélection — « 3 organes entiers », « 24 LED
+/// sur 4 organes » —, et un libellé n'est pas un identifiant : **deux
+/// sélections différentes de trois organes s'y écrivent pareil**.
+///
+/// La seconde réécrivait donc la zone de la première, et lui **prenait ses
+/// LED** — une LED n'appartenant qu'à une zone à la fois. Symptôme observé :
+/// « j'ai donné une couleur à une zone, ça a changé l'animation d'une autre, et
+/// pas d'une troisième ». Aucun message : les deux zones existaient toujours.
+///
+/// ⚠️ **Le déterminisme reste la propriété qu'on veut** : deux fois la même
+/// sélection rendent le même nom, sans quoi chaque clic empilerait une zone de
+/// plus. Ce qui manquait, c'est l'**injectivité** — deux sélections différentes
+/// doivent rendre deux noms différents.
+pub fn nom_de_zone(cibles: &[Cible]) -> String {
+    // Trié : les cibles sont ajoutées dans l'ordre du geste, et deux sélections
+    // des mêmes LED prises dans un ordre différent sont la même sélection.
+    let mut rangs: Vec<String> = cibles
+        .iter()
+        .map(|cible| match cible {
+            Cible::Led { position, led } => format!("f{}-{led}", position.slug()),
+            Cible::Barrette { slot, led } => format!("s{slot}-{led}"),
+        })
+        .collect();
+    rangs.sort();
+    rangs.dedup();
+    format!("sélection-{:08x}", empreinte(&rangs.join(",")))
+}
+
+/// Une empreinte stable d'une chaîne.
+///
+/// FNV-1a 32 bits, huit lignes. ⚠️ **`DefaultHasher` ne promet pas d'être
+/// stable entre deux versions de Rust**, et ce nom-là finit dans
+/// `/var/lib/reverb/zones.conf` : une zone qui changerait de nom à une montée
+/// de compilateur laisserait l'ancienne derrière elle, sans un mot.
+fn empreinte(texte: &str) -> u32 {
+    let mut somme: u32 = 0x811c_9dc5;
+    for octet in texte.as_bytes() {
+        somme ^= u32::from(*octet);
+        somme = somme.wrapping_mul(0x0100_0193);
+    }
+    somme
+}
