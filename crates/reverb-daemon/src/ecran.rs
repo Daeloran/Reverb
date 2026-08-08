@@ -543,16 +543,28 @@ impl Dalle {
     }
 
     /// Une dalle d'une seule couleur, donnée en RGB.
+    ///
+    /// ⚠️ **Remplie par doublements successifs, et non pixel par pixel.** Un
+    /// `cycle().take(IMAGE_LEN).collect()` — ce qu'il y avait ici — coûte
+    /// 1 228 800 pas d'itérateur ; sans optimisation ils ne s'inlinent pas, et
+    /// une dalle unie prenait alors une quinzaine de millisecondes. Ce n'est pas
+    /// un détail de confort : `Dalle::noire` passe par ici, une composition à
+    /// fond noir la reconstruit à chaque recomposition, et #83 vient justement de
+    /// mesurer que le temps passé sur ce chemin gèle le boîtier.
+    ///
+    /// Vingt recopies de tailles croissantes remplacent le million de pas, et le
+    /// compilateur les rend en autant de `memcpy`.
     pub fn unie(couleur: (u8, u8, u8)) -> Dalle {
         let triplet = screen::pixel(couleur.0, couleur.1, couleur.2);
-        Dalle {
-            octets: triplet
-                .iter()
-                .copied()
-                .cycle()
-                .take(screen::IMAGE_LEN)
-                .collect(),
+        let mut octets = Vec::with_capacity(screen::IMAGE_LEN);
+        octets.extend_from_slice(&triplet);
+        while octets.len() < screen::IMAGE_LEN {
+            // Jamais plus que ce qu'on a déjà écrit, ni que ce qu'il reste à
+            // écrire : la longueur finale est donc exactement `IMAGE_LEN`.
+            let a_recopier = (screen::IMAGE_LEN - octets.len()).min(octets.len());
+            octets.extend_from_within(..a_recopier);
         }
+        Dalle { octets }
     }
 
     /// Les octets à pousser sur l'endpoint bulk.

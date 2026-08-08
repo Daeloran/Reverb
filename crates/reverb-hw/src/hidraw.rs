@@ -8,7 +8,10 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use reverb_proto::{Frame, Model, VENDOR_ID};
 
@@ -209,13 +212,61 @@ impl OpenController {
     }
 }
 
-/// Nombre de trames lues avant d'abandonner l'attente d'une réponse.
+/// Nombre de trames qu'une question consent à écarter avant d'abandonner.
 ///
-/// Le Kraken émet spontanément un rapport d'état `75 02` **chaque seconde**
-/// (spec §7.1) : une réponse à une question ne sera donc pas forcément la
-/// première trame qui arrive. Vingt lectures laissent passer une poignée de ces
-/// bavardages sans jamais bloquer indéfiniment.
-const MAX_LECTURES: usize = 20;
+/// Ces contrôleurs **émettent sans qu'on leur demande** — un rapport d'état des
+/// ventilateurs `67 02` par seconde et par contrôleur (`SPEC-PROTOCOLE-NZXT`
+/// §7.1), des accusés `ff 01` (§7.2). Une réponse à une question n'est donc pas
+/// forcément la première trame qui arrive, et il faut savoir en écarter quelques
+/// unes.
+///
+/// ⚠️ **Cette borne compte des trames, jamais du temps** — voir
+/// [`DELAI_LECTURE`], qui est l'autre moitié, et sans laquelle celle-ci ne borne
+/// rien du tout.
+pub const MAX_LECTURES: usize = 20;
+
+/// Le temps laissé à **une** trame pour arriver.
+///
+/// # Le défaut que ceci corrige (#83)
+///
+/// Le commentaire de [`MAX_LECTURES`] promettait « sans jamais bloquer
+/// indéfiniment ». C'était faux, et ça a coûté vingt minutes de démon gelé sur
+/// SHYNAEL le 2026-08-08 : zéro tic de CPU sur tous les fils, cinq clients sans
+/// réponse, `status` sans un octet après quinze secondes. Le descripteur était
+/// ouvert en mode bloquant, et un périphérique qui n'émet plus **rien** ne fait
+/// pas échouer la lecture — il la fait attendre. Vingt lectures dont la première
+/// ne revient jamais, c'est une attente infinie déguisée en boucle bornée.
+///
+/// # Pourquoi une demi-seconde
+///
+/// Le pire acquittement relevé est de **18 ms** (`SPEC-KRAKEN-LCD` §3.2 :
+/// 3 ms pour `36 01` → `37 01`, 18 ms pour `36 02` → `37 02`). Une demi-seconde
+/// en laisse vingt-sept fois plus.
+///
+/// ⚠️ **Le délai vaut par lecture, pas pour la question entière**, si bien que le
+/// pire cas est `DELAI_LECTURE × MAX_LECTURES`, soit dix secondes. C'est
+/// délibéré : un périphérique vivant mais bavard ne doit pas être déclaré mort,
+/// parce que trois questions expirées font **rendre la dalle au firmware** (#70).
+/// Dix secondes restent sous les [`reverb_proto::screen::FIRMWARE_FALLBACK_SECS`]
+/// au bout desquelles le firmware la reprend de toute façon — au-delà, insister
+/// ne servirait plus à rien.
+pub const DELAI_LECTURE: Duration = Duration::from_millis(500);
+
+/// Entre deux tentatives de lecture sur un descripteur non bloquant.
+///
+/// Deux millisecondes : un acquittement arrive en 3 à 18 ms (spec §3.2), donc le
+/// cas courant coûte une poignée de réveils. Le cas muet en coûte deux cent
+/// cinquante, chacun un appel système qui rend `EAGAIN` sans rien faire — et il
+/// ne se produit que trois fois avant que la vigie de #70 renonce.
+const PAS_DE_SCRUTATION: Duration = Duration::from_millis(2);
+
+/// `O_NONBLOCK`, valeur Linux.
+///
+/// Écrite ici parce que la bibliothèque standard ne l'expose pas et que le projet
+/// refuse une dépendance pour une constante (ADR-001). C'est la même approche que
+/// les numéros d'`ioctl` de `usbfs.rs`, à ceci près qu'elle ne demande **aucun
+/// `unsafe`** : `OpenOptionsExt::custom_flags` est sûr.
+const O_NONBLOCK: i32 = 0o4000;
 
 /// Pose une question et attend la réponse dont on connaît l'en-tête.
 ///
@@ -224,18 +275,25 @@ const MAX_LECTURES: usize = 20;
 ///
 /// # Erreurs
 ///
-/// [`io::ErrorKind::TimedOut`] si la réponse n'arrive pas en [`MAX_LECTURES`]
-/// trames. Le périphérique est ouvert une seule fois pour les deux sens : le
-/// rouvrir entre l'écriture et la lecture ferait perdre les réponses émises
-/// entre-temps.
+/// [`io::ErrorKind::TimedOut`] si aucune trame n'arrive en [`DELAI_LECTURE`], ou
+/// si la réponse attendue ne s'est pas montrée en [`MAX_LECTURES`] trames. Le
+/// périphérique est ouvert une seule fois pour les deux sens : le rouvrir entre
+/// l'écriture et la lecture ferait perdre les réponses émises entre-temps.
 pub fn ask(path: &Path, question: &Frame, attendu: &[u8]) -> io::Result<Frame> {
-    let mut fichier = OpenOptions::new().read(true).write(true).open(path)?;
-    fichier.write_all(question)?;
-    fichier.flush()?;
+    // ⚠️ **Non bloquant dès l'ouverture.** C'est le seul point du chemin qui
+    // rende le délai possible : la bibliothèque standard n'expose ni `poll` ni
+    // `SO_RCVTIMEO` sur un fichier, et un fil dédié par lecture laisserait un fil
+    // et un descripteur en fuite à chaque périphérique muet.
+    let mut fichier = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(O_NONBLOCK)
+        .open(path)?;
+    ecrire(&mut fichier, question)?;
 
     for _ in 0..MAX_LECTURES {
         let mut reponse = [0u8; reverb_proto::FRAME_LEN];
-        let lus = fichier.read(&mut reponse)?;
+        let lus = lire(&mut fichier, &mut reponse, attendu)?;
         if lus >= attendu.len() && reponse.starts_with(attendu) {
             return Ok(reponse);
         }
@@ -245,13 +303,80 @@ pub fn ask(path: &Path, question: &Frame, attendu: &[u8]) -> io::Result<Frame> {
         io::ErrorKind::TimedOut,
         format!(
             "pas de réponse {} après {MAX_LECTURES} trames lues",
-            attendu
-                .iter()
-                .map(|o| format!("{o:02x}"))
-                .collect::<Vec<_>>()
-                .join(" ")
+            en_hexa(attendu)
         ),
     ))
+}
+
+/// Écrit la question, en tolérant qu'un descripteur non bloquant se dérobe.
+fn ecrire(fichier: &mut File, question: &Frame) -> io::Result<()> {
+    let echeance = Instant::now() + DELAI_LECTURE;
+    loop {
+        match fichier.write_all(question).and_then(|()| fichier.flush()) {
+            Ok(()) => return Ok(()),
+            Err(erreur) if patienter(&erreur, echeance) => {}
+            Err(erreur) if erreur.kind() == io::ErrorKind::WouldBlock => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("le contrôleur n'a pas pris la question en {DELAI_LECTURE:?}"),
+                ));
+            }
+            Err(erreur) => return Err(erreur),
+        }
+    }
+}
+
+/// Lit **une** trame, ou rend [`io::ErrorKind::TimedOut`] au bout de
+/// [`DELAI_LECTURE`].
+///
+/// ⚠️ **Une lecture qui expire arrête la question.** Réessayer consommerait les
+/// vingt tentatives à attendre un périphérique dont on vient d'établir qu'il ne
+/// dit plus rien — dix secondes pour apprendre ce qu'on savait à la première
+/// demi-seconde.
+///
+/// `attendu` ne sert qu'au message : sans lui, les trois étapes de la poignée de
+/// main d'image (`30 01`, `36 01`, `36 02`) rendraient la même ligne de journal,
+/// et on ne saurait pas laquelle a lâché.
+fn lire(fichier: &mut File, tampon: &mut [u8], attendu: &[u8]) -> io::Result<usize> {
+    let echeance = Instant::now() + DELAI_LECTURE;
+    loop {
+        match fichier.read(tampon) {
+            Ok(lus) => return Ok(lus),
+            Err(erreur) if patienter(&erreur, echeance) => {}
+            Err(erreur) if erreur.kind() == io::ErrorKind::WouldBlock => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "pas de trame {} en {DELAI_LECTURE:?} — le contrôleur ne répond plus",
+                        en_hexa(attendu)
+                    ),
+                ));
+            }
+            Err(erreur) => return Err(erreur),
+        }
+    }
+}
+
+/// Faut-il redemander ? Vrai tant que l'échéance tient, pour les deux erreurs qui
+/// ne disent rien de l'état du périphérique.
+fn patienter(erreur: &io::Error, echeance: Instant) -> bool {
+    match erreur.kind() {
+        // Un signal reçu pendant l'appel : il n'a pas eu lieu, il se refait.
+        io::ErrorKind::Interrupted => true,
+        io::ErrorKind::WouldBlock if Instant::now() < echeance => {
+            thread::sleep(PAS_DE_SCRUTATION);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn en_hexa(octets: &[u8]) -> String {
+    octets
+        .iter()
+        .map(|octet| format!("{octet:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
