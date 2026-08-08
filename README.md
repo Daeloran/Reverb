@@ -31,10 +31,11 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Démon | ✅ éclairage sans fenêtre, descripteurs tenus |
 | Géométrie du boîtier | ✅ mesurée le 2026-07-31 |
 | Catalogue d'animations | ✅ dix familles, huit directions dont deux locales |
-| Interface Slint | ✅ maquette habillée, deux vues, zones, sondes, écran |
+| Interface Slint | ✅ trois colonnes, onglets, profils, dix familles, composition |
 | Écran du Kraken dans le démon | ✅ luminosité, cadran, image, GIF |
 | Profils — une ambiance sous un nom | ✅ éclairage, zones et écran, deux exemples livrés |
 | Composition de l'écran | ✅ un fond, quatre informations, cinq ancres dans le disque |
+| La fenêtre expose tout le protocole | ✅ vérifié par des tests de couverture, pas à l'œil |
 
 ## Ce que les protocoles permettent
 
@@ -337,7 +338,46 @@ sudo install -Dm 0644 packaging/reverb.svg /usr/local/share/icons/hicolor/scalab
 sudo install -Dm 0644 packaging/reverb.desktop /usr/local/share/applications/reverb.desktop
 ```
 
-Le boîtier y est dessiné **vu depuis le panneau latéral gauche, face à la carte mère** :
+**Trois colonnes : ce qu'on vise à gauche, l'objet au centre, ce qu'on lui fait à droite.**
+
+```
+ REVERB ●          AMBIANCES  abysse  forge  [soirée d'été]   [nom…] Enregistrer
+┌──────────────┬────────────────────────────────┬───────────────────────────────┐
+│ CIBLE        │ LE BOÎTIER      [LED][de face] │ ÉCLAIRAGE │ ÉCRAN │ VENTILOS  │
+│ [tout][…][…] │                                │ COULEUR ████████  ff40ff      │
+│              │                                │ teinte ══════○══              │
+│ ZONES        │        ( la maquette )         │ ANIMATION — comete            │
+│ ▸ radiateur  │                                │ [aucune][vague][comète]       │
+│ ▸ ram        │                                │ [respiration][arc-en-ciel]…   │
+│ [+ de la     ├────────────────────────────────┤ vitesse ══○══  [direction ▾]  │
+│    sélection]│ SONDES  CPU 61.8  Liquide 34.2 │                               │
+└──────────────┴────────────────────────────────┴───────────────────────────────┘
+```
+
+⚠️ **Les onglets ne sont pas un rangement, ils corrigent une mesure.** La fenêtre empilait ses
+six panneaux dans **une seule** colonne de 340 px : à 1180×760, leur hauteur cumulée dépassait
+1 400 px pour 690 px visibles — ÉCRAN et VENTILATEURS étaient entièrement sous le pli, et rien
+ne le disait. Les profils, les quatre familles d'animation nouvelles et la composition d'écran
+y ajoutaient six cents pixels de plus.
+
+**Les ambiances sont en tête de fenêtre**, et non dans un panneau : rappeler un profil change le
+plus de choses d'un seul clic. ⚠️ La pastille allumée dit « **rappelé** », jamais « actif » — le
+protocole ne dit pas quel profil est actif, `status` n'en garde aucune trace. C'est une mémoire de
+fenêtre, effacée dès qu'une commande change l'éclairage : dire « actif » d'une ambiance dont on
+vient de changer la couleur serait faux, et c'est justement ce qu'on regarderait pour s'y retrouver.
+
+**Les dix familles sont des pastilles, pas un menu déroulant** : dix lignes cachées derrière un
+clic, c'est ne pas savoir ce qui existe. ⚠️ **Le menu des directions ne s'affiche que pour les
+familles qui en acceptent une**, et c'est le catalogue qui décide — `rotation`, `pouls`,
+`scintillement` et `thermique` la refusent, et la leur donner ferait rejeter l'`animate` **entier**,
+pas seulement la clé.
+
+**Les sondes se choisissent sous leur nom lisible** — « Liquide », « CPU » —, pour `thermique`
+comme pour le cadran de l'écran, qui imposait encore `kraken2023elite:coolant-temp`. ⚠️ Le menu
+n'offre que les **quatre familles retenues** ; un cadran posé par le socket sur l'une des seize
+autres laisse donc le menu où il est, et c'est le bandeau « ÉCRAN — gauge:… » qui dit la vérité.
+
+Le boîtier est dessiné **vu depuis le panneau latéral gauche, face à la carte mère** :
 l'arrière à gauche, l'avant à droite. C'est le point de vue depuis lequel la géométrie a été
 relevée, et celui depuis lequel on lit ses ventilateurs quand on se penche sur le bureau.
 
@@ -382,7 +422,28 @@ ses propres LED sans avaler le centre d'un autre ventilateur. Le cadre est donc 
 elliptique, entre **1,20** et **1,25** — les deux bornes que la mesure laisse.
 
 `cargo run --release --example apercu -p reverb-gui` dessine la fenêtre **sans écran**, dans un
-fichier : c'est ainsi qu'on vérifie une mise en page sans ouvrir de session graphique.
+fichier : c'est ainsi qu'on vérifie une mise en page sans ouvrir de session graphique. Quatre
+variables d'environnement en montrent les autres faces — sans elles, deux tiers du panneau de
+droite ne se vérifieraient jamais autrement qu'à l'œil nu :
+
+```bash
+REVERB_VUE=iso                              apercu iso.ppm        # la vue de trois-quarts
+REVERB_DETAIL=ventilo                       apercu organes.ppm    # les 14 organes, pas les 124 LED
+REVERB_ONGLET=ecran REVERB_AFFICHAGE=composition apercu compo.ppm # le disque des cinq ancres
+REVERB_ONGLET=ventilos                      apercu ventilos.ppm   # les quatorze canaux
+```
+
+### La composition, depuis la fenêtre
+
+L'onglet ÉCRAN dessine **le disque de la dalle** et ses cinq ancres : on clique celle qu'on veut
+garnir, on choisit une température ou un texte, on pose. Les ancres occupées portent leur libellé.
+
+⚠️ **Ce disque n'est pas un dessin.** Ses cinq boîtes viennent de `Ancre::boite()` — celles que le
+démon assombrit et sur lesquelles il écrit —, et son rayon de `screen::VISIBLE_DISC_RADIUS`. La
+dalle est ronde, 21 % du tampon ne s'affiche nulle part, et composer sur un carré serait juger la
+mise en page sur une surface qui n'existe pas. C'est la règle de la maquette — aucune coordonnée
+dans le `.slint` — appliquée à la dalle : le jour où la mire de #77 mesurera le vrai bord, une
+constante changera et la fenêtre suivra.
 
 ### Ce que la fenêtre ne fait pas
 
@@ -405,8 +466,10 @@ fichier : c'est ainsi qu'on vérifie une mise en page sans ouvrir de session gra
   nommer, leur donner leur couleur.
 - Le chemin d'une image se **colle dans un champ de texte**, il ne s'ouvre pas dans un sélecteur de
   fichiers : une boîte de dialogue demanderait le portail XDG, donc un client D-Bus, donc une
-  dépendance de runtime que l'ADR-001 refuse. C'est le seul endroit de la fenêtre où l'on tape au
-  lieu de cliquer, et c'est un manque assumé.
+  dépendance de runtime que l'ADR-001 refuse. C'est, avec le nom d'une zone, d'un profil et le
+  libellé d'un champ, l'un des rares endroits où l'on tape au lieu de cliquer — un manque assumé.
+- Elle ne montre **pas quel profil est actif**, parce que le protocole ne le dit pas. Elle montre
+  celui qu'elle vient de **rappeler**, et l'oublie au premier changement d'éclairage.
 
 ### Les zones — une zone, une couche
 

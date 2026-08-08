@@ -20,10 +20,11 @@
 
 use std::rc::Rc;
 
-use reverb_anim::{CATALOGUE, Geometrie};
-use reverb_gui::plan::{Plan, halo};
+use reverb_anim::{Animation, CATALOGUE, Direction, Geometrie};
+use reverb_gui::plan::{Plan, halo, places_des_ancres, rayon_du_disque};
 use reverb_gui::{
-    FamilleAnimation, Fenetre, LigneTemperature, LigneVentilateur, LigneZone, PointHalo, PointLed,
+    AncreEcran, FamilleAnimation, Fenetre, LigneProfil, LigneTemperature, LigneVentilateur,
+    LigneZone, PointHalo, PointLed,
 };
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
 use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
@@ -33,8 +34,8 @@ use slint::platform::software_renderer::{
 use slint::platform::{Platform, WindowAdapter};
 use slint::{Color, ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
 
-const LARGEUR: u32 = 1180;
-const HAUTEUR: u32 = 760;
+const LARGEUR: u32 = 1280;
+const HAUTEUR: u32 = 820;
 
 /// Une plateforme Slint qui n'a pas d'écran, et n'en cherche pas.
 struct SansEcran {
@@ -213,14 +214,39 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     interface.set_familles(ModelRc::new(VecModel::from(
         CATALOGUE
             .iter()
-            .map(|nom| FamilleAnimation {
-                nom: SharedString::from(*nom),
-                effet: SharedString::from(
-                    "Une phrase qui décrit l'effet, sur deux lignes le cas échéant.",
-                ),
-                accepte_couleur: true,
+            .map(|nom| {
+                let acceptees = Animation::par_nom(nom)
+                    .map_or(&[] as &[&str], |animation| animation.parametres_acceptes());
+                FamilleAnimation {
+                    nom: SharedString::from(*nom),
+                    effet: SharedString::from(
+                        "Une phrase qui décrit l'effet, sur deux lignes le cas échéant.",
+                    ),
+                    accepte_couleur: acceptees.contains(&"couleur"),
+                    suit_une_direction: acceptees.contains(&"direction"),
+                    exige_une_sonde: Animation::par_nom(nom).is_ok_and(|animation| {
+                        animation.parametres_obligatoires().contains(&"sonde")
+                    }),
+                }
             })
             .collect::<Vec<FamilleAnimation>>(),
+    )));
+    interface.set_directions(ModelRc::new(VecModel::from(
+        Direction::ALL
+            .into_iter()
+            .map(|direction| {
+                SharedString::from(match direction.slug() {
+                    "bas-haut" => "Bas → haut",
+                    "haut-bas" => "Haut → bas",
+                    "avant-arriere" => "Avant → arrière",
+                    "arriere-avant" => "Arrière → avant",
+                    "horaire" => "Horaire",
+                    "antihoraire" => "Antihoraire",
+                    "bords-centre" => "Bords → centre (chaque objet)",
+                    _ => "Centre → bords (chaque objet)",
+                })
+            })
+            .collect::<Vec<SharedString>>(),
     )));
     interface.set_animations(ModelRc::new(VecModel::from(
         std::iter::once("aucune")
@@ -228,13 +254,110 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             .map(SharedString::from)
             .collect::<Vec<SharedString>>(),
     )));
+    // Ce que les pastilles affichent : capitale en tête, accents remis. Le
+    // protocole, lui, écrit `comete` — sans accent, parce qu'une commande se tape.
+    interface.set_animations_lisibles(ModelRc::new(VecModel::from(
+        std::iter::once("aucune")
+            .chain(CATALOGUE.iter().copied())
+            .map(|nom| {
+                SharedString::from(match nom {
+                    "comete" => "Comète".to_owned(),
+                    "arc-en-ciel" => "Arc-en-ciel".to_owned(),
+                    autre => {
+                        let mut lettres = autre.chars();
+                        lettres.next().map_or_else(String::new, |premiere| {
+                            premiere.to_uppercase().chain(lettres).collect()
+                        })
+                    }
+                })
+            })
+            .collect::<Vec<SharedString>>(),
+    )));
     // « comete » : rang 1 dans le catalogue, donc 2 dans un menu qui commence
     // par « aucune ».
     interface.set_animation_choisie(2);
-    interface.set_affichage_choisi(1);
-    interface.set_argument_ecran(SharedString::from("kraken2023elite:coolant"));
-    interface.set_affichage_ecran(SharedString::from("gauge:kraken2023elite:coolant"));
     interface.set_luminosite_ecran(60);
+
+    // `REVERB_ONGLET=ecran|ventilos` ouvre l'un des deux autres panneaux : ils
+    // ne se regardent pas en même temps que l'éclairage, et c'est justement ce
+    // que la mise en page à onglets tranche. Sans cette variable, deux tiers du
+    // panneau de droite ne se vérifieraient jamais sans session graphique.
+    interface.set_onglet(match std::env::var("REVERB_ONGLET").as_deref() {
+        Ok("ecran") => 1,
+        Ok("ventilos") => 2,
+        _ => 0,
+    });
+
+    // Les ambiances : les deux exemples livrés, plus une que l'on vient de
+    // rappeler — c'est la pastille allumée qu'on regarde.
+    interface.set_profils(ModelRc::new(VecModel::from(
+        [("abysse", false), ("forge", false), ("soirée d'été", true)]
+            .into_iter()
+            .map(|(nom, rappele)| LigneProfil {
+                nom: SharedString::from(nom),
+                rappele,
+            })
+            .collect::<Vec<LigneProfil>>(),
+    )));
+
+    // Les sondes, sous les noms que la fenêtre produit vraiment (#51) : c'est
+    // ce que `thermique`, le cadran et un champ de composition offrent.
+    interface.set_sondes_lisibles(ModelRc::new(VecModel::from(
+        [
+            "CPU",
+            "Liquide",
+            "GPU",
+            "NVMe CT2000T705SSD5",
+            "NVMe CT4000P3SSD8",
+        ]
+        .into_iter()
+        .map(SharedString::from)
+        .collect::<Vec<SharedString>>(),
+    )));
+    interface.set_sonde_choisie(1);
+
+    // La composition (#80) : deux champs posés, l'ancre de droite visée. Les
+    // places viennent de `Ancre::boite()` — les boîtes du démon, pas un dessin.
+    let garnis = [("haut", "LIQUIDE"), ("gauche", "CPU")];
+    interface.set_rayon_disque(rayon_du_disque());
+    interface.set_champs_max(4);
+    interface.set_champs_poses(i32::try_from(garnis.len()).unwrap_or(0));
+    interface.set_ancres(ModelRc::new(VecModel::from(
+        places_des_ancres()
+            .into_iter()
+            .map(|place| {
+                let porte = garnis
+                    .into_iter()
+                    .find(|(nom, _)| *nom == place.ancre.slug())
+                    .map(|(_, porte)| porte);
+                AncreEcran {
+                    nom: SharedString::from(place.ancre.slug()),
+                    porte: SharedString::from(porte.unwrap_or_default()),
+                    x: place.x,
+                    y: place.y,
+                    largeur: place.largeur,
+                    hauteur: place.hauteur,
+                    occupee: porte.is_some(),
+                    choisie: place.ancre.slug() == "droite",
+                }
+            })
+            .collect::<Vec<AncreEcran>>(),
+    )));
+    interface.set_libelle_champ(SharedString::from("GPU"));
+    interface.set_ancre_visee(SharedString::from("droite"));
+
+    // `REVERB_AFFICHAGE=composition` déroule le panneau de composition ; sinon
+    // c'est le cadran, l'affichage le plus courant.
+    if std::env::var("REVERB_AFFICHAGE").as_deref() == Ok("composition") {
+        interface.set_affichage_choisi(4);
+        interface.set_fond_choisi(1);
+        interface.set_chemin_fond(SharedString::from("/home/nico/images/abysse.png"));
+        interface.set_affichage_ecran(SharedString::from("layout"));
+    } else {
+        interface.set_affichage_choisi(1);
+        interface.set_argument_ecran(SharedString::from("kraken2023elite:coolant"));
+        interface.set_affichage_ecran(SharedString::from("gauge:kraken2023elite:coolant"));
+    }
     interface.set_ventilateurs(ModelRc::new(VecModel::from(vec![
         // Un canal de chaque espèce : celui qui n'a pas de mode automatique et
         // n'affiche donc pas de bouton « auto », et celui qui en a un (#50).
@@ -302,7 +425,7 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
         },
     ])));
     interface.set_cible(SharedString::from("la zone « radiateur »"));
-    interface.set_animation_courante(SharedString::from("comete"));
+    interface.set_animation_courante(SharedString::from("Comète"));
     interface.set_message(SharedString::from(if vraies.is_some() {
         "aperçu de la vraie image, prise sur le socket"
     } else {

@@ -40,8 +40,9 @@
 //! l'avant du boîtier et lui a laissé le milieu.
 
 use reverb_anim::{Geometrie, Point};
+use reverb_proto::composition::Ancre;
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
-use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
+use reverb_proto::{LEDS_PER_FAN, Position, Rgb, screen};
 
 /// Nombre de LED d'un ventilateur, comme indice.
 const LEDS: usize = LEDS_PER_FAN as usize;
@@ -1349,4 +1350,113 @@ impl Plan {
         }
         sortie
     }
+}
+
+// ---------------------------------------------------------------------------
+// Les cinq ancres de la dalle (issue #76, protocole de #80)
+// ---------------------------------------------------------------------------
+
+/// Une ancre de composition, ramenée au carré unité.
+///
+/// Les mêmes quatre nombres que [`reverb_proto::composition::Boite`], divisés
+/// par le côté du tampon — le `.slint` place ses rectangles en fraction de sa
+/// largeur, comme il place les LED.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlaceAncre {
+    pub ancre: Ancre,
+    pub x: f32,
+    pub y: f32,
+    pub largeur: f32,
+    pub hauteur: f32,
+}
+
+/// Où les cinq ancres se posent sur la dalle, dans le carré unité.
+///
+/// ⚠️ **Ces places viennent de `Ancre::boite()` — les boîtes du démon**, celles
+/// qu'il assombrit et sur lesquelles il écrit. Ce n'est donc pas une seconde
+/// implémentation qui divergerait à la première correction : c'est la même
+/// donnée, lue de l'autre côté du socket. La règle de #52 pour la maquette,
+/// appliquée à la dalle.
+pub fn places_des_ancres() -> Vec<PlaceAncre> {
+    let cote = f32::from(screen::WIDTH);
+    Ancre::TOUTES
+        .into_iter()
+        .map(|ancre| {
+            let boite = ancre.boite();
+            PlaceAncre {
+                ancre,
+                x: f32::from(boite.x) / cote,
+                y: f32::from(boite.y) / cote,
+                largeur: f32::from(boite.largeur) / cote,
+                hauteur: f32::from(boite.hauteur) / cote,
+            }
+        })
+        .collect()
+}
+
+/// Le rayon du disque visible, en fraction du côté du tampon.
+///
+/// ⚠️ **La dalle est ronde, le tampon est carré** (`SPEC-KRAKEN-LCD` §2.1.1,
+/// observé le 2026-08-08) : 21 % de ce qu'on transmet ne s'affiche nulle part,
+/// et rien ne le signale — le contrôleur accepte l'image entière. Composer sur
+/// un carré, ce serait juger la mise en page sur une surface qui n'existe pas.
+///
+/// Le rayon exact reste 🔶 — la mire de #77 le tranchera. Le prendre de
+/// `screen` plutôt que de l'écrire dans le `.slint` fait qu'il n'y aura ce
+/// jour-là qu'une constante à corriger.
+pub fn rayon_du_disque() -> f32 {
+    f32::from(screen::VISIBLE_DISC_RADIUS) / f32::from(screen::WIDTH)
+}
+
+// ---------------------------------------------------------------------------
+// Le nom d'une zone née d'une sélection
+// ---------------------------------------------------------------------------
+
+/// Le nom de la zone qu'une sélection produit quand on la colore.
+///
+/// # Le défaut que ceci corrige
+///
+/// Colorer une sélection partielle pendant qu'une animation tourne la déclare
+/// en zone, pour que le reste du boîtier garde la sienne (#63). Ce nom-là était
+/// le **libellé d'affichage** de la sélection — « 3 organes entiers », « 24 LED
+/// sur 4 organes » —, et un libellé n'est pas un identifiant : **deux
+/// sélections différentes de trois organes s'y écrivent pareil**.
+///
+/// La seconde réécrivait donc la zone de la première, et lui **prenait ses
+/// LED** — une LED n'appartenant qu'à une zone à la fois. Symptôme observé :
+/// « j'ai donné une couleur à une zone, ça a changé l'animation d'une autre, et
+/// pas d'une troisième ». Aucun message : les deux zones existaient toujours.
+///
+/// ⚠️ **Le déterminisme reste la propriété qu'on veut** : deux fois la même
+/// sélection rendent le même nom, sans quoi chaque clic empilerait une zone de
+/// plus. Ce qui manquait, c'est l'**injectivité** — deux sélections différentes
+/// doivent rendre deux noms différents.
+pub fn nom_de_zone(cibles: &[Cible]) -> String {
+    // Trié : les cibles sont ajoutées dans l'ordre du geste, et deux sélections
+    // des mêmes LED prises dans un ordre différent sont la même sélection.
+    let mut rangs: Vec<String> = cibles
+        .iter()
+        .map(|cible| match cible {
+            Cible::Led { position, led } => format!("f{}-{led}", position.slug()),
+            Cible::Barrette { slot, led } => format!("s{slot}-{led}"),
+        })
+        .collect();
+    rangs.sort();
+    rangs.dedup();
+    format!("sélection-{:08x}", empreinte(&rangs.join(",")))
+}
+
+/// Une empreinte stable d'une chaîne.
+///
+/// FNV-1a 32 bits, huit lignes. ⚠️ **`DefaultHasher` ne promet pas d'être
+/// stable entre deux versions de Rust**, et ce nom-là finit dans
+/// `/var/lib/reverb/zones.conf` : une zone qui changerait de nom à une montée
+/// de compilateur laisserait l'ancienne derrière elle, sans un mot.
+fn empreinte(texte: &str) -> u32 {
+    let mut somme: u32 = 0x811c_9dc5;
+    for octet in texte.as_bytes() {
+        somme ^= u32::from(*octet);
+        somme = somme.wrapping_mul(0x0100_0193);
+    }
+    somme
 }

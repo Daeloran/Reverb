@@ -3,6 +3,19 @@
 // Le boîtier vu depuis le panneau latéral gauche, face à la carte mère :
 // l'arrière à gauche, l'avant à droite. Les places viennent de `plan.rs`, les
 // couleurs du démon — ce sont les images qu'il envoie vraiment au matériel.
+//
+// ── La disposition, et pourquoi elle a changé (#76) ────────────────────────
+//
+// Elle tenait en deux colonnes : la maquette, et **une seule** colonne de
+// 340 px où six panneaux s'empilaient dans un `ScrollView`. Mesuré à 1180×760,
+// leur hauteur cumulée dépassait 1400 px pour 690 px visibles : ÉCRAN et
+// VENTILATEURS étaient entièrement sous le pli, et rien ne le disait. #74, #75
+// et #80 ajoutaient six cents pixels de plus à cette même colonne.
+//
+// D'où trois colonnes, et un principe : **ce qu'on vise à gauche, l'objet au
+// centre, ce qu'on lui fait à droite.** Les trois sujets qui ne sont pas
+// l'éclairage — l'écran, les ventilateurs — passent en onglets plutôt qu'en
+// suite, parce qu'on ne les règle pas en même temps que la couleur.
 
 import { Button, Slider, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 
@@ -71,6 +84,46 @@ export struct FamilleAnimation {
     nom: string,
     effet: string,
     accepte-couleur: bool,
+    // Cette famille se projette-t-elle sur un axe du boitier ? Faux pour
+    // `rotation`, `pouls` et `scintillement`, dont le motif ne suit aucun axe,
+    // et pour `thermique`, dont la sonde remplace la direction. Montrer un
+    // menu de directions a cote d'elles ferait REFUSER la commande entiere —
+    // une cle de trop, et c'est tout l'`animate` qui tombe.
+    suit-une-direction: bool,
+    // `thermique` EXIGE une sonde, seule du catalogue : `Reglages::default()`
+    // n'a aucune valeur sensee a lui donner, la machine en expose seize.
+    exige-une-sonde: bool,
+}
+
+// Une ambiance enregistree (#74).
+export struct LigneProfil {
+    nom: string,
+    // Vrai pour celui que la fenetre vient de rappeler.
+    //
+    // ⚠️ « Rappele », et non « actif ». Le protocole ne dit PAS quel profil est
+    // actif : `ResponseLine::Profil` ne survit pas a la reponse qui la porte, et
+    // rien dans `status` n'en garde trace. C'est donc une memoire de fenetre,
+    // effacee des qu'une commande change l'eclairage — dire « actif » d'un
+    // profil dont on vient de changer la couleur serait faux.
+    rappele: bool,
+}
+
+// Une des cinq ancres de composition (#80), placee dans le carre unite.
+//
+// Les places viennent de `Ancre::boite()` — les boites du DEMON, celles qu'il
+// assombrit et sur lesquelles il ecrit. Ce n'est donc pas une reimplementation
+// qui divergerait : c'est la meme donnee, lue une seule fois.
+export struct AncreEcran {
+    // Le mot qui part au demon : « haut », « bas », « gauche »…
+    nom: string,
+    // Ce que l'ancre porte, ou vide si elle est libre.
+    porte: string,
+    x: float,
+    y: float,
+    largeur: float,
+    hauteur: float,
+    occupee: bool,
+    choisie: bool,
 }
 
 // Un curseur peint par ce qu'il parcourt.
@@ -127,6 +180,11 @@ component Titre inherits Text {
     font-weight: 700;
     color: #6f7180;
     letter-spacing: 0.8px;
+    // ⚠️ Un titre qui porte un slug de sonde — « ECRAN — gauge:kraken2023elite:
+    // coolant-temp » — fait cinquante caracteres. Sans repli, sa largeur
+    // PREFEREE devient la largeur MINIMALE du panneau, et le ScrollView sort
+    // une barre horizontale.
+    wrap: word-wrap;
 }
 
 component Carte inherits Rectangle {
@@ -136,12 +194,43 @@ component Carte inherits Rectangle {
     border-color: #24242e;
 }
 
+// Une pastille qu'on choisit dans un groupe : famille d'animation, onglet,
+// affichage d'ecran. Un `ComboBox` cache ce qui existe derriere un clic — dix
+// familles y sont dix lignes qu'on ne voit qu'en le deroulant.
+component Pastille inherits Rectangle {
+    in property <string> texte;
+    in property <bool> retenue;
+    in property <bool> discrete;
+    callback choisie();
+
+    height: 26px;
+    border-radius: 6px;
+    background: root.retenue ? #2a3352 : (root.discrete ? #14141b : #1f1f28);
+    border-width: 1px;
+    border-color: root.retenue ? #4d7cff : #2a2a36;
+
+    Text {
+        text: root.texte;
+        font-size: 11px;
+        color: root.retenue ? #cdd8ff : #b9bbc9;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: parent.width - 8px;
+        x: 4px;
+        overflow: elide;
+    }
+    TouchArea { clicked => { root.choisie(); } }
+}
+
 export component Fenetre inherits Window {
     title: "Reverb";
-    preferred-width: 1180px;
-    preferred-height: 720px;
-    min-width: 900px;
-    min-height: 600px;
+    // Trois colonnes demandent de la largeur : 250 pour ce qu'on vise, 350 pour
+    // ce qu'on regle, le reste au boitier. Sous 1080, la maquette deviendrait
+    // plus petite que les panneaux qui l'entourent.
+    preferred-width: 1280px;
+    preferred-height: 820px;
+    min-width: 1080px;
+    min-height: 680px;
     background: #0e0e13;
 
     in property <[PointLed]> leds;
@@ -162,19 +251,51 @@ export component Fenetre inherits Window {
     in property <[LigneVentilateur]> ventilateurs;
     in property <[LigneTemperature]> temperatures;
     in property <[FamilleAnimation]> familles;
-    // Ce que le menu deroulant propose : « aucune » d'abord, puis les six
+    // Ce que le menu deroulant propose : « aucune » d'abord, puis les dix
     // familles dans l'ordre de CATALOGUE. Le rang zero n'est pas un trou, c'est
     // un choix — celui d'arreter.
     in property <[string]> animations;
+    // Ce que les pastilles AFFICHENT — « Comete », « Arc-en-ciel ». Le rappel,
+    // lui, envoie le nom du protocole : deux vues d'une meme liste, jamais deux
+    // listes, et le rang les relie.
+    in property <[string]> animations-lisibles;
     in-out property <int> animation-choisie: 0;
+    // Les huit directions, dans l'ordre de `Direction::ALL` — le rang EST le
+    // contrat. Une liste ecrite ici serait restee a six quand #75 en a livre
+    // deux de plus, sans qu'aucun message ne le dise.
+    in property <[string]> directions;
+    // Les sondes sous leur nom lisible — « CPU », « Liquide ». Le slug ne
+    // remonte jamais jusqu'ici : c'est `main.rs` qui le retrouve par le rang.
+    in property <[string]> sondes-lisibles;
+    in-out property <int> sonde-choisie: 0;
     // L'ecran du Kraken : ce qu'il montre, et de quoi le changer.
-    in property <[string]> affichages: ["rien", "cadran", "image", "gif"];
+    in property <[string]> affichages: ["rien", "cadran", "image", "gif", "composition"];
+    in property <[string]> affichages-lisibles: ["Rien", "Cadran", "Image", "GIF", "Composition"];
     in-out property <int> affichage-choisi: 0;
     in-out property <string> argument-ecran;
     in-out property <int> luminosite-ecran: 100;
     in property <string> affichage-ecran: "rien";
+    // La composition (#80) : les cinq ancres, et de quoi en garnir une.
+    in property <[AncreEcran]> ancres;
+    // Le rayon du disque visible, en fraction du cote du tampon. Il vient de
+    // `screen::VISIBLE_DISC_RADIUS` : la dalle est RONDE, et 21 % de ce qu'on
+    // transmet ne s'affiche nulle part. L'ecrire ici le figerait le jour ou la
+    // mire de #77 mesurera le vrai bord.
+    in property <float> rayon-disque: 0.5;
+    in-out property <int> fond-choisi: 0;
+    in-out property <string> chemin-fond;
+    // Le nom de l'ancre que le panneau édite. Il double le liseré bleu du
+    // disque : « poser » et « vider » agissent dessus, et se tromper d'ancre ne
+    // produit aucun message — juste un champ au mauvais endroit.
+    in property <string> ancre-visee: "haut";
+    in-out property <int> source-choisie: 0;
+    in-out property <string> libelle-champ;
+    in property <int> champs-poses: 0;
+    in property <int> champs-max: 4;
     in property <[LigneZone]> zones;
     in-out property <string> nouvelle-zone;
+    in property <[LigneProfil]> profils;
+    in-out property <string> nouveau-profil;
     in property <string> cible: "tout le boîtier";
     in property <string> titre-maquette: "LE BOÎTIER";
     in property <bool> detail-led: true;
@@ -194,6 +315,8 @@ export component Fenetre inherits Window {
     in property <color> teinte-grise: #808080;
     in-out property <int> vitesse: 3;
     in-out property <int> direction: 4;
+    // Lequel des trois onglets du panneau de droite est ouvert.
+    in-out property <int> onglet: 0;
 
     // Le geste sur la maquette : deux coins et « faut-il ajouter a la selection ».
     // Un clic est un rectangle de cote nul — c'est le meme geste, et les
@@ -216,28 +339,48 @@ export component Fenetre inherits Window {
     // vitesse d'avant.
     callback regler-animation();
     callback arreter-animation();
+    // Les profils (#74) : rappeler, enregistrer sous un nom, oublier.
+    callback rappeler-profil(string);
+    callback enregistrer-profil(string);
+    callback oublier-profil(string);
     // L'ecran : la luminosite part a chaque cran, l'affichage sur un bouton.
     callback regler-luminosite-ecran(int);
     callback poser-ecran(string, string);
     // L'utilisateur compose un affichage : suspendre l'adoption du releve.
     callback saisir-ecran();
+    // La composition (#80). Une commande par changement, jamais une ligne
+    // unique qui porterait tout : un chemin et un libelle sur la meme ligne
+    // seraient ambigus au premier espace.
+    callback viser-ancre(string);
+    callback poser-fond();
+    callback poser-champ(string);
+    callback vider-champ(string);
+    callback arreter-composition();
     callback regler-ventilateur(string, int);
     // La poignée est lâchée : à partir de là, la mesure a le droit de la
     // reprendre — mais pas tout de suite.
     callback relacher-ventilateur(string);
     callback rendre-au-firmware(string);
 
-    property <[string]> directions: [
-        "bas-haut", "haut-bas", "avant-arriere", "arriere-avant", "horaire", "antihoraire"
-    ];
+    // La famille retenue, ou une famille vide quand c'est « aucune ». Evite de
+    // repeter le decalage de rang — le menu commence par « aucune », le
+    // catalogue non — a chacun des quatre endroits qui l'interrogent.
+    property <FamilleAnimation> famille-retenue:
+        root.animation-choisie > 0 && root.familles.length > 0
+            ? root.familles[Math.min(root.animation-choisie - 1, root.familles.length - 1)]
+            : { nom: "", effet: "Aucune animation : le boîtier garde sa couleur.",
+                accepte-couleur: false, suit-une-direction: false, exige-une-sonde: false };
 
     VerticalLayout {
         padding: 14px;
-        spacing: 12px;
+        spacing: 10px;
 
-        // ── En-tête ────────────────────────────────────────────────────────
+        // ── En-tête, et les profils ────────────────────────────────────────
+        // Les profils y sont, et non dans un panneau : rappeler une ambiance
+        // est le geste qui change le plus de choses d'un seul clic, et il ne
+        // se merite pas au bout d'une colonne a derouler.
         HorizontalLayout {
-            spacing: 10px;
+            spacing: 12px;
             Text {
                 text: "Reverb";
                 font-size: 22px;
@@ -254,267 +397,434 @@ export component Fenetre inherits Window {
             }
             Text {
                 text: root.message;
-                font-size: 13px;
+                font-size: 12px;
                 color: root.connecte ? #8a8c9b : #ffb3b0;
                 vertical-alignment: center;
                 horizontal-alignment: left;
                 overflow: elide;
+                min-width: 60px;
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            Titre {
+                text: "AMBIANCES";
+                vertical-alignment: center;
+            }
+            for profil in root.profils: Rectangle {
+                height: 26px;
+                width: etiquette.preferred-width + oubli.width + 18px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 6px;
+                background: profil.rappele ? #2a3352 : #1f1f28;
+                border-width: 1px;
+                border-color: profil.rappele ? #4d7cff : #2a2a36;
+                HorizontalLayout {
+                    padding-left: 9px;
+                    padding-right: 4px;
+                    spacing: 5px;
+                    etiquette := Text {
+                        text: profil.nom;
+                        font-size: 11px;
+                        color: profil.rappele ? #cdd8ff : #b9bbc9;
+                        vertical-alignment: center;
+                    }
+                    oubli := Text {
+                        text: "×";
+                        width: 14px;
+                        font-size: 13px;
+                        color: #6f7180;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        TouchArea { clicked => { root.oublier-profil(profil.nom); } }
+                    }
+                }
+                // Pose apres l'oubli, donc dessous : le « × » garde son clic.
+                TouchArea {
+                    width: etiquette.width + 9px;
+                    x: 0;
+                    clicked => { root.rappeler-profil(profil.nom); }
+                }
+            }
+            LineEdit {
+                width: 130px;
+                height: 28px;
+                text <=> root.nouveau-profil;
+                placeholder-text: "Enregistrer sous…";
+                accepted => { root.enregistrer-profil(self.text); }
+            }
+            Button {
+                text: "Enregistrer";
+                clicked => { root.enregistrer-profil(root.nouveau-profil); }
             }
         }
 
         HorizontalLayout {
             spacing: 12px;
 
-            // ── La maquette, et sous elle les sondes ───────────────────────
-            VerticalLayout {
-            horizontal-stretch: 1;
-            spacing: 12px;
+            // ── Ce qu'on vise ──────────────────────────────────────────────
             Carte {
-                vertical-stretch: 1;
+                width: 224px;
                 VerticalLayout {
                     padding: 12px;
-                    spacing: 6px;
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Titre {
-                            text: root.titre-maquette;
-                            horizontal-stretch: 1;
-                            vertical-alignment: center;
+                    spacing: 14px;
+
+                    VerticalLayout {
+                        spacing: 6px;
+                        Titre { text: "CIBLE"; }
+                        Text {
+                            text: root.cible;
+                            font-size: 14px;
+                            color: #e6e6ef;
+                            wrap: word-wrap;
                         }
-                        Button {
-                            text: root.detail-led ? "LED" : "ventilateur";
-                            clicked => { root.basculer-detail(); }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Button { text: "Tout"; clicked => { root.choisir-cible("all"); } }
+                            Button { text: "Ventilateurs"; clicked => { root.choisir-cible("fans"); } }
+                            Button { text: "RAM"; clicked => { root.choisir-cible("ram"); } }
                         }
-                        Button {
-                            text: root.vue-face ? "de face" : "isométrique";
-                            clicked => { root.basculer-vue(); }
-                        }
-                    }
-
-                    Rectangle {
-                        vertical-stretch: 1;
-                        carre := Rectangle {
-                            width: min(parent.width, parent.height);
-                            height: self.width;
-                            x: (parent.width - self.width) / 2;
-                            y: (parent.height - self.height) / 2;
-
-                            // L'habillage, du fond vers la surface : le chassis,
-                            // les parois remplies, les organes internes, les
-                            // aretes du volume, puis les anneaux.
-                            if root.silhouette != "": Path {
-                                width: parent.width;
-                                height: parent.height;
-                                viewbox-width: 1;
-                                viewbox-height: 1;
-                                commands: root.silhouette;
-                                fill: #101018;
-                                stroke: #303246;
-                                stroke-width: 1.5px;
-                            }
-                            if root.faces != "": Path {
-                                width: parent.width;
-                                height: parent.height;
-                                viewbox-width: 1;
-                                viewbox-height: 1;
-                                commands: root.faces;
-                                fill: #15151d;
-                            }
-                            if root.organes != "": Path {
-                                width: parent.width;
-                                height: parent.height;
-                                viewbox-width: 1;
-                                viewbox-height: 1;
-                                commands: root.organes;
-                                // Rempli, sans contour : un trait en ferait
-                                // trois cadres vides flottant au milieu de la
-                                // maquette, la ou on veut trois masses sombres
-                                // qu'on ne regarde pas.
-                                fill: #1d1e2a;
-                            }
-
-                            // Les arêtes du boîtier : sans elles, la vue de
-                            // trois-quarts n'est qu'un nuage de points penché.
-                            if root.aretes != "": Path {
-                                width: parent.width;
-                                height: parent.height;
-                                viewbox-width: 1;
-                                viewbox-height: 1;
-                                commands: root.aretes;
-                                stroke: #2f3040;
-                                stroke-width: 1px;
-                            }
-
-                            // L'habillage (#64) : les cadres perces des dix
-                            // ventilateurs, les quatre corps de barrette, la
-                            // dalle du Kraken. Rempli, pose SOUS les anneaux et
-                            // sous les LED — un cadre est une piece de chassis,
-                            // il passe derriere ce qui s'allume.
-                            //
-                            // ⚠️ `fill-rule: evenodd` fait le trou : un cadre
-                            // sort en deux sous-chemins imbriques, et sans cette
-                            // regle le second remplirait au lieu de percer, ce
-                            // qui masquerait les huit LED qu'il entoure.
-                            if root.habillage != "": Path {
-                                width: parent.width;
-                                height: parent.height;
-                                viewbox-width: 1;
-                                viewbox-height: 1;
-                                commands: root.habillage;
-                                fill-rule: evenodd;
-                                fill: #33364a;
-                                stroke: #4b4f6b;
-                                stroke-width: 1px;
-                            }
-
-                            // Les anneaux : un ventilateur ressemble a un
-                            // ventilateur, et non a huit points libres.
-                            if root.anneaux != "": Path {
-                                width: parent.width;
-                                height: parent.height;
-                                viewbox-width: 1;
-                                viewbox-height: 1;
-                                commands: root.anneaux;
-                                stroke: #343650;
-                                stroke-width: 1px;
-                            }
-
-                            // Le halo, juste sous les pastilles : c'est lui qui
-                            // fait qu'une LED baigne son entourage de sa couleur,
-                            // comme sur les photos du boitier.
-                            for couche in root.halos: Rectangle {
-                                property <length> taille: couche.rayon * 2 * parent.width;
-                                width: taille;
-                                height: taille;
-                                border-radius: taille / 2;
-                                x: couche.x * parent.width - self.width / 2;
-                                y: couche.y * parent.height - self.height / 2;
-                                background: couche.couleur;
-                            }
-
-                            // Une cible visée est plus grosse et cerclée de blanc :
-                            // sur cent vingt-quatre points, une nuance de bordure ne
-                            // se verrait pas, et c'est pourtant ce qui dit ce qu'on
-                            // va changer.
-                            for led in root.leds: Rectangle {
-                                // Le grossissement d'une cible visee est deja
-                                // dans `rayon` : un disque de ventilateur n'a
-                                // pas besoin de grandir, une pastille de LED si.
-                                property <length> taille: led.rayon * 2 * parent.width;
-                                width: taille;
-                                height: taille + led.hauteur * parent.height;
-                                border-radius: taille / 2;
-                                x: led.x * parent.width - self.width / 2;
-                                y: led.y * parent.height - self.height / 2;
-                                background: led.couleur;
-                                border-width: led.choisie ? 2px : 0px;
-                                border-color: #ffffff;
-                            }
-
-                            // Le rectangle en cours de tracé. Il ne vit que pendant
-                            // le geste : ce qu'il attrape n'est décidé qu'au
-                            // relâchement, par `plan.rs`.
-                            if zone.trace: Rectangle {
-                                x: min(zone.depart-x, zone.pressed-x);
-                                y: min(zone.depart-y, zone.pressed-y);
-                                width: abs(zone.pressed-x - zone.depart-x);
-                                height: abs(zone.pressed-y - zone.depart-y);
-                                background: #4d7cff20;
-                                border-width: 1px;
-                                border-color: #4d7cff;
-                            }
-
-                            clavier := FocusScope {
-                                key-pressed(evenement) => {
-                                    if (evenement.text == Key.Control) { root.ajout = true; }
-                                    return EventResult.reject;
-                                }
-                                key-released(evenement) => {
-                                    if (evenement.text == Key.Control) { root.ajout = false; }
-                                    return EventResult.reject;
-                                }
-
-                                zone := TouchArea {
-                                    property <length> depart-x;
-                                    property <length> depart-y;
-                                    property <bool> trace: false;
-
-                                    pointer-event(evenement) => {
-                                        clavier.focus();
-                                        if (evenement.kind == PointerEventKind.down) {
-                                            self.depart-x = self.mouse-x;
-                                            self.depart-y = self.mouse-y;
-                                            self.trace = true;
-                                        }
-                                        if (evenement.kind == PointerEventKind.up) {
-                                            self.trace = false;
-                                            root.geste-maquette(
-                                                self.depart-x / self.width,
-                                                self.depart-y / self.height,
-                                                self.mouse-x / self.width,
-                                                self.mouse-y / self.height,
-                                                root.ajout
-                                            );
-                                        }
-                                    }
-                                }
-                            }
+                        Text {
+                            text: "Clique une LED pour la viser seule. Trace un rectangle pour en prendre plusieurs, Ctrl enfoncé pour les ajouter.";
+                            font-size: 11px;
+                            color: #6f7180;
+                            wrap: word-wrap;
                         }
                     }
-                }
-            }
 
-            // Les sondes de la machine, en bandeau sous le boîtier : elles sont
-            // ce qu'on regarde le plus souvent sans rien régler, donc elles ne
-            // se méritent pas au bout d'un panneau à dérouler.
-            Carte {
-                height: 132px;
-                VerticalLayout {
-                    padding: 10px;
-                    spacing: 4px;
-                    Titre { text: "SONDES DE LA MACHINE"; }
-                    Flickable {
-                        vertical-stretch: 1;
-                        viewport-width: bandeau.preferred-width;
-                        bandeau := HorizontalLayout {
-                            spacing: 8px;
-                            for sonde in root.temperatures: Rectangle {
-                                // Elastique, et non 142px fixes : cinq cartes
-                                // fixes depassaient la largeur du panneau et
-                                // poussaient le second disque hors champ. Le
-                                // Flickable reste le filet, il n'est plus le
-                                // moyen normal de voir la derniere carte.
-                                min-width: 106px;
+                    // Les zones. Sous la cible, parce qu'une zone visée EST la
+                    // cible : la couleur et les animations lui vont, et il faut
+                    // le voir avant de cliquer.
+                    VerticalLayout {
+                        spacing: 5px;
+                        Titre { text: "ZONES"; }
+                        LineEdit {
+                            text <=> root.nouvelle-zone;
+                            placeholder-text: "Nom de la zone";
+                            accepted => { root.creer-zone(self.text); }
+                        }
+                        Button {
+                            text: "Créer la zone";
+                            clicked => { root.creer-zone(root.nouvelle-zone); }
+                        }
+                        for couche in root.zones: HorizontalLayout {
+                            spacing: 5px;
+                            Rectangle {
                                 horizontal-stretch: 1;
-                                background: #191920;
-                                border-radius: 8px;
+                                height: 34px;
+                                border-radius: 6px;
+                                background: couche.visee ? #2a3352 : #14141b;
                                 border-width: 1px;
-                                border-color: #24242e;
+                                border-color: couche.visee ? #4d7cff : #24242e;
                                 VerticalLayout {
-                                    padding: 6px;
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-top: 4px;
+                                    padding-bottom: 4px;
                                     spacing: 0px;
                                     Text {
-                                        text: sonde.libelle;
+                                        text: couche.nom;
+                                        font-size: 12px;
+                                        color: #e6e6ef;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: couche.rendu + " · " + couche.combien + " LED";
                                         font-size: 10px;
                                         color: #8a8c9b;
                                         overflow: elide;
                                     }
-                                    Text {
-                                        text: sonde.valeur;
-                                        font-size: 14px;
-                                        font-weight: 700;
-                                        color: sonde.lisible ? #e6a24d : #ffb3b0;
+                                }
+                                TouchArea { clicked => { root.viser-zone(couche.nom); } }
+                            }
+                            Button {
+                                text: "×";
+                                clicked => { root.supprimer-zone(couche.nom); }
+                            }
+                        }
+                        if root.zones.length == 0: Text {
+                            text: "Aucune zone. Sélectionne des LED sur la maquette, donne-lui un nom, et elle prendra sa propre couleur ou sa propre animation sans toucher au reste.";
+                            font-size: 11px;
+                            color: #6f7180;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    Rectangle { vertical-stretch: 1; }
+                }
+            }
+
+            // ── L'objet : la maquette, et sous elle les sondes ─────────────
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 12px;
+                Carte {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 6px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Titre {
+                                text: root.titre-maquette;
+                                horizontal-stretch: 1;
+                                vertical-alignment: center;
+                            }
+                            Button {
+                                text: root.detail-led ? "LED" : "ventilateur";
+                                clicked => { root.basculer-detail(); }
+                            }
+                            Button {
+                                text: root.vue-face ? "de face" : "isométrique";
+                                clicked => { root.basculer-vue(); }
+                            }
+                        }
+
+                        Rectangle {
+                            vertical-stretch: 1;
+                            carre := Rectangle {
+                                width: min(parent.width, parent.height);
+                                height: self.width;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+
+                                // L'habillage, du fond vers la surface : le chassis,
+                                // les parois remplies, les organes internes, les
+                                // aretes du volume, puis les anneaux.
+                                if root.silhouette != "": Path {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    viewbox-width: 1;
+                                    viewbox-height: 1;
+                                    commands: root.silhouette;
+                                    fill: #101018;
+                                    stroke: #303246;
+                                    stroke-width: 1.5px;
+                                }
+                                if root.faces != "": Path {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    viewbox-width: 1;
+                                    viewbox-height: 1;
+                                    commands: root.faces;
+                                    fill: #15151d;
+                                }
+                                if root.organes != "": Path {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    viewbox-width: 1;
+                                    viewbox-height: 1;
+                                    commands: root.organes;
+                                    // Rempli, sans contour : un trait en ferait
+                                    // trois cadres vides flottant au milieu de la
+                                    // maquette, la ou on veut trois masses sombres
+                                    // qu'on ne regarde pas.
+                                    fill: #1d1e2a;
+                                }
+
+                                // Les arêtes du boîtier : sans elles, la vue de
+                                // trois-quarts n'est qu'un nuage de points penché.
+                                if root.aretes != "": Path {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    viewbox-width: 1;
+                                    viewbox-height: 1;
+                                    commands: root.aretes;
+                                    stroke: #2f3040;
+                                    stroke-width: 1px;
+                                }
+
+                                // L'habillage (#64) : les cadres perces des dix
+                                // ventilateurs, les quatre corps de barrette, la
+                                // dalle du Kraken. Rempli, pose SOUS les anneaux et
+                                // sous les LED — un cadre est une piece de chassis,
+                                // il passe derriere ce qui s'allume.
+                                //
+                                // ⚠️ `fill-rule: evenodd` fait le trou : un cadre
+                                // sort en deux sous-chemins imbriques, et sans cette
+                                // regle le second remplirait au lieu de percer, ce
+                                // qui masquerait les huit LED qu'il entoure.
+                                if root.habillage != "": Path {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    viewbox-width: 1;
+                                    viewbox-height: 1;
+                                    commands: root.habillage;
+                                    fill-rule: evenodd;
+                                    fill: #33364a;
+                                    stroke: #4b4f6b;
+                                    stroke-width: 1px;
+                                }
+
+                                // Les anneaux : un ventilateur ressemble a un
+                                // ventilateur, et non a huit points libres.
+                                if root.anneaux != "": Path {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    viewbox-width: 1;
+                                    viewbox-height: 1;
+                                    commands: root.anneaux;
+                                    stroke: #343650;
+                                    stroke-width: 1px;
+                                }
+
+                                // Le halo, juste sous les pastilles : c'est lui qui
+                                // fait qu'une LED baigne son entourage de sa couleur,
+                                // comme sur les photos du boitier.
+                                for couche in root.halos: Rectangle {
+                                    property <length> taille: couche.rayon * 2 * parent.width;
+                                    width: taille;
+                                    height: taille;
+                                    border-radius: taille / 2;
+                                    x: couche.x * parent.width - self.width / 2;
+                                    y: couche.y * parent.height - self.height / 2;
+                                    background: couche.couleur;
+                                }
+
+                                // Une cible visée est plus grosse et cerclée de blanc :
+                                // sur cent vingt-quatre points, une nuance de bordure ne
+                                // se verrait pas, et c'est pourtant ce qui dit ce qu'on
+                                // va changer.
+                                for led in root.leds: Rectangle {
+                                    // Le grossissement d'une cible visee est deja
+                                    // dans `rayon` : un disque de ventilateur n'a
+                                    // pas besoin de grandir, une pastille de LED si.
+                                    property <length> taille: led.rayon * 2 * parent.width;
+                                    width: taille;
+                                    height: taille + led.hauteur * parent.height;
+                                    border-radius: taille / 2;
+                                    x: led.x * parent.width - self.width / 2;
+                                    y: led.y * parent.height - self.height / 2;
+                                    background: led.couleur;
+                                    border-width: led.choisie ? 2px : 0px;
+                                    border-color: #ffffff;
+                                }
+
+                                // Le rectangle en cours de tracé. Il ne vit que pendant
+                                // le geste : ce qu'il attrape n'est décidé qu'au
+                                // relâchement, par `plan.rs`.
+                                // ⚠️ Le trace se voyait a peine : un remplissage
+                                // a 12 % d'opacite et un trait d'un pixel, sur
+                                // une maquette qui brille de cent vingt-quatre
+                                // halos. On ne savait pas qu'on selectionnait.
+                                if zone.trace: Rectangle {
+                                    x: min(zone.depart-x, zone.pressed-x);
+                                    y: min(zone.depart-y, zone.pressed-y);
+                                    width: abs(zone.pressed-x - zone.depart-x);
+                                    height: abs(zone.pressed-y - zone.depart-y);
+                                    background: #4d7cff38;
+                                    border-width: 2px;
+                                    border-color: #8fb0ff;
+                                    // Quatre poignees aux coins : elles disent
+                                    // « rectangle » la ou un cadre seul se
+                                    // confond avec les aretes du boitier.
+                                    for coin in [{ h: 0.0, v: 0.0 }, { h: 1.0, v: 0.0 },
+                                                 { h: 0.0, v: 1.0 }, { h: 1.0, v: 1.0 }]: Rectangle {
+                                        width: 7px;
+                                        height: 7px;
+                                        border-radius: 3.5px;
+                                        background: #ffffff;
+                                        x: coin.h * parent.width - self.width / 2;
+                                        y: coin.v * parent.height - self.height / 2;
                                     }
-                                    Rectangle {
-                                        vertical-stretch: 1;
-                                        if sonde.courbe != "": Path {
-                                            width: parent.width;
-                                            height: parent.height;
-                                            viewbox-width: 1;
-                                            viewbox-height: 1;
-                                            commands: sonde.courbe;
-                                            stroke: sonde.lisible ? #e6a24d : #55566a;
-                                            stroke-width: 1.5px;
+                                }
+
+                                clavier := FocusScope {
+                                    key-pressed(evenement) => {
+                                        if (evenement.text == Key.Control) { root.ajout = true; }
+                                        return EventResult.reject;
+                                    }
+                                    key-released(evenement) => {
+                                        if (evenement.text == Key.Control) { root.ajout = false; }
+                                        return EventResult.reject;
+                                    }
+
+                                    zone := TouchArea {
+                                        property <length> depart-x;
+                                        property <length> depart-y;
+                                        property <bool> trace: false;
+
+                                        pointer-event(evenement) => {
+                                            clavier.focus();
+                                            if (evenement.kind == PointerEventKind.down) {
+                                                self.depart-x = self.mouse-x;
+                                                self.depart-y = self.mouse-y;
+                                                self.trace = true;
+                                            }
+                                            if (evenement.kind == PointerEventKind.up) {
+                                                self.trace = false;
+                                                root.geste-maquette(
+                                                    self.depart-x / self.width,
+                                                    self.depart-y / self.height,
+                                                    self.mouse-x / self.width,
+                                                    self.mouse-y / self.height,
+                                                    root.ajout
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Les sondes de la machine, en bandeau sous le boîtier : elles sont
+                // ce qu'on regarde le plus souvent sans rien régler, donc elles ne
+                // se méritent pas au bout d'un panneau à dérouler.
+                Carte {
+                    height: 128px;
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 4px;
+                        Titre { text: "SONDES DE LA MACHINE"; }
+                        Flickable {
+                            vertical-stretch: 1;
+                            viewport-width: bandeau.preferred-width;
+                            bandeau := HorizontalLayout {
+                                spacing: 8px;
+                                for sonde in root.temperatures: Rectangle {
+                                    // Elastique, et non 142px fixes : cinq cartes
+                                    // fixes depassaient la largeur du panneau et
+                                    // poussaient le second disque hors champ. Le
+                                    // Flickable reste le filet, il n'est plus le
+                                    // moyen normal de voir la derniere carte.
+                                    // 94 px : cinq cartes tiennent dans la
+                                    // colonne centrale retrecie. Le Flickable
+                                    // reste le filet, pas le moyen normal de
+                                    // voir la derniere.
+                                    min-width: 94px;
+                                    horizontal-stretch: 1;
+                                    background: #14141b;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: #24242e;
+                                    VerticalLayout {
+                                        padding: 6px;
+                                        spacing: 0px;
+                                        Text {
+                                            text: sonde.libelle;
+                                            font-size: 10px;
+                                            color: #8a8c9b;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: sonde.valeur;
+                                            font-size: 14px;
+                                            font-weight: 700;
+                                            color: sonde.lisible ? #e6a24d : #ffb3b0;
+                                        }
+                                        Rectangle {
+                                            vertical-stretch: 1;
+                                            if sonde.courbe != "": Path {
+                                                width: parent.width;
+                                                height: parent.height;
+                                                viewbox-width: 1;
+                                                viewbox-height: 1;
+                                                commands: sonde.courbe;
+                                                stroke: sonde.lisible ? #e6a24d : #55566a;
+                                                stroke-width: 1.5px;
+                                            }
                                         }
                                     }
                                 }
@@ -523,367 +833,469 @@ export component Fenetre inherits Window {
                     }
                 }
             }
-            }
 
-            // ── Les réglages ───────────────────────────────────────────────
+            // ── Ce qu'on lui fait ──────────────────────────────────────────
+            // 404 px et non 350 : a 350, « Appliquer a la zone « radiateur » »
+            // et « ECRAN — gauge:kraken2023elite:coolant-temp » depassaient, et
+            // le `ScrollView` sortait une barre de defilement HORIZONTALE — la
+            // pire des reponses, puisqu'elle cache ce qu'elle sert a atteindre.
             Carte {
-                width: 340px;
-                ScrollView {
-                    VerticalLayout {
-                        padding: 14px;
-                        spacing: 14px;
+                width: 404px;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 10px;
 
-                        // Cible
-                        // Les zones. En tête du panneau : quand une zone est
-                        // visée, la couleur et les animations lui vont, et il
-                        // faut le voir avant de cliquer.
+                    // Trois onglets plutôt qu'une suite : l'écran et les
+                    // ventilateurs ne se règlent pas en même temps que la
+                    // couleur, et les empiler mettait les deux sous le pli.
+                    HorizontalLayout {
+                        spacing: 4px;
+                        for nom[rang] in ["ÉCLAIRAGE", "ÉCRAN", "VENTILOS"]: Pastille {
+                            horizontal-stretch: 1;
+                            texte: nom;
+                            retenue: root.onglet == rang;
+                            choisie => { root.onglet = rang; }
+                        }
+                    }
+
+                    ScrollView {
+                        vertical-stretch: 1;
                         VerticalLayout {
-                            spacing: 5px;
-                            Titre { text: "ZONES"; }
-                            HorizontalLayout {
+                            spacing: 14px;
+                            padding-right: 4px;
+
+                            // ── Onglet ÉCLAIRAGE ───────────────────────────
+                            if root.onglet == 0: VerticalLayout {
                                 spacing: 6px;
-                                LineEdit {
-                                    text <=> root.nouvelle-zone;
-                                    placeholder-text: "nom de la zone";
-                                    accepted => { root.creer-zone(self.text); }
-                                }
-                                Button {
-                                    text: "de la sélection";
-                                    clicked => { root.creer-zone(root.nouvelle-zone); }
-                                }
-                            }
-                            for couche in root.zones: HorizontalLayout {
-                                spacing: 5px;
+                                Titre { text: "COULEUR"; }
                                 Rectangle {
-                                    horizontal-stretch: 1;
-                                    height: 26px;
-                                    border-radius: 6px;
-                                    background: couche.visee ? #2a3352 : #191920;
+                                    height: 48px;
+                                    border-radius: 8px;
+                                    background: root.apercu;
                                     border-width: 1px;
-                                    border-color: couche.visee ? #4d7cff : #24242e;
-                                    HorizontalLayout {
-                                        padding-left: 8px;
-                                        padding-right: 8px;
-                                        spacing: 6px;
-                                        Text {
-                                            text: couche.nom;
-                                            font-size: 12px;
-                                            color: #e6e6ef;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                            overflow: elide;
-                                        }
-                                        Text {
-                                            text: couche.rendu + " · " + couche.combien + " LED";
-                                            font-size: 10px;
-                                            color: #8a8c9b;
-                                            vertical-alignment: center;
-                                        }
-                                    }
-                                    TouchArea { clicked => { root.viser-zone(couche.nom); } }
+                                    border-color: #00000060;
                                 }
-                                Button {
-                                    text: "×";
-                                    clicked => { root.supprimer-zone(couche.nom); }
-                                }
-                            }
-                            if root.zones.length == 0: Text {
-                                text: "Aucune zone. Sélectionne des LED sur la maquette, nomme-la, et elle prendra sa propre couleur ou sa propre animation sans toucher au reste.";
-                                font-size: 11px;
-                                color: #6f7180;
-                                wrap: word-wrap;
-                            }
-                        }
-
-                        VerticalLayout {
-                            spacing: 6px;
-                            Titre { text: "CIBLE"; }
-                            Text {
-                                text: root.cible;
-                                font-size: 14px;
-                                color: #e6e6ef;
-                                wrap: word-wrap;
-                            }
-                            HorizontalLayout {
-                                spacing: 6px;
-                                Button { text: "Tout"; clicked => { root.choisir-cible("all"); } }
-                                Button { text: "Ventilateurs"; clicked => { root.choisir-cible("fans"); } }
-                                Button { text: "RAM"; clicked => { root.choisir-cible("ram"); } }
-                            }
-                            Text {
-                                text: "Clique une LED sur la maquette pour la viser seule.";
-                                font-size: 11px;
-                                color: #6f7180;
-                                wrap: word-wrap;
-                            }
-                        }
-
-                        // Couleur
-                        VerticalLayout {
-                            spacing: 6px;
-                            Titre { text: "COULEUR"; }
-                            Rectangle {
-                                height: 54px;
-                                border-radius: 8px;
-                                background: root.apercu;
-                                border-width: 1px;
-                                border-color: #00000060;
-                            }
-                            HorizontalLayout {
-                                spacing: 6px;
                                 LineEdit {
                                     text <=> root.couleur;
                                     placeholder-text: "ff40ff";
                                     edited => { root.couleur-saisie(self.text); }
                                     accepted => { root.appliquer-couleur(); }
                                 }
-                                Rectangle {
-                                    width: 34px;
-                                    border-radius: 6px;
-                                    background: #000000;
-                                    Rectangle {
-                                        width: parent.width - 6px;
-                                        height: parent.height - 6px;
-                                        x: 3px;
-                                        y: 3px;
-                                        border-radius: 4px;
-                                        background: root.apercu;
+                                // Trois axes qu'on comprend en les bougeant, chacun
+                                // peint par ce qu'il parcourt.
+                                for axe in [
+                                    { nom: "Teinte", valeur: root.teinte, maximum: 359 },
+                                    { nom: "Saturation", valeur: root.saturation, maximum: 100 },
+                                    { nom: "Luminosité", valeur: root.luminosite, maximum: 100 },
+                                ]: VerticalLayout {
+                                    // ⚠️ Sans ce zéro, l'étiquette se retrouve
+                                    // plus près du curseur du DESSOUS que du
+                                    // sien : la VerticalLayout d'un onglet plus
+                                    // court que son panneau distribue le vide
+                                    // entre ses lignes, et « teinte » finissait
+                                    // à 54 px de sa propre voie.
+                                    vertical-stretch: 0;
+                                    spacing: 1px;
+                                    HorizontalLayout {
+                                        Text {
+                                            text: axe.nom;
+                                            font-size: 12px;
+                                            color: #8a8c9b;
+                                            horizontal-stretch: 1;
+                                        }
+                                        Text {
+                                            text: Math.round(axe.valeur);
+                                            font-size: 12px;
+                                            color: #e6e6ef;
+                                        }
                                     }
-                                }
-                            }
-                            // Trois axes qu'on comprend en les bougeant, chacun
-                            // peint par ce qu'il parcourt.
-                            for axe in [
-                                { nom: "teinte", valeur: root.teinte, maximum: 359 },
-                                { nom: "saturation", valeur: root.saturation, maximum: 100 },
-                                { nom: "luminosité", valeur: root.luminosite, maximum: 100 },
-                            ]: VerticalLayout {
-                                spacing: 1px;
-                                HorizontalLayout {
-                                    Text {
-                                        text: axe.nom;
-                                        font-size: 12px;
-                                        color: #8a8c9b;
-                                        horizontal-stretch: 1;
-                                    }
-                                    Text {
-                                        text: Math.round(axe.valeur);
-                                        font-size: 12px;
-                                        color: #e6e6ef;
-                                    }
-                                }
-                                Curseur {
-                                    valeur: axe.valeur;
-                                    maximum: axe.maximum;
-                                    voie: axe.nom == "teinte"
-                                        ? @linear-gradient(90deg,
-                                            #ff0000 0%, #ffff00 17%, #00ff00 33%,
-                                            #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)
-                                        : axe.nom == "saturation"
-                                        ? @linear-gradient(90deg, root.teinte-grise 0%, root.teinte-pure 100%)
-                                        : @linear-gradient(90deg, #000000 0%, root.teinte-pure 100%);
-                                    change(valeur) => {
-                                        if (axe.nom == "teinte") { root.teinte-changee(valeur); }
-                                        else if (axe.nom == "saturation") { root.saturation-changee(valeur); }
-                                        else { root.luminosite-changee(valeur); }
-                                    }
-                                }
-                            }
-
-                            HorizontalLayout {
-                                spacing: 5px;
-                                for teinte in ["ff0000", "ff8000", "ffff00", "00ff00", "00ffff", "0000ff", "ff00ff", "ffffff"]: Rectangle {
-                                    height: 24px;
-                                    border-radius: 5px;
-                                    background: teinte == "ff0000" ? #ff0000
-                                        : teinte == "ff8000" ? #ff8000
-                                        : teinte == "ffff00" ? #ffff00
-                                        : teinte == "00ff00" ? #00ff00
-                                        : teinte == "00ffff" ? #00ffff
-                                        : teinte == "0000ff" ? #0000ff
-                                        : teinte == "ff00ff" ? #ff00ff
-                                        : #ffffff;
-                                    TouchArea {
-                                        clicked => {
-                                            root.couleur = teinte;
-                                            root.couleur-saisie(teinte);
-                                            root.appliquer-couleur();
+                                    Curseur {
+                                        valeur: axe.valeur;
+                                        maximum: axe.maximum;
+                                        voie: axe.nom == "Teinte"
+                                            ? @linear-gradient(90deg,
+                                                #ff0000 0%, #ffff00 17%, #00ff00 33%,
+                                                #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)
+                                            : axe.nom == "Saturation"
+                                            ? @linear-gradient(90deg, root.teinte-grise 0%, root.teinte-pure 100%)
+                                            : @linear-gradient(90deg, #000000 0%, root.teinte-pure 100%);
+                                        change(valeur) => {
+                                            if (axe.nom == "Teinte") { root.teinte-changee(valeur); }
+                                            else if (axe.nom == "Saturation") { root.saturation-changee(valeur); }
+                                            else { root.luminosite-changee(valeur); }
                                         }
                                     }
                                 }
-                            }
-                            Button {
-                                text: "Appliquer à " + root.cible;
-                                clicked => { root.appliquer-couleur(); }
-                            }
-                        }
 
-                        // Animations
-                        VerticalLayout {
-                            spacing: 6px;
-                            Titre { text: "ANIMATION — " + root.animation-courante; }
-                            ComboBox {
-                                model: root.animations;
-                                current-index <=> root.animation-choisie;
-                                // Le nom recu plutot que le rang : il vient du
-                                // rappel lui-meme, et ne depend donc pas de
-                                // l'ordre dans lequel le widget met ses
-                                // proprietes a jour.
-                                selected(nom) => {
-                                    if (nom == root.animations[0]) {
-                                        root.arreter-animation();
-                                    } else {
-                                        root.lancer-animation(nom);
-                                    }
-                                }
-                            }
-                            // La phrase suit le choix. Elle n'est pas de la
-                            // decoration : six noms seuls ne disent pas ce que
-                            // l'animation fait, et c'est ce qui manquait avant
-                            // qu'on les ajoute sous les boutons.
-                            Text {
-                                text: root.animation-choisie > 0
-                                    ? root.familles[Math.max(root.animation-choisie - 1, 0)].effet
-                                    : "Aucune animation : le boîtier garde sa couleur.";
-                                font-size: 11px;
-                                color: #6f7180;
-                                wrap: word-wrap;
-                            }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    text: "vitesse " + root.vitesse;
-                                    font-size: 12px;
-                                    color: #8a8c9b;
-                                    vertical-alignment: center;
-                                    width: 78px;
-                                }
-                                Slider {
-                                    minimum: 1;
-                                    maximum: 10;
-                                    value: root.vitesse;
-                                    changed(valeur) => {
-                                        root.vitesse = Math.round(valeur);
-                                        root.regler-animation();
-                                    }
-                                }
-                            }
-                            ComboBox {
-                                model: root.directions;
-                                current-index <=> root.direction;
-                                selected => { root.regler-animation(); }
-                            }
-                            Button { text: "Arrêter"; clicked => { root.arreter-animation(); } }
-                        }
-
-                        // L'ecran du Kraken
-                        VerticalLayout {
-                            spacing: 6px;
-                            Titre { text: "ÉCRAN — " + root.affichage-ecran; }
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    text: "lumière " + root.luminosite-ecran;
-                                    font-size: 12px;
-                                    color: #8a8c9b;
-                                    vertical-alignment: center;
-                                    width: 78px;
-                                }
-                                Slider {
-                                    minimum: 0;
-                                    maximum: 100;
-                                    value: root.luminosite-ecran;
-                                    changed(valeur) => {
-                                        root.luminosite-ecran = Math.round(valeur);
-                                        root.regler-luminosite-ecran(root.luminosite-ecran);
-                                    }
-                                }
-                            }
-                            ComboBox {
-                                model: root.affichages;
-                                current-index <=> root.affichage-choisi;
-                                // Choisir, c'est composer : la poignee se leve,
-                                // et le releve d'une seconde cesse d'ecraser ce
-                                // qu'on est en train de decider (#48).
-                                selected(nom) => { root.saisir-ecran(); }
-                            }
-                            // Un CHAMP DE TEXTE, pas un selecteur de fichiers :
-                            // ouvrir une boite de dialogue demanderait le portail
-                            // XDG, donc un client D-Bus, donc une dependance de
-                            // runtime que l'ADR-001 refuse. Le chemin se colle
-                            // depuis le gestionnaire de fichiers.
-                            LineEdit {
-                                placeholder-text: root.affichage-choisi == 1
-                                    ? "nom de la sonde, tel qu'il figure dans SONDES"
-                                    : "/chemin/absolu/vers/le/fichier";
-                                text <=> root.argument-ecran;
-                                edited => { root.saisir-ecran(); }
-                                // Invisible NE SUFFIT PAS : un element cache
-                                // garde sa place dans une VerticalLayout, et
-                                // laisserait un trou sous le menu.
-                                visible: root.affichage-choisi != 0;
-                                height: root.affichage-choisi == 0 ? 0px : 32px;
-                            }
-                            Button {
-                                text: "Appliquer à l'écran";
-                                clicked => {
-                                    root.poser-ecran(root.affichages[root.affichage-choisi], root.argument-ecran);
-                                }
-                            }
-                        }
-
-                        // Ventilateurs
-                        VerticalLayout {
-                            spacing: 6px;
-                            Titre { text: "VENTILATEURS"; }
-                            for canal in root.ventilateurs: VerticalLayout {
-                                spacing: 2px;
                                 HorizontalLayout {
+                                    spacing: 5px;
+                                    for teinte in ["ff0000", "ff8000", "ffff00", "00ff00", "00ffff", "0000ff", "ff00ff", "ffffff"]: Rectangle {
+                                        height: 22px;
+                                        border-radius: 5px;
+                                        background: teinte == "ff0000" ? #ff0000
+                                            : teinte == "ff8000" ? #ff8000
+                                            : teinte == "ffff00" ? #ffff00
+                                            : teinte == "00ff00" ? #00ff00
+                                            : teinte == "00ffff" ? #00ffff
+                                            : teinte == "0000ff" ? #0000ff
+                                            : teinte == "ff00ff" ? #ff00ff
+                                            : #ffffff;
+                                        TouchArea {
+                                            clicked => {
+                                                root.couleur = teinte;
+                                                root.couleur-saisie(teinte);
+                                                root.appliquer-couleur();
+                                            }
+                                        }
+                                    }
+                                }
+                                // ⚠️ Texte FIXE. « Appliquer a la zone
+                                // « radiateur » » elargissait le panneau : un
+                                // Button n'elide pas, sa largeur preferee est
+                                // celle de son texte. La cible se lit dans la
+                                // colonne de gauche, sous CIBLE.
+                                Button {
+                                    text: "Appliquer la couleur";
+                                    clicked => { root.appliquer-couleur(); }
+                                }
+
+                                Rectangle { height: 4px; }
+                                Titre { text: "ANIMATION — " + root.animation-courante; }
+                                // Onze pastilles plutôt qu'un menu déroulant : dix
+                                // familles cachées derrière un clic, c'est ne pas
+                                // savoir ce qui existe. La grille se pose à l'index
+                                // — de la mise en page, pas de la géométrie du
+                                // boîtier, qui reste interdite ici (#52).
+                                Rectangle {
+                                    property <int> colonnes: 3;
+                                    property <length> pas: 30px;
+                                    height: Math.ceil(root.animations.length / self.colonnes) * self.pas;
+                                    for nom[rang] in root.animations: Pastille {
+                                        width: (parent.width - (parent.colonnes - 1) * 4px) / parent.colonnes;
+                                        x: Math.mod(rang, parent.colonnes) * (self.width + 4px);
+                                        y: Math.floor(rang / parent.colonnes) * parent.pas;
+                                        texte: root.animations-lisibles[rang];
+                                        retenue: root.animation-choisie == rang;
+                                        discrete: rang == 0;
+                                        choisie => {
+                                            root.animation-choisie = rang;
+                                            if (rang == 0) {
+                                                root.arreter-animation();
+                                            } else {
+                                                root.lancer-animation(nom);
+                                            }
+                                        }
+                                    }
+                                }
+                                // La phrase suit le choix. Elle n'est pas de la
+                                // decoration : dix noms seuls ne disent pas ce que
+                                // l'animation fait.
+                                Text {
+                                    text: root.famille-retenue.effet;
+                                    font-size: 11px;
+                                    color: #6f7180;
+                                    wrap: word-wrap;
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
                                     Text {
-                                        text: canal.position == "" ? canal.canal : canal.position;
+                                        text: "Vitesse " + root.vitesse;
                                         font-size: 12px;
-                                        color: #e6e6ef;
-                                        horizontal-stretch: 1;
-                                        overflow: elide;
+                                        color: #8a8c9b;
+                                        vertical-alignment: center;
+                                        width: 74px;
                                     }
-                                    Text {
-                                        text: canal.lisible ? canal.rpm + " tr/min · " + canal.mode : "illisible";
-                                        font-size: 11px;
-                                        color: canal.lisible ? #8a8c9b : #ffb3b0;
+                                    Slider {
+                                        minimum: 1;
+                                        maximum: 10;
+                                        value: root.vitesse;
+                                        changed(valeur) => {
+                                            root.vitesse = Math.round(valeur);
+                                            root.regler-animation();
+                                        }
                                     }
                                 }
+                                // ⚠️ Le menu des directions ne s'affiche que pour
+                                // les familles qui en acceptent une. `rotation`,
+                                // `pouls`, `scintillement` et `thermique` la
+                                // refusent, et la leur donner ferait rejeter
+                                // l'`animate` ENTIER — pas seulement la clé.
+                                //
+                                // Invisible ne suffit pas : un élément caché garde
+                                // sa place dans une VerticalLayout.
+                                if root.famille-retenue.suit-une-direction: ComboBox {
+                                    model: root.directions;
+                                    current-index <=> root.direction;
+                                    selected => { root.regler-animation(); }
+                                }
+                                // `thermique` exige une sonde, seule du catalogue.
+                                // Elle est offerte sous son NOM LISIBLE — le slug
+                                // ne remonte jamais jusqu'à l'utilisateur, ce que
+                                // le cadran imposait encore et que l'issue nomme
+                                // comme un défaut.
+                                if root.famille-retenue.exige-une-sonde: VerticalLayout {
+                                    spacing: 2px;
+                                    Text {
+                                        text: "Sonde suivie";
+                                        font-size: 12px;
+                                        color: #8a8c9b;
+                                    }
+                                    ComboBox {
+                                        model: root.sondes-lisibles;
+                                        current-index <=> root.sonde-choisie;
+                                        selected => { root.regler-animation(); }
+                                    }
+                                }
+                                // Le ressort va DANS l'onglet : sans lui, la
+                                // VerticalLayout distribue le vide entre ses
+                                // propres lignes, et les trois curseurs de
+                                // couleur s'écartent de leur étiquette.
+                                Rectangle { vertical-stretch: 1; }
+                            }
+
+                            // ── Onglet ÉCRAN ───────────────────────────────
+                            if root.onglet == 1: VerticalLayout {
+                                spacing: 6px;
+                                Titre { text: "ÉCRAN — " + root.affichage-ecran; }
                                 HorizontalLayout {
-                                    spacing: 6px;
+                                    spacing: 8px;
+                                    Text {
+                                        text: "Lumière " + root.luminosite-ecran;
+                                        font-size: 12px;
+                                        color: #8a8c9b;
+                                        vertical-alignment: center;
+                                        width: 74px;
+                                    }
                                     Slider {
                                         minimum: 0;
                                         maximum: 100;
-                                        // La valeur vient de la poignée du
-                                        // canal, pas de la mesure brute : c'est
-                                        // elle qui décide si une mesure a le
-                                        // droit de déplacer le curseur.
-                                        value: canal.pwm;
+                                        value: root.luminosite-ecran;
                                         changed(valeur) => {
-                                            root.regler-ventilateur(canal.canal, Math.round(valeur));
+                                            root.luminosite-ecran = Math.round(valeur);
+                                            root.regler-luminosite-ecran(root.luminosite-ecran);
                                         }
-                                        released(valeur) => {
-                                            root.relacher-ventilateur(canal.canal);
-                                        }
-                                    }
-                                    // ⚠️ `width: 0px` en plus de `visible` : un
-                                    // element invisible garde sa place en
-                                    // layout, et le laisser la creuserait un
-                                    // trou a droite des trois curseurs de
-                                    // nzxtsmart2.
-                                    Button {
-                                        text: "auto";
-                                        visible: canal.sait-faire-auto;
-                                        width: canal.sait-faire-auto ? self.preferred-width : 0px;
-                                        clicked => { root.rendre-au-firmware(canal.canal); }
                                     }
                                 }
+                                Rectangle {
+                                    property <int> colonnes: 3;
+                                    property <length> pas: 30px;
+                                    height: Math.ceil(root.affichages.length / self.colonnes) * self.pas;
+                                    for nom[rang] in root.affichages: Pastille {
+                                        width: (parent.width - (parent.colonnes - 1) * 4px) / parent.colonnes;
+                                        x: Math.mod(rang, parent.colonnes) * (self.width + 4px);
+                                        y: Math.floor(rang / parent.colonnes) * parent.pas;
+                                        texte: root.affichages-lisibles[rang];
+                                        retenue: root.affichage-choisi == rang;
+                                        discrete: rang == 0;
+                                        // Choisir, c'est composer : la poignee se
+                                        // leve, et le releve d'une seconde cesse
+                                        // d'ecraser ce qu'on decide (#48).
+                                        choisie => {
+                                            root.affichage-choisi = rang;
+                                            root.saisir-ecran();
+                                        }
+                                    }
+                                }
+
+                                // « cadran » : la sonde, sous son nom lisible.
+                                if root.affichage-choisi == 1: ComboBox {
+                                    model: root.sondes-lisibles;
+                                    current-index <=> root.sonde-choisie;
+                                    selected => { root.saisir-ecran(); }
+                                }
+                                // « image » et « gif » : un CHAMP DE TEXTE, pas un
+                                // selecteur de fichiers — une boite de dialogue
+                                // demanderait le portail XDG, donc un client D-Bus,
+                                // donc une dependance de runtime que l'ADR-001
+                                // refuse. Le chemin se colle depuis le gestionnaire.
+                                if root.affichage-choisi == 2 || root.affichage-choisi == 3: LineEdit {
+                                    placeholder-text: "/chemin/absolu/vers/l'image";
+                                    text <=> root.argument-ecran;
+                                    edited => { root.saisir-ecran(); }
+                                }
+                                if root.affichage-choisi != 4: Button {
+                                    text: "Appliquer à l'écran";
+                                    clicked => {
+                                        root.poser-ecran(root.affichages[root.affichage-choisi], root.argument-ecran);
+                                    }
+                                }
+
+                                // ── La composition (#80) ───────────────────
+                                if root.affichage-choisi == 4: VerticalLayout {
+                                    spacing: 8px;
+
+                                    // ⚠️ LA DALLE EST RONDE — observé le
+                                    // 2026-08-08. 21 % du tampon carré ne
+                                    // s'affiche nulle part, et rien ne le
+                                    // signale : le contrôleur accepte l'image
+                                    // entière. Composer sur un carré serait
+                                    // juger la mise en page sur une surface qui
+                                    // n'existe pas, d'où ce disque.
+                                    Rectangle {
+                                        height: 176px;
+                                        disque := Rectangle {
+                                            width: min(parent.width, parent.height);
+                                            height: self.width;
+                                            x: (parent.width - self.width) / 2;
+                                            border-radius: root.rayon-disque * self.width;
+                                            background: #0a0a0e;
+                                            border-width: 1px;
+                                            border-color: #33364a;
+
+                                            for ancre in root.ancres: Rectangle {
+                                                x: ancre.x * parent.width;
+                                                y: ancre.y * parent.height;
+                                                width: ancre.largeur * parent.width;
+                                                height: ancre.hauteur * parent.height;
+                                                border-radius: 3px;
+                                                background: ancre.occupee ? #2a3352 : #16161e;
+                                                border-width: ancre.choisie ? 2px : 1px;
+                                                border-color: ancre.choisie ? #4d7cff
+                                                    : (ancre.occupee ? #3d4569 : #26262f);
+                                                Text {
+                                                    text: ancre.occupee ? ancre.porte : ancre.nom;
+                                                    font-size: 9px;
+                                                    color: ancre.occupee ? #cdd8ff : #55566a;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                    width: parent.width - 4px;
+                                                    x: 2px;
+                                                    overflow: elide;
+                                                }
+                                                TouchArea { clicked => { root.viser-ancre(ancre.nom); } }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: root.champs-poses + " champ" + (root.champs-poses > 1 ? "s" : "")
+                                            + " sur " + root.champs-max + ". Clique une ancre du disque pour la garnir.";
+                                        font-size: 11px;
+                                        color: #6f7180;
+                                        wrap: word-wrap;
+                                    }
+
+                                    Titre { text: "FOND"; }
+                                    HorizontalLayout {
+                                        spacing: 4px;
+                                        for nom[rang] in ["Noir", "Image"]: Pastille {
+                                            horizontal-stretch: 1;
+                                            texte: nom;
+                                            retenue: root.fond-choisi == rang;
+                                            choisie => { root.fond-choisi = rang; root.saisir-ecran(); }
+                                        }
+                                    }
+                                    if root.fond-choisi == 1: LineEdit {
+                                        placeholder-text: "/chemin/absolu/vers/le/fond";
+                                        text <=> root.chemin-fond;
+                                        edited => { root.saisir-ecran(); }
+                                    }
+                                    Button {
+                                        text: "Poser le fond";
+                                        clicked => { root.poser-fond(); }
+                                    }
+
+                                    Rectangle { height: 2px; }
+                                    Titre { text: "CHAMP DE L'ANCRE « " + root.ancre-visee + " »"; }
+                                    HorizontalLayout {
+                                        spacing: 4px;
+                                        for nom[rang] in ["Température", "Texte"]: Pastille {
+                                            horizontal-stretch: 1;
+                                            texte: nom;
+                                            retenue: root.source-choisie == rang;
+                                            choisie => { root.source-choisie = rang; root.saisir-ecran(); }
+                                        }
+                                    }
+                                    if root.source-choisie == 0: ComboBox {
+                                        model: root.sondes-lisibles;
+                                        current-index <=> root.sonde-choisie;
+                                        selected => { root.saisir-ecran(); }
+                                    }
+                                    // Le libellé n'est pas un ornement :
+                                    // `kraken2023elite:coolant-temp` fait
+                                    // vingt-huit caractères sur six centimètres
+                                    // de dalle. Ici on nomme soi-même ce qu'on
+                                    // regarde.
+                                    LineEdit {
+                                        placeholder-text: root.source-choisie == 0
+                                            ? "Libellé affiché — « LIQUIDE »"
+                                            : "Le texte à afficher";
+                                        text <=> root.libelle-champ;
+                                        edited => { root.saisir-ecran(); }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Button {
+                                            horizontal-stretch: 1;
+                                            text: "Poser";
+                                            clicked => { root.poser-champ(root.libelle-champ); }
+                                        }
+                                        Button {
+                                            text: "Vider";
+                                            clicked => { root.vider-champ(root.libelle-champ); }
+                                        }
+                                    }
+                                    Button {
+                                        text: "Revenir à l'affichage simple";
+                                        clicked => { root.arreter-composition(); }
+                                    }
+                                }
+                                Rectangle { vertical-stretch: 1; }
+                            }
+
+                            // ── Onglet VENTILATEURS ────────────────────────
+                            if root.onglet == 2: VerticalLayout {
+                                spacing: 8px;
+                                Titre { text: "VENTILATEURS"; }
+                                for canal in root.ventilateurs: VerticalLayout {
+                                    spacing: 2px;
+                                    HorizontalLayout {
+                                        Text {
+                                            text: canal.position == "" ? canal.canal : canal.position;
+                                            font-size: 12px;
+                                            color: #e6e6ef;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: canal.lisible ? canal.rpm + " tr/min · " + canal.mode : "illisible";
+                                            font-size: 11px;
+                                            color: canal.lisible ? #8a8c9b : #ffb3b0;
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Slider {
+                                            minimum: 0;
+                                            maximum: 100;
+                                            // La valeur vient de la poignée du
+                                            // canal, pas de la mesure brute : c'est
+                                            // elle qui décide si une mesure a le
+                                            // droit de déplacer le curseur.
+                                            value: canal.pwm;
+                                            changed(valeur) => {
+                                                root.regler-ventilateur(canal.canal, Math.round(valeur));
+                                            }
+                                            released(valeur) => {
+                                                root.relacher-ventilateur(canal.canal);
+                                            }
+                                        }
+                                        // ⚠️ `width: 0px` en plus de `visible` : un
+                                        // element invisible garde sa place en
+                                        // layout, et le laisser la creuserait un
+                                        // trou a droite des trois curseurs de
+                                        // nzxtsmart2.
+                                        Button {
+                                            text: "auto";
+                                            visible: canal.sait-faire-auto;
+                                            width: canal.sait-faire-auto ? self.preferred-width : 0px;
+                                            clicked => { root.rendre-au-firmware(canal.canal); }
+                                        }
+                                    }
+                                }
+                                Rectangle { vertical-stretch: 1; }
                             }
                         }
-
                     }
                 }
             }
