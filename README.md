@@ -34,6 +34,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Interface Slint | ✅ maquette habillée, deux vues, zones, sondes, écran |
 | Écran du Kraken dans le démon | ✅ luminosité, cadran, image, GIF |
 | Profils — une ambiance sous un nom | ✅ éclairage, zones et écran, deux exemples livrés |
+| Composition de l'écran | ✅ un fond, quatre informations, cinq ancres dans le disque |
 
 ## Ce que les protocoles permettent
 
@@ -268,6 +269,11 @@ a coûté un relevé au sol.
 L'écran suit la même règle : `ecran.conf` garde sa luminosité et **le chemin** de ce qu'il montre,
 jamais les pixels. Au redémarrage le démon relit le fichier ; s'il a disparu depuis, la dalle reste
 au firmware et le journal le dit **une fois**, sans boucler.
+
+Une [composition](#la-composition--un-fond-et-jusquà-quatre-informations-dessus) y ajoute ses
+lignes — son fond, puis un `champ` par ancre. C'est le seul affichage qui ne tienne pas sur une
+ligne, et un `ecran.conf` d'avant en a toujours exactement deux : il ne dit jamais « layout », donc
+il ne porte jamais de bloc, donc il se relit tel quel.
 
 **Un fichier absent et un fichier disant « noir » ne se confondent jamais.** Le premier est un
 premier démarrage : le boîtier s'allume en **bleu pur**, ce qui prouve du même coup que les deux
@@ -530,6 +536,62 @@ mètre » sans brancher de Kraken.
 coûteux du cadran, parce qu'il est rassurant : un 34 °C figé derrière une pompe arrêtée, c'est un
 circuit qui chauffe sans que rien ne le signale.
 
+### La composition — un fond, et jusqu'à quatre informations dessus
+
+Le cadran montre **une** sonde et rien d'autre. Une composition en montre plusieurs, sur la photo
+qu'on veut :
+
+```
+screen layout fond image /home/nico/fond.png       ou « fond noir »
+screen layout champ haut   temp kraken2023elite:coolant-temp LIQUIDE
+screen layout champ gauche temp k10temp:tctl CPU
+screen layout champ droite temp nvidia:NVIDIA_GeForce_RTX_5070 GPU
+screen layout champ bas    texte SHYNAEL
+screen layout vide bas                              retirer ce champ
+screen layout off                                   revenir à l'affichage simple
+screen layout                                       ce que la dalle compose
+```
+
+Cinq ancres — `haut`, `bas`, `gauche`, `droite`, `centre` —, **quatre champs au plus**. Chacun
+porte soit une **température** avec un libellé qu'on choisit, soit un **texte fixe**.
+
+⚠️ **La dalle est ronde**, observé le 2026-08-08 (`SPEC-KRAKEN-LCD` §2.1.1). Le tampon, lui, est
+carré : **21 % de ce qu'on transmet ne s'affiche nulle part**, et rien ne le signale — le contrôleur
+accepte l'image entière. D'où l'absence d'ancre en coin, et une vérification plutôt qu'une promesse :
+les cinq boîtes tiennent dans le disque, et un test le calcule.
+
+⚠️ **Le libellé n'est pas un ornement.** `kraken2023elite:coolant-temp` fait vingt-huit caractères
+sur une dalle de six centimètres. Le cadran impose ce slug et le README relève déjà que c'en est un
+défaut ; ici, on nomme soi-même ce qu'on regarde.
+
+⚠️ **Une commande par changement**, et non une ligne unique qui porterait tout. Un chemin et un
+libellé sur la même ligne seraient ambigus au premier espace : rien ne dirait où finit l'un et où
+commence l'autre. C'est la règle du dernier champ, celle des profils (#74) et des chemins d'image.
+
+**Un champ pose son propre fond.** Le tampon est assombri à 30 % sous chaque champ, puis le texte
+est écrit en blanc par-dessus. Ce n'est pas une couleur qu'on espère contrastée : une photo claire
+avale du texte blanc, et la seule garantie est de décider soi-même du fond derrière les caractères.
+La photo reste devinable sous le champ, ce qu'un rectangle noir opaque perdrait.
+
+⚠️ **Une sonde muette écrit des tirets**, jamais un zéro ni la dernière valeur connue — la règle du
+cadran, pour la même raison. Les sondes d'une composition passent par la **quarantaine de #68** :
+elle en lit jusqu'à quatre toutes les deux secondes, et une lecture sysfs sur un périphérique muet
+bloque cinq secondes dans le fil qui sert aussi le socket.
+
+```bash
+cargo run --release --example composition -p reverb-daemon -- /tmp/composition.ppm blanc
+```
+
+dessine une composition **sans matériel**, dans un fichier, avec le bord du disque tracé par-dessus
+— sans ce repère on jugerait la mise en page sur une surface qui n'existe pas. Le second argument
+est `noir`, `blanc`, ou le chemin d'une image : c'est ainsi qu'on vérifie qu'un champ se lit sur les
+deux extrêmes.
+
+**Ce qui n'y est pas** : un GIF animé en fond (recomposer du texte sur trente images par seconde
+pour six centimètres de dalle ne vaut pas son coût — un `.gif` posé en fond n'affiche que sa
+première image), les tours/minute et l'heure en champ, un positionnement au pixel. La **fenêtre**
+ne l'expose pas encore : #76 s'en charge.
+
 ### Ce que le démon réémet, et pourquoi
 
 Rien de ce que la dalle affiche ne tient sans réémission — **pas même une image fixe**. Le firmware
@@ -542,7 +604,15 @@ pour y revenir : **cesser d'émettre est le seul moyen connu**, et c'est exactem
 | image fixe | toutes les 25 s |
 | GIF | à la cadence de ses images, au plus vite tous les 100 ms |
 | cadran | toutes les 2 s, avec la valeur du moment |
+| composition | recomposée toutes les 2 s, **poussée seulement si elle a changé** |
+| composition sans sonde | toutes les 25 s — rien ne peut y bouger |
 | rien | jamais — le démon est au repos absolu |
+
+⚠️ **Le protocole n'a aucune mise à jour partielle** (spec §2, §3.6 — CAM lui-même repousse tout) :
+changer un chiffre coûte les 1,2 Mo entiers. D'où la comparaison avant l'envoi, qui est au fond le
+même principe que le cache de LED du démon — à température stable, il n'y a rien à envoyer. Le
+battement de 25 s, lui, ne se négocie pas : identique ou non, l'image repart avant que le firmware
+ne reprenne la main.
 
 ### Ce qui reste en direct
 
