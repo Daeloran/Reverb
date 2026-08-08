@@ -33,6 +33,20 @@ pub const PIXEL_LEN: usize = 3;
 /// Taille exacte d'une image, en octets : 640 × 640 × 3 (spec §2).
 pub const IMAGE_LEN: usize = WIDTH as usize * HEIGHT as usize * PIXEL_LEN;
 
+/// Rayon du disque **visible**, en pixels du tampon 640 × 640.
+///
+/// ⚠️ **La dalle est ronde**, observé sur le matériel le 2026-08-08 : le tampon
+/// est carré, l'écran ne l'est pas, et ses quatre coins — 21 % de la surface —
+/// ne s'affichent nulle part. Un affichage qui écrirait là écrirait dans le
+/// vide, sans qu'aucun message ne le dise.
+///
+/// 320 est le **disque inscrit** : la valeur de départ, celle qui suppose que le
+/// tampon couvre exactement la dalle. La mire de l'issue #77 dira si le disque
+/// est plus petit. C'est alors cette constante qui change, **et rien d'autre** :
+/// `composition::Boite::dans_le_disque` en dépend, et c'est ce qui replacerait
+/// les cinq ancres d'un seul coup.
+pub const VISIBLE_DISC_RADIUS: u16 = 320;
+
 /// Position du rouge, du vert et du bleu dans le triplet écrit à l'écran.
 ///
 /// `[2, 1, 0]` — l'écran est en **BGR** (spec §2.1). Conclusion établie par le
@@ -181,6 +195,19 @@ pub fn pixel(r: u8, g: u8, b: u8) -> [u8; PIXEL_LEN] {
         sortie[position] = *composante;
     }
     sortie
+}
+
+/// L'inverse de [`pixel`] : les composantes d'un triplet déjà écrit.
+///
+/// Sert à **relire** un tampon qu'on est en train de peindre — assombrir le
+/// fond derrière un champ de la composition demande de savoir ce qu'il y avait.
+/// Vit ici, et non chez l'appelant, pour que [`COMPONENT_ORDER`] reste connu
+/// d'un seul module : deux endroits qui décident de l'ordre, c'est la garantie
+/// qu'un jour ils divergent, et une erreur d'ordre ne produit **aucun message**
+/// — juste une mauvaise couleur.
+pub fn composantes(triplet: &[u8]) -> (u8, u8, u8) {
+    let lire = |rang: usize| triplet.get(COMPONENT_ORDER[rang]).copied().unwrap_or(0);
+    (lire(0), lire(1), lire(2))
 }
 
 /// Couleurs de la mire, dans l'ordre : haut-gauche, haut-droite, bas-gauche,

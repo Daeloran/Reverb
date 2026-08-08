@@ -48,6 +48,7 @@ use std::fmt;
 
 use crate::LEDS_PER_FAN;
 use crate::color::Rgb;
+use crate::composition::{Ancre, Fond, Source};
 use crate::led::Led;
 use crate::position::Position;
 use crate::profil::NomProfil;
@@ -216,6 +217,21 @@ pub enum ScreenAction {
     Gauge(String),
     /// `screen gif <chemin>` — une animation, jouée en boucle.
     Gif(String),
+    /// `screen layout` — la composition courante, sans rien changer.
+    LayoutState,
+    /// `screen layout fond noir` · `screen layout fond image <chemin>`.
+    ///
+    /// Poser un fond **crée** la composition si la dalle n'en portait pas :
+    /// c'est par là qu'on y entre, et exiger une commande d'ouverture avant de
+    /// pouvoir poser quoi que ce soit n'apprendrait rien à personne.
+    LayoutFond(Fond),
+    /// `screen layout champ <ancre> temp <sonde> [libellé]`
+    /// · `screen layout champ <ancre> texte <libellé>`.
+    LayoutChamp(Ancre, Source),
+    /// `screen layout vide <ancre>` — retire le champ de cette ancre.
+    LayoutVide(Ancre),
+    /// `screen layout off` — retour à l'affichage simple.
+    LayoutOff,
 }
 
 /// Ce qu'une commande `profil` demande.
@@ -413,10 +429,75 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
         "screen" => {
             let [action, reste @ ..] = arguments.as_slice() else {
                 return Err(mauvais(
-                    "attend une action : state, brightness, off, image, gauge ou gif",
+                    "attend une action : state, brightness, off, image, gauge, gif ou layout",
                 ));
             };
             match *action {
+                // ⚠️ **Une commande par changement, et un seul champ libre par
+                // ligne.** Une ligne unique qui porterait à la fois un chemin de
+                // fond et un libellé de champ serait ambiguë au premier espace :
+                // rien ne dirait où finit le chemin et où commence le texte.
+                "layout" => {
+                    let [sous_action, apres @ ..] = reste else {
+                        return Ok(Request::Screen(ScreenAction::LayoutState));
+                    };
+                    match *sous_action {
+                        "off" => {
+                            if !apres.is_empty() {
+                                return Err(mauvais(
+                                    "« screen layout off » n'attend aucun argument",
+                                ));
+                            }
+                            Ok(Request::Screen(ScreenAction::LayoutOff))
+                        }
+                        "vide" => {
+                            let [ancre] = apres else {
+                                return Err(mauvais(
+                                    "« screen layout vide » attend une ancre, et elle seule",
+                                ));
+                            };
+                            let ancre = Ancre::depuis_slug(ancre)
+                                .map_err(|erreur| mauvais(&erreur.to_string()))?;
+                            Ok(Request::Screen(ScreenAction::LayoutVide(ancre)))
+                        }
+                        // Le fond porte un chemin : dernier champ de la ligne,
+                        // et il va jusqu'au bout, espaces comprises.
+                        "fond" => {
+                            let brut = apres_n_mots(line, 3).unwrap_or("");
+                            let fond =
+                                Fond::decoder(brut).map_err(|erreur| mauvais(&erreur.raison))?;
+                            if let Fond::Image(chemin) = &fond
+                                && !chemin.starts_with('/')
+                            {
+                                return Err(mauvais(&format!(
+                                    "chemin « {chemin} » relatif : le démon ne partage ni le \
+                                     répertoire courant ni le foyer de son client, il faut un \
+                                     chemin absolu"
+                                )));
+                            }
+                            Ok(Request::Screen(ScreenAction::LayoutFond(fond)))
+                        }
+                        // Le libellé aussi : « champ haut temp <sonde> CPU
+                        // gauche » porte quatre champs, pas cinq.
+                        "champ" => {
+                            let [ancre, ..] = apres else {
+                                return Err(mauvais(
+                                    "« screen layout champ » attend une ancre puis une source : \
+                                     « temp <sonde> [libellé] » ou « texte <libellé> »",
+                                ));
+                            };
+                            let ancre = Ancre::depuis_slug(ancre)
+                                .map_err(|erreur| mauvais(&erreur.to_string()))?;
+                            let brut = apres_n_mots(line, 4).unwrap_or("");
+                            let source =
+                                Source::decoder(brut).map_err(|erreur| mauvais(&erreur.raison))?;
+                            Ok(Request::Screen(ScreenAction::LayoutChamp(ancre, source)))
+                        }
+                        autre => Err(mauvais(&format!(
+                            "« screen layout {autre} » inconnu : fond, champ, vide ou off"
+                        ))),
+                    }
+                }
                 "state" | "off" => {
                     if !reste.is_empty() {
                         return Err(mauvais(&format!(
@@ -485,7 +566,8 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
                     }))
                 }
                 autre => Err(mauvais(&format!(
-                    "action « {autre} » inconnue : state, brightness, off, image, gauge ou gif"
+                    "action « {autre} » inconnue : state, brightness, off, image, gauge, gif ou \
+                     layout"
                 ))),
             }
         }
@@ -679,6 +761,19 @@ pub fn encode_request(request: &Request) -> String {
             ScreenAction::Gif(chemin) => format!("screen gif {}", sans_controle(chemin)),
             // La sonde, elle, est un jeton : ses blancs tombent aussi.
             ScreenAction::Gauge(sonde) => format!("screen gauge {}", sur_une_ligne(sonde)),
+            ScreenAction::LayoutState => "screen layout".to_owned(),
+            ScreenAction::LayoutOff => "screen layout off".to_owned(),
+            ScreenAction::LayoutVide(ancre) => format!("screen layout vide {}", ancre.slug()),
+            // Le fond et la source finissent la ligne : leurs espaces restent
+            // — chemin ou libellé —, leurs caractères de contrôle tombent.
+            ScreenAction::LayoutFond(fond) => {
+                format!("screen layout fond {}", sans_controle(&fond.encoder()))
+            }
+            ScreenAction::LayoutChamp(ancre, source) => format!(
+                "screen layout champ {} {}",
+                ancre.slug(),
+                sans_controle(&source.encoder())
+            ),
         },
         Request::ZoneList => "zone list".to_owned(),
         Request::ZoneSet { nom, cibles } => format!(
@@ -808,9 +903,22 @@ fn cible_ecrite(target: LightTarget) -> String {
 /// tels quels : ce sont ceux d'un chemin, et les fusionner désignerait un
 /// fichier qui n'existe pas.
 fn apres_l_action(line: &str) -> Option<&str> {
-    let (_, reste) = line.trim_start().split_once(char::is_whitespace)?;
-    let (_, dernier) = reste.trim_start().split_once(char::is_whitespace)?;
-    Some(dernier.trim_start())
+    apres_n_mots(line, 2)
+}
+
+/// Ce qui reste d'une ligne après ses `n` premiers mots.
+///
+/// La composition de l'écran a des commandes plus profondes que « verbe action »
+/// — `screen layout champ haut temp <sonde> <libellé>` en a quatre avant son
+/// champ libre —, et le dernier champ y garde la même règle : il va jusqu'au
+/// bout, espaces comprises.
+fn apres_n_mots(line: &str, n: usize) -> Option<&str> {
+    let mut reste = line.trim_start();
+    for _ in 0..n {
+        let (_, suite) = reste.split_once(char::is_whitespace)?;
+        reste = suite.trim_start();
+    }
+    Some(reste)
 }
 
 /// Une luminosité d'écran, de 0 à 100 pour cent.
@@ -966,9 +1074,21 @@ pub enum ResponseLine {
     },
     /// `screen <0-100> <affichage>` — l'état de la dalle.
     ///
-    /// L'affichage s'écrit `rien`, `gauge:<sonde>`, `image:<chemin>` ou
-    /// `gif:<chemin>`.
+    /// L'affichage s'écrit `rien`, `gauge:<sonde>`, `image:<chemin>`,
+    /// `gif:<chemin>` ou `layout`.
+    ///
+    /// ⚠️ Une composition s'y réduit au **jeton** `layout` : son fond et ses
+    /// champs ne tiendraient pas sur une ligne, et ils viennent sur les leurs.
     Screen { luminosite: u8, affichage: String },
+    /// `layout <fond>` — le fond de la composition courante.
+    ///
+    /// Le fond s'écrit comme dans la requête : `noir` ou `image <chemin>`.
+    Layout { fond: String },
+    /// `layout-champ <ancre> <source>` — un champ de la composition courante.
+    ///
+    /// Une ligne par champ, dans l'ordre des ancres. Aucune quand la dalle ne
+    /// porte pas de composition — leur absence *est* l'information.
+    LayoutChamp { ancre: String, source: String },
     /// `profil <etat> <nom>` — ce qu'il est advenu d'une ambiance.
     ///
     /// `etat` est un **seul jeton** : `connu` pour une ligne de `profil list`,
@@ -1110,6 +1230,12 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
             luminosite,
             affichage,
         } => format!("screen {luminosite} {}", sans_controle(affichage)),
+        // Le fond et la source sont les derniers champs de leur ligne, et
+        // portent chemin ou libellé : espaces gardées, contrôles neutralisés.
+        ResponseLine::Layout { fond } => format!("layout {}", sans_controle(fond)),
+        ResponseLine::LayoutChamp { ancre, source } => {
+            format!("layout-champ {} {}", jeton(ancre), sans_controle(source))
+        }
         // Le nom est le dernier champ, et porte des espaces légitimes : ses
         // caractères de contrôle tombent, ses espaces restent. L'état, lui, est
         // un jeton, et se neutralise comme tel.
@@ -1169,6 +1295,31 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
         return Ok(ResponseLine::Screen {
             luminosite: u8::try_from(luminosite).unwrap_or(LUMINOSITE_MAX),
             affichage: affichage.to_owned(),
+        });
+    }
+
+    // `layout` et `layout-champ` portent eux aussi un dernier champ à espaces —
+    // un chemin de fond, un libellé de champ. ⚠️ `layout-champ` se teste
+    // **avant** `layout` : « layout-champ » commence par « layout », et l'ordre
+    // inverse lirait le tiret comme le début d'un fond.
+    if let Some(reste) = line.strip_prefix("layout-champ ") {
+        let (ancre, source) = reste
+            .split_once(' ')
+            .ok_or_else(|| illisible("« layout-champ » attend une ancre et une source"))?;
+        if source.trim().is_empty() {
+            return Err(illisible("« layout-champ » attend une source"));
+        }
+        return Ok(ResponseLine::LayoutChamp {
+            ancre: ancre.to_owned(),
+            source: source.to_owned(),
+        });
+    }
+    if let Some(fond) = line.strip_prefix("layout ") {
+        if fond.trim().is_empty() {
+            return Err(illisible("« layout » attend un fond"));
+        }
+        return Ok(ResponseLine::Layout {
+            fond: fond.to_owned(),
         });
     }
 

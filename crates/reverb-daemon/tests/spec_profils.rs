@@ -1446,6 +1446,12 @@ fn le_depot_livre_des_profils_d_exemple() {
         if let Some(ecran) = &profil.ecran {
             let chemin = match &ecran.affichage {
                 Affichage::Image(chemin) | Affichage::Gif(chemin) => Some(chemin.clone()),
+                // Le fond d'une composition est un fichier comme un autre : le
+                // garde-fou vaut pour lui aussi (#80).
+                Affichage::Composition(composition) => match composition.fond() {
+                    reverb_proto::composition::Fond::Image(chemin) => Some(chemin.clone()),
+                    reverb_proto::composition::Fond::Noir => None,
+                },
                 Affichage::Rien | Affichage::Cadran(_) => None,
             };
             if let Some(chemin) = chemin {

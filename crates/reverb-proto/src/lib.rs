@@ -11,6 +11,7 @@
 //! est inconnue.
 
 pub mod color;
+pub mod composition;
 pub mod frame;
 pub mod ipc;
 pub mod led;

@@ -104,6 +104,27 @@ les deux coins concernés. La question ouverte n° 2 est close.
 Attention donc : les LED des ventilateurs sont en **GRB** et l'écran en **BGR**. Deux ordres
 différents dans le même écosystème NZXT — c'est une source d'erreur à isoler proprement dans le code.
 
+### 2.1.1 La dalle est ronde, le tampon est carré ✅
+
+✅ **Observé sur le matériel le 2026-08-08.** La dalle du Kraken Elite 2023 est **circulaire**,
+là où le protocole transporte un tampon carré de 640 × 640.
+
+Conséquence directe, et elle décide de toute mise en page : **les quatre coins du tampon ne
+s'affichent nulle part**. Un disque inscrit occupe π/4 de son carré, soit **21 % de la surface
+transmise perdue**. Ce qui est écrit là est écrit dans le vide, et aucun message ne le dit — le
+contrôleur accepte l'image entière.
+
+⚠️ **La mire des quatre quadrants (§2.1) ne pouvait pas trancher** : un disque montre ses quatre
+quadrants exactement comme un carré. C'est l'œil, sur la dalle allumée, qui a répondu.
+
+🔶 **Le rayon exact du disque dans le tampon reste à mesurer.** Savoir que la dalle est ronde ne
+dit pas si le tampon la couvre exactement — disque inscrit de 320 pixels de rayon — ou s'il
+déborde encore. Une mire d'un cercle inscrit sur fond contrasté le dira d'un coup d'œil
+(issue #77).
+
+Le code n'en connaît qu'un endroit : `reverb_proto::screen::VISIBLE_DISC_RADIUS`, à 320 en
+attendant la mesure. C'est lui qui décide où un champ de composition peut se poser.
+
 ### 2.2 Cadence ✅
 
 Une image par seconde en mode « température du liquide ». **CAM effectue le rendu côté hôte** et
@@ -421,6 +442,7 @@ fiche de préparation. Le décodage ci-dessus sert alors de vérification, pas d
 | 5 | Peut-on désactiver le repli de 30 s ? | 🔶 l'octet `0x1e` de `30 02` vaut 30 (§3.4). Lui donner une autre valeur et mesurer |
 | 6 | **Existe-t-il une commande de retour au mode firmware ?** | non identifiée. Cesser d'émettre suffit — §2.3 |
 | 7 | Autres valeurs de `<mode>` dans `38 01` | seul le mode 2 est observé sur ce modèle — §3.5 |
+| 8 | **Rayon exact du disque visible dans le tampon** | la dalle est ronde (§2.1.1, observé) ; reste à savoir si le disque est celui inscrit à 320 px. Une mire d'un cercle inscrit, coins d'une couleur distincte — issue #77 |
 | ~~—~~ | ~~Luminosité~~ | ✅ **tranché — §3.4, reconfirmé §3.7** |
 | ~~—~~ | ~~Mode d'affichage autonome~~ | ✅ **tranché — §2.3, corrigé le 2026-07-31** |
 | ~~—~~ | ~~Structure de `38 01`~~ | ✅ **tranché — §3.5** |

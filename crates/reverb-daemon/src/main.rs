@@ -21,6 +21,7 @@ use reverb_daemon::serveur::{self, Ordre};
 use reverb_daemon::telemetrie;
 use reverb_daemon::zones::{self, Rendu, Tampon, Zones};
 use reverb_hw::hwmon::Percent;
+use reverb_proto::composition::{Ancre, Composition, Fond, Source};
 use reverb_proto::ipc::{
     FanAction, LightTarget, ProfilAction, Request, ResponseLine, ScreenAction,
 };
@@ -217,6 +218,26 @@ enum Diffusion {
     },
     /// Un cadran, redessiné à chaque tour avec la valeur du moment.
     Cadran(String),
+    /// Une composition : un fond décodé une fois, des champs redessinés dessus
+    /// (#80).
+    Composee {
+        /// Le fond, décodé et mis à l'échelle **une seule fois**.
+        ///
+        /// ⚠️ Redécoder un PNG toutes les deux secondes pour changer trois
+        /// chiffres coûterait le décodage complet d'une image à chaque tour. Le
+        /// fond ne change que quand on le change.
+        fond: Box<ecran::Dalle>,
+        /// La dernière image **réellement poussée**.
+        ///
+        /// C'est elle qui permet de ne rien envoyer quand rien n'a bougé : le
+        /// protocole n'a aucune mise à jour partielle (spec §2, §3.6), donc
+        /// chaque changement coûte 1,2 Mo, et à température stable il n'y a
+        /// rien à changer.
+        derniere: Option<Box<ecran::Dalle>>,
+        /// Quand elle est partie. Le repli du firmware ne se négocie pas :
+        /// même identique, l'image doit repartir avant les trente secondes.
+        dernier_envoi: Option<Instant>,
+    },
 }
 
 /// Entre deux images d'un cadran.
@@ -356,6 +377,18 @@ impl Etat {
                     .ok_or_else(|| format!("{chemin} : aucune image"))?;
                 (Diffusion::Fixe(Box::new(premiere)), Some(Instant::now()))
             }
+            ecran::Affichage::Composition(composition) => {
+                let fond = ecran::fond_en_dalle(composition.fond())
+                    .map_err(|erreur| erreur.to_string())?;
+                (
+                    Diffusion::Composee {
+                        fond: Box::new(fond),
+                        derniere: None,
+                        dernier_envoi: None,
+                    },
+                    Some(Instant::now()),
+                )
+            }
             ecran::Affichage::Gif(chemin) => {
                 let (dalles, ecrits) = ecran::Dalle::animee_depuis_fichier(Path::new(chemin))
                     .map_err(|erreur| erreur.to_string())?;
@@ -387,7 +420,49 @@ impl Etat {
                 ecran::Affichage::Cadran(sonde) => format!("gauge:{sonde}"),
                 ecran::Affichage::Image(chemin) => format!("image:{chemin}"),
                 ecran::Affichage::Gif(chemin) => format!("gif:{chemin}"),
+                // Un jeton, et le détail sur les lignes qui suivent : un fond
+                // et quatre champs ne tiennent pas sur une ligne, et les y
+                // tasser demanderait un échappement que ce protocole n'a pas.
+                ecran::Affichage::Composition(_) => "layout".to_owned(),
             },
+        }
+    }
+
+    /// Les lignes qui décrivent la composition courante, s'il y en a une.
+    ///
+    /// Vides quand la dalle n'en porte pas : leur absence *est* l'information,
+    /// et une ligne « layout rien » ferait un second moyen de dire ce que
+    /// `screen` dit déjà.
+    fn lignes_composition(&self) -> Vec<ResponseLine> {
+        let ecran::Affichage::Composition(composition) = &self.ecran.affichage else {
+            return Vec::new();
+        };
+        let mut lignes = vec![ResponseLine::Layout {
+            fond: composition.fond().encoder(),
+        }];
+        lignes.extend(composition.champs().into_iter().map(|(ancre, source)| {
+            ResponseLine::LayoutChamp {
+                ancre: ancre.slug().to_owned(),
+                source: source.encoder(),
+            }
+        }));
+        lignes
+    }
+
+    /// La composition courante, ou une neuve sur fond noir.
+    ///
+    /// ⚠️ **Poser un champ ou un fond entre dans la composition** : la dalle qui
+    /// montrait une image ou rien en porte une dès la première commande. Exiger
+    /// un « layout on » avant de pouvoir poser quoi que ce soit n'apprendrait
+    /// rien à personne et ferait échouer la commande la plus évidente.
+    fn composition_courante(&self) -> Composition {
+        match &self.ecran.affichage {
+            ecran::Affichage::Composition(composition) => composition.clone(),
+            // Une image affichée devient le fond de la composition qu'on
+            // commence : c'est ce que quelqu'un qui tape « layout champ » sur
+            // une photo veut, et repartir du noir lui ferait perdre sa photo.
+            ecran::Affichage::Image(chemin) => Composition::nouvelle(Fond::Image(chemin.clone())),
+            _ => Composition::nouvelle(Fond::Noir),
         }
     }
 
@@ -576,18 +651,58 @@ fn tour_d_ecran(etat: &mut Etat, peripheriques: &mut Peripheriques) -> Duration 
         return echeance - maintenant;
     }
 
+    // ⚠️ **Les sondes sont relevées avant de toucher à la diffusion.** Elle est
+    // empruntée en mutable juste après, et `etat.sondes` ne serait alors plus
+    // lisible. Un relevé vide quand la dalle ne porte pas de composition : rien
+    // n'est lu, et le cas le plus courant ne coûte rien.
+    let champs = champs_du_moment(etat);
+
     // Le délai jusqu'à l'image suivante est décidé **avant** l'envoi : un
     // envoi qui échoue ne doit pas figer l'horloge, sinon un Kraken débranché
     // ferait tourner cette boucle à plein régime.
+    let repli = Duration::from_secs(reverb_proto::screen::REFRESH_INTERVAL_SECS);
     let (octets, prochain) = match &mut etat.diffusion {
         Diffusion::Rien => {
             etat.echeance_ecran = None;
             return REPOS;
         }
-        Diffusion::Fixe(dalle) => (
-            dalle.octets().to_vec(),
-            Duration::from_secs(reverb_proto::screen::REFRESH_INTERVAL_SECS),
-        ),
+        Diffusion::Fixe(dalle) => (dalle.octets().to_vec(), repli),
+
+        Diffusion::Composee {
+            fond,
+            derniere,
+            dernier_envoi,
+        } => {
+            let image = ecran::Dalle::composee(fond, &champs);
+
+            // Une composition dont aucun champ ne suit de sonde **ne change
+            // jamais**. La repasser toutes les deux secondes pour la comparer à
+            // elle-même serait du travail qui ne peut rien découvrir : elle
+            // suit alors le rythme d'une image fixe.
+            let vivante = champs
+                .iter()
+                .any(|(_, champ)| matches!(champ, ecran::ChampRendu::Temperature { .. }));
+            let prochain = if vivante { CADENCE_CADRAN } else { repli };
+
+            // ⚠️ **On ne pousse que ce qui a changé.** Le protocole n'a aucune
+            // mise à jour partielle (spec §2, §3.6) : un dixième de degré coûte
+            // 1,2 Mo. À température stable, il n'y a rien à envoyer — et le
+            // démon doit alors être au repos, comme il l'est déjà pour
+            // l'animation `thermique`.
+            //
+            // Le repli du firmware, lui, ne se négocie pas : identique ou non,
+            // l'image repart avant les trente secondes (spec §2.2.2).
+            let repli_du_firmware = dernier_envoi
+                .is_none_or(|envoi| maintenant.saturating_duration_since(envoi) >= repli);
+            if derniere.as_deref() == Some(&image) && !repli_du_firmware {
+                (Vec::new(), prochain)
+            } else {
+                let octets = image.octets().to_vec();
+                *derniere = Some(Box::new(image));
+                *dernier_envoi = Some(maintenant);
+                (octets, prochain)
+            }
+        }
         Diffusion::Anime {
             dalles,
             delais,
@@ -642,6 +757,57 @@ fn tour_d_ecran(etat: &mut Etat, peripheriques: &mut Peripheriques) -> Duration 
 
     etat.echeance_ecran = Some(maintenant + prochain);
     prochain
+}
+
+/// Ce que les champs de la composition montrent à cet instant (#80).
+///
+/// Vide quand la dalle n'en porte pas : aucune sonde n'est alors lue.
+///
+/// ⚠️ **Les sondes passent par la quarantaine** (#68). Une composition en lit
+/// jusqu'à quatre, toutes les deux secondes ; une lecture sysfs sur un
+/// périphérique muet bloque cinq secondes en sommeil non interruptible, et ce
+/// fil est celui qui sert aussi le socket et tient les bus (ADR-002). Sans elle,
+/// quatre champs sur des sondes mortes gèleraient le service vingt secondes sur
+/// deux.
+///
+/// Une sonde écartée rend `None`, donc des tirets — jamais la dernière valeur
+/// connue.
+fn champs_du_moment(etat: &mut Etat) -> Vec<(Ancre, ecran::ChampRendu)> {
+    let ecran::Affichage::Composition(composition) = &etat.ecran.affichage else {
+        return Vec::new();
+    };
+
+    let maintenant = etat.naissance.elapsed();
+    let sources: Vec<(Ancre, Source)> = composition
+        .champs()
+        .into_iter()
+        .map(|(ancre, source)| (ancre, source.clone()))
+        .collect();
+
+    sources
+        .into_iter()
+        .map(|(ancre, source)| {
+            let rendu = match source {
+                Source::Texte(texte) => ecran::ChampRendu::Texte(texte),
+                Source::Temperature { sonde, libelle } => {
+                    let valeur = match etat.sondes.iter().find(|connue| connue.slug == sonde) {
+                        Some(connue) => {
+                            match etat
+                                .quarantaine
+                                .tour(&sonde, maintenant, || connue.lire().ok())
+                            {
+                                Releve::Valeur(millidegres) => Some(millidegres as f32 / 1000.0),
+                                Releve::Muette { .. } => None,
+                            }
+                        }
+                        None => None,
+                    };
+                    ecran::ChampRendu::Temperature { libelle, valeur }
+                }
+            };
+            (ancre, rendu)
+        })
+        .collect()
 }
 
 /// Le cadran d'une sonde, avec sa valeur du moment.
@@ -1013,7 +1179,15 @@ fn ecran_commande(
     }
 
     match action {
-        ScreenAction::State => vec![etat.ligne_ecran(), ResponseLine::End],
+        // La composition part avec l'état, et non sur une seconde demande : une
+        // fenêtre qui interroge la dalle chaque seconde doublerait sinon son
+        // trafic pour un détail qu'elle affiche au même endroit.
+        ScreenAction::State => {
+            let mut lignes = vec![etat.ligne_ecran()];
+            lignes.extend(etat.lignes_composition());
+            lignes.push(ResponseLine::End);
+            lignes
+        }
 
         ScreenAction::Brightness(pourcent) => {
             if let Err(erreur) = peripheriques.luminosite_ecran(pourcent) {
@@ -1043,6 +1217,72 @@ fn ecran_commande(
 
         ScreenAction::Image(chemin) => poser_affichage(etat, ecran::Affichage::Image(chemin)),
         ScreenAction::Gif(chemin) => poser_affichage(etat, ecran::Affichage::Gif(chemin)),
+
+        ScreenAction::LayoutState => {
+            let mut lignes = etat.lignes_composition();
+            lignes.push(ResponseLine::End);
+            lignes
+        }
+
+        ScreenAction::LayoutOff => {
+            // Ce que la composition montrait, elle le rend : son fond. Une
+            // composition qu'on quitte en éteignant la dalle ferait disparaître
+            // la photo qu'on avait posée dessous, ce que personne ne demande en
+            // tapant « off » sur les champs.
+            let affichage = match &etat.ecran.affichage {
+                ecran::Affichage::Composition(composition) => match composition.fond() {
+                    Fond::Image(chemin) => ecran::Affichage::Image(chemin.clone()),
+                    Fond::Noir => ecran::Affichage::Rien,
+                },
+                // Pas de composition : rien à quitter, et rien ne bouge.
+                autre => autre.clone(),
+            };
+            poser_affichage(etat, affichage)
+        }
+
+        ScreenAction::LayoutFond(fond) => {
+            let mut composition = etat.composition_courante();
+            composition.changer_fond(fond);
+            poser_affichage(etat, ecran::Affichage::Composition(composition))
+        }
+
+        ScreenAction::LayoutChamp(ancre, source) => {
+            // Une sonde inconnue est refusée **ici** : le démon est seul à
+            // savoir lesquelles la machine expose, et un champ qui afficherait
+            // « --- » pour une faute de frappe se lirait comme une sonde en
+            // panne — la même règle que le cadran.
+            if let Source::Temperature { sonde, .. } = &source
+                && !etat.sondes.iter().any(|connue| connue.slug == *sonde)
+            {
+                return vec![ResponseLine::Error {
+                    message: format!(
+                        "sonde « {sonde} » inconnue — « status » donne celles de la machine"
+                    ),
+                }];
+            }
+            let mut composition = etat.composition_courante();
+            if let Err(erreur) = composition.poser(ancre, source) {
+                return vec![ResponseLine::Error {
+                    message: erreur.to_string(),
+                }];
+            }
+            poser_affichage(etat, ecran::Affichage::Composition(composition))
+        }
+
+        ScreenAction::LayoutVide(ancre) => {
+            let ecran::Affichage::Composition(composition) = &etat.ecran.affichage else {
+                return vec![ResponseLine::Error {
+                    message: "la dalle ne porte pas de composition : rien à vider".to_owned(),
+                }];
+            };
+            let mut composition = composition.clone();
+            if !composition.vider(ancre) {
+                return vec![ResponseLine::Error {
+                    message: format!("l'ancre « {ancre} » ne porte aucun champ"),
+                }];
+            }
+            poser_affichage(etat, ecran::Affichage::Composition(composition))
+        }
         ScreenAction::Gauge(sonde) => {
             // Une sonde inconnue est refusée **ici**, pas sur la dalle : un
             // cadran qui afficherait « --- » pour une faute de frappe se lirait
@@ -1205,15 +1445,33 @@ fn appliquer_profil(
     etat.a_ecrire = true;
 
     if let Some(dalle) = application.ecran {
-        for action in [
-            ScreenAction::Brightness(dalle.luminosite),
-            match &dalle.affichage {
-                ecran::Affichage::Rien => ScreenAction::Off,
-                ecran::Affichage::Cadran(sonde) => ScreenAction::Gauge(sonde.clone()),
-                ecran::Affichage::Image(chemin) => ScreenAction::Image(chemin.clone()),
-                ecran::Affichage::Gif(chemin) => ScreenAction::Gif(chemin.clone()),
-            },
-        ] {
+        let mut actions = vec![ScreenAction::Brightness(dalle.luminosite)];
+        match &dalle.affichage {
+            ecran::Affichage::Rien => actions.push(ScreenAction::Off),
+            ecran::Affichage::Cadran(sonde) => actions.push(ScreenAction::Gauge(sonde.clone())),
+            ecran::Affichage::Image(chemin) => actions.push(ScreenAction::Image(chemin.clone())),
+            ecran::Affichage::Gif(chemin) => actions.push(ScreenAction::Gif(chemin.clone())),
+            // Une composition ne tient pas en une action : elle se rejoue en
+            // plusieurs, et toutes passent par le même chemin d'écriture.
+            //
+            // ⚠️ **Le `off` de tête n'est pas décoratif.** Un profil est un
+            // instantané, pas un ajout : sans lui, les champs de l'ambiance
+            // qu'on quitte survivraient à celle qu'on rappelle, aux ancres que
+            // la nouvelle laisse libres. Il ne touche aucun fichier, donc il ne
+            // peut pas échouer — ce qu'un retour au fond précédent, lui, ferait
+            // si l'image avait été déplacée depuis.
+            ecran::Affichage::Composition(composition) => {
+                actions.push(ScreenAction::Off);
+                actions.push(ScreenAction::LayoutFond(composition.fond().clone()));
+                actions.extend(
+                    composition
+                        .champs()
+                        .into_iter()
+                        .map(|(ancre, source)| ScreenAction::LayoutChamp(ancre, source.clone())),
+                );
+            }
+        }
+        for action in actions {
             for ligne in ecran_commande(etat, peripheriques, action) {
                 if let ResponseLine::Error { message } = ligne {
                     lignes.push(ResponseLine::Unreadable {
