@@ -431,6 +431,53 @@ fiche de préparation. Le décodage ci-dessus sert alors de vérification, pas d
 
 ---
 
+## 6. Latence réelle des accusés d'image ✅
+
+Relevée sur SHYNAEL le **2026-08-09**, sur le matériel, en journalisant chaque accusé reçu par le
+démon. Elle **contredit** le §3.2, dont les chiffres viennent d'une capture Windows.
+
+| accusé | §3.2 (capture Windows) | mesuré sur SHYNAEL |
+|---|---|---|
+| `36 01` → `37 01`, l'annonce | 3 ms | **2 ms**, invariablement |
+| `36 02` → `37 02`, la validation | 18 ms | **98 ms**, puis **1,17 s**, puis **1,17 s** |
+
+⚠️ **La validation peut prendre plus d'une seconde**, soit soixante-cinq fois ce que la capture
+laissait croire. Elle suit les 1 228 800 octets du §2 : le contrôleur digère l'image avant
+d'accuser, et le temps qu'il y met n'est pas constant.
+
+**Conséquence pratique** : un délai de garde calé sur les 18 ms du §3.2 déclare mort un contrôleur
+qui fonctionne. Essayé à 500 ms — l'image s'affichait correctement, l'accusé arrivait trop tard,
+trois « refus » consécutifs rendaient la dalle au firmware au bout d'une trentaine de secondes.
+
+## 7. Rapport d'état spontané `75 02` ✅
+
+Relevé le **2026-08-09**, dans l'attente d'un accusé `37 02` :
+
+```
+75 02 bb 8c …      <--   NON SOLLICITÉ, à t+636 ms et t+673 ms après « 36 02 »
+```
+
+Le contrôleur **émet de lui-même**, sans qu'on lui ait rien demandé, pendant qu'on attend la
+réponse à une question. Une lecture sur `/dev/hidraw*` peut donc rendre cette trame-là au lieu de
+l'accusé attendu : **il faut savoir en écarter**, et c'est ce que fait `hidraw::ask`.
+
+Les octets `bb 8c` qui suivent sont ceux qu'on retrouve en tête de la réponse `31 01` du §3.7
+(`31 01 bb 8c 90 82 …`) — ❓ leur rôle n'est pas établi, et le reste de la trame n'a pas été
+décodé.
+
+⚠️ **La cadence n'est pas établie.** Deux occurrences observées, à 636 et 673 ms de leur `36 02`
+respectif ; rien ne permet d'affirmer qu'elle est d'une par seconde. 🔶 C'est ce que suggèrent le
+`67 02` des contrôleurs d'éclairage (`SPEC-PROTOCOLE-NZXT` §7.1) et la boucle de rafraîchissement
+du §3.2, mais ce n'est pas mesuré.
+
+> 📓 Une version antérieure du code affirmait « le Kraken émet spontanément un rapport d'état
+> `75 02` chaque seconde (spec §7.1) ». **La trame était réelle, la citation ne l'était pas** : ce
+> document n'avait pas de §7, et `75` n'apparaissait nulle part ailleurs que dans la table de
+> décodage de `tools/extrait_kraken.py`. D'où cette section : le fait est maintenant mesuré, et il
+> a une source.
+
+---
+
 ## 5. Questions ouvertes
 
 | # | Question | Comment trancher |
