@@ -98,14 +98,29 @@ fn dans_son_secteur(ancre: Ancre, x: u32, y: u32) -> bool {
     let dx = x as f32 + 0.5 - centre;
     let dy = y as f32 + 0.5 - centre;
     let rayon = (dx * dx + dy * dy).sqrt();
-    if rayon < f32::from(composition::COURONNE_RAYON_INTERIEUR)
-        || rayon > f32::from(composition::COURONNE_RAYON_EXTERIEUR)
+    // ⚠️ **Deux marges, et elles ne sont pas de la tolérance à l'aveugle** (#93).
+    //
+    // Un pixel en rayon : l'arc est anticrénelé depuis #93, et sa couverture
+    // décroît sur un demi-pixel de part et d'autre du ruban. Sans cette marge,
+    // le pixel (295, 4) — à 316,5 d'un bord posé à 316 — serait déclaré hors
+    // secteur alors qu'il est le lissage du bord lui-même.
+    //
+    // Trois degrés en angle : les extrémités sont des demi-disques de rayon 12
+    // centrés sur la ligne médiane, à 304 du centre. Ils débordent donc de
+    // `asin(12 / 304) ≈ 2,26°` derrière chaque bout, plus l'anticrénelage. Vingt
+    // degrés séparent deux secteurs voisins : la marge ne peut pas les faire se
+    // toucher, et `spec_arcs_lisses.rs` le vérifie au pixel.
+    const MARGE_RAYON: f32 = 1.0;
+    const MARGE_ANGLE: f32 = 3.0;
+
+    if rayon < f32::from(composition::COURONNE_RAYON_INTERIEUR) - MARGE_RAYON
+        || rayon > f32::from(composition::COURONNE_RAYON_EXTERIEUR) + MARGE_RAYON
     {
         return false;
     }
     // Zéro au sommet, croissant dans le sens horaire — la convention de #90.
     let angle = dx.atan2(-dy).to_degrees().rem_euclid(360.0);
-    (angle - secteur.debut).rem_euclid(360.0) < secteur.ouverture
+    (angle - secteur.debut + MARGE_ANGLE).rem_euclid(360.0) < secteur.ouverture + 2.0 * MARGE_ANGLE
 }
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,21 @@
 //! rejoue ni la taille du tampon, ni la persistance, ni le format. Il ne garde que ce que #90
 //! ajoute — une vraie fonte, et un arc par champ de température.
 //!
+//! # ⚠️ Relu par #93, sur un seul point
+//!
+//! #93 pose une **piste** sous l'arc, qui occupe tout le secteur quelle que soit la proportion.
+//! `un_arc_se_remplit_proportionnellement_du_vide_au_plein` mesurait le remplissage par les pixels
+//! qu'il **change** ; il le mesure désormais par les pixels **de la couleur d'arc**, qui est la
+//! mesure que le critère d'acceptation de #93 nomme. La propriété défendue n'a pas bougé, une seule
+//! assertion a été **ajoutée** — l'arc vide ne porte aucune couleur d'arc —, et rien n'a été
+//! assoupli. Le raisonnement complet est en tête de ce test.
+//!
+//! Les autres tests de ce fichier ont été relus au même moment et **laissés tels quels** : ils
+//! mesurent tous par rapport à un arc à 0 °C ou à une sonde muette, qui portent la même piste que
+//! ce qu'on leur compare, si bien que la soustraction l'annule. `un_champ_texte_ne_dessine_aucun_arc`
+//! et `l_ancre_centre_n_a_pas_d_arc` comparent au fond nu, et restent vrais parce qu'un champ sans
+//! proportion à montrer n'a ni arc **ni piste** — c'est un contrat de #90 que #93 ne touche pas.
+//!
 //! # La couture que ce fichier exige
 //!
 //! Elle n'existe pas encore : c'est le propre de la phase rouge. Six ajouts, tous choisis pour
@@ -137,7 +152,9 @@
 
 use std::collections::BTreeSet;
 
-use reverb_daemon::ecran::{ChampRendu, Dalle, FONTE, proportion_de_temperature, valeur_du_champ};
+use reverb_daemon::ecran::{
+    ARC_COULEUR, ChampRendu, Dalle, FONTE, proportion_de_temperature, valeur_du_champ,
+};
 use reverb_proto::composition::{self, Ancre, Boite, Secteur};
 use reverb_proto::screen;
 
@@ -208,6 +225,31 @@ fn pixels_changes(avant: &Dalle, apres: &Dalle) -> Vec<(u32, u32)> {
 /// Le nombre de pixels qu'un dessin a changés.
 fn aire(avant: &Dalle, apres: &Dalle) -> usize {
     pixels_changes(avant, apres).len()
+}
+
+/// Les pixels peints **exactement** de la couleur d'arc.
+///
+/// ⚠️ **Ajouté par #93, qui a relu le remplissage de l'arc.** Depuis que l'arc repose sur une
+/// **piste** occupant tout le secteur quelle que soit la proportion, « ce que l'arc a changé » et
+/// « ce que l'arc a rempli » ne sont plus le même ensemble, et c'est le second que le critère
+/// d'acceptation nomme : « le remplissage reste strictement croissant, mesuré sur les pixels de la
+/// couleur d'arc, **la piste ne comptant pas** ».
+///
+/// La mesure est **conservatrice** : elle laisse de côté l'anticrénelage des bords, donc elle ne
+/// peut pas être gonflée par le lissage que #93 ajoute. Ce qu'elle compte est bien du remplissage.
+fn pixels_d_arc(dalle: &Dalle) -> Vec<(u32, u32)> {
+    // Les octets de la couleur d'arc sont obtenus **en peignant une dalle**, jamais recopiés :
+    // l'écran est en BGR, les LED en GRB, la RAM en RGB, et un test qui écrirait l'ordre à la main
+    // serait le premier endroit du projet à pouvoir se tromper sans que rien ne le dise.
+    let encre = triplet(&Dalle::unie(ARC_COULEUR), 0, 0);
+    let mut trouves = Vec::new();
+    for (rang, pixel) in dalle.octets().chunks_exact(screen::PIXEL_LEN).enumerate() {
+        if pixel == encre {
+            let rang = u32::try_from(rang).expect("un tampon de 640 × 640 tient dans un u32");
+            trouves.push((rang % LARGEUR, rang / LARGEUR));
+        }
+    }
+    trouves
 }
 
 /// Vérifie qu'une dalle a exactement la taille qu'attend le contrôleur.
@@ -559,9 +601,23 @@ fn un_arc_se_remplit_proportionnellement_du_vide_au_plein() {
     //
     // Piège n° 2 du préambule. « L'arc est rempli proportionnellement » passe sans broncher sur une
     // implémentation qui dessine toujours l'arc entier : il faut trois proportions, et une mesure
-    // qui isole **le remplissage** plutôt que l'arc. D'où la comparaison à l'arc vide — un rail
-    // dessiné sous le remplissage, s'il y en a un, est identique dans les trois et disparaît de la
-    // mesure.
+    // qui isole **le remplissage** plutôt que l'arc.
+    //
+    // ⚠️ **Relu par #93, qui a posé une piste sous l'arc.** Ce test comptait les pixels que le
+    // remplissage **change** par rapport à l'arc vide. La propriété qu'il défend n'a pas bougé d'un
+    // mot ; c'est la façon de la mesurer qui n'est plus la bonne, et pour deux raisons :
+    //
+    // 1. le critère d'acceptation de #93 nomme désormais la mesure — « strictement croissant,
+    //    **mesuré sur les pixels de la couleur d'arc**, la piste ne comptant pas ». Un test qui
+    //    mesure autre chose que ce que le critère dit finit par diverger de lui ;
+    // 2. « ce que le remplissage change » dépend de ce qu'il recouvre. Tant que la piste est
+    //    identique aux trois proportions, la soustraction l'annule — mais elle n'a plus à l'être :
+    //    une piste dessinée sur le seul reste à remplir, ou décorée à son extrémité mobile,
+    //    resterait parfaitement conforme à #93 et ferait mentir le comptage.
+    //
+    // Compter les pixels **de la couleur d'arc** ne dépend, lui, que de l'arc. C'est la seule chose
+    // qui change ici : rien n'est assoupli, et les cinq assertions qui suivent disent exactement ce
+    // qu'elles disaient.
     let fond = Dalle::unie(TEMOIN);
 
     for ancre in ANCRES_DE_COURONNE {
@@ -579,9 +635,9 @@ fn un_arc_se_remplit_proportionnellement_du_vide_au_plein() {
             dalle_bien_dimensionnee(dalle, &format!("l'arc {quoi} de {ancre:?}"));
         }
 
-        // Quelque chose est dessiné : un arc plein qui ne changerait pas un pixel passerait tout
+        // Quelque chose est dessiné : un arc plein qui ne peindrait pas un pixel passerait tout
         // ce qui suit, les ensembles comparés étant alors tous vides.
-        let remplissage_plein = couronne_seulement(pixels_changes(&vide, &plein));
+        let remplissage_plein = couronne_seulement(pixels_d_arc(&plein));
         assert!(
             remplissage_plein.len() >= 200,
             "{ancre:?} : un arc plein doit peindre la couronne. Obtenu {} pixel(s) — un arc qu'on \
@@ -589,11 +645,18 @@ fn un_arc_se_remplit_proportionnellement_du_vide_au_plein() {
             remplissage_plein.len()
         );
 
+        // Et l'arc vide, lui, ne porte **aucun** pixel de la couleur d'arc : c'est la borne basse de
+        // la progression, et depuis #93 elle se dit sans détour — une piste, et rien d'autre.
+        assert!(
+            couronne_seulement(pixels_d_arc(&vide)).is_empty(),
+            "{ancre:?} : un arc vide ne peint aucun pixel de la couleur d'arc"
+        );
+
         // La progression est **stricte**. C'est elle, et rien d'autre, qui tue l'arc toujours plein.
-        let remplissage_moitie = couronne_seulement(pixels_changes(&vide, &moitie));
+        let remplissage_moitie = couronne_seulement(pixels_d_arc(&moitie));
         assert!(
             !remplissage_moitie.is_empty(),
-            "{ancre:?} : un arc à moitié rempli diffère de l'arc vide"
+            "{ancre:?} : un arc à moitié rempli peint quelque chose"
         );
         assert!(
             remplissage_moitie.len() < remplissage_plein.len(),
@@ -620,7 +683,7 @@ fn un_arc_se_remplit_proportionnellement_du_vide_au_plein() {
         let marge = (0.15 * ouverture).max(6.0);
         for (proportion, attendu) in [(0.5f32, 0.5), (1.0f32, 1.0)] {
             let dessine = Dalle::arc(&fond, secteur, proportion);
-            let remplissage = couronne_seulement(pixels_changes(&vide, &dessine));
+            let remplissage = couronne_seulement(pixels_d_arc(&dessine));
             let (debut, fin) = etendue(&remplissage, secteur)
                 .unwrap_or_else(|| panic!("{ancre:?} : l'arc de {proportion} ne peint rien"));
             assert!(
