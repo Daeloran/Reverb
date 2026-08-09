@@ -434,7 +434,15 @@ REVERB_VUE=iso                              apercu iso.ppm        # la vue de tr
 REVERB_DETAIL=ventilo                       apercu organes.ppm    # les 14 organes, pas les 124 LED
 REVERB_ONGLET=ecran REVERB_AFFICHAGE=composition apercu compo.ppm # le disque des cinq ancres
 REVERB_ONGLET=ventilos                      apercu ventilos.ppm   # les quatorze canaux
+REVERB_TRACE=0.2,0.2,0.6,0.7                apercu trace.ppm      # une sélection en cours
+REVERB_MESSAGE=                             apercu tete.ppm       # la tête de fenêtre au repos
 ```
+
+⚠️ **Les deux dernières sont nées d'un correctif qui n'a rien corrigé.** Le rectangle de sélection
+ne vit que pendant un appui de souris : aucune des autres variables ne pouvait le montrer. On a
+donc cru le rendre visible en montant son opacité, alors qu'il était large de **zéro** — le coin
+mobile lisait `pressed-x`, qui en Slint est la position de l'**appui** et ne bouge pas d'un pixel
+pendant le geste. Une image aurait suffi à le voir.
 
 ### La composition, depuis la fenêtre
 
