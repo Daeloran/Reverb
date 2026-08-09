@@ -248,6 +248,102 @@ pub fn test_pattern() -> Vec<u8> {
     image
 }
 
+// ---------------------------------------------------------------------------
+// La mire qui mesure le disque visible (issue #77, étape 1)
+// ---------------------------------------------------------------------------
+
+/// Le rayon où commence la première bande de la mire de mesure.
+///
+/// Assez bas pour qu'au moins une bande soit vue sur n'importe quelle dalle
+/// plausible, assez haut pour que les neuf bandes tiennent en 8 pixels chacune.
+pub const MIRE_RAYON_MINIMAL: u16 = 248;
+
+/// L'épaisseur d'une bande, donc la précision de la mesure.
+///
+/// Huit pixels : la réponse sera connue à ±4, ce qui suffit très largement pour
+/// décider entre « le disque est inscrit » et « il est plus petit ». Des bandes
+/// plus fines seraient indiscernables à l'œil sur six centimètres.
+pub const MIRE_BANDE: u16 = 8;
+
+/// Les bandes de la mire, de la plus intérieure à la plus extérieure.
+///
+/// ⚠️ **Nommées, et non seulement colorées.** La mesure se fait à l'œil nu
+/// devant un boîtier : l'observateur dit « je vois jusqu'à l'orange », pas
+/// « je vois jusqu'à `(255, 128, 0)` ». Le nom est donc le résultat de la
+/// mesure, et la ligne de commande imprime la correspondance.
+///
+/// Choisies pour rester distinctes même photographiées derrière un panneau
+/// teinté : aucune paire n'est voisine en teinte, et aucune n'est sombre.
+pub const MIRE_BANDES: [(&str, (u8, u8, u8)); 9] = [
+    ("blanc", (255, 255, 255)),
+    ("rouge", (255, 40, 40)),
+    ("orange", (255, 140, 0)),
+    ("jaune", (255, 240, 0)),
+    ("vert", (0, 220, 60)),
+    ("cyan", (0, 230, 230)),
+    ("bleu", (60, 120, 255)),
+    ("magenta", (255, 60, 220)),
+    ("gris", (160, 160, 160)),
+];
+
+/// La couleur des quatre coins, hors du disque quel qu'il soit.
+///
+/// Si elle se voit, c'est que le tampon déborde de la dalle autrement qu'en
+/// disque — et toute la géométrie de #80 serait à refaire.
+pub const MIRE_COINS: (u8, u8, u8) = (120, 0, 0);
+
+/// Le rayon extérieur d'une bande, la première étant la plus intérieure.
+pub fn mire_rayon(bande: usize) -> u16 {
+    MIRE_RAYON_MINIMAL + MIRE_BANDE * (bande as u16 + 1)
+}
+
+/// Engendre la mire qui **mesure le rayon du disque visible** (issue #77).
+///
+/// # Ce qu'elle répond, et pourquoi la mire des quadrants ne le pouvait pas
+///
+/// La dalle est ronde (spec §2.1.1), observé le 2026-08-08. Ce que l'œil n'a pas
+/// donné, c'est **où tombe le bord** dans le tampon 640 × 640 : le disque
+/// inscrit à 320, ou plus petit ? La mire des quadrants ne tranche pas — un
+/// disque montre ses quatre quadrants exactement comme un carré.
+///
+/// Celle-ci pose des **anneaux concentriques de couleurs nommées**, de 8 pixels
+/// chacun. L'observateur dit quelle est la dernière couleur qu'il voit
+/// entièrement, et le rayon s'en déduit à ±4 pixels. C'est une mesure faite à
+/// l'œil, et c'est le seul instrument dont on dispose.
+///
+/// Au centre, une croix blanche : elle dit du même coup si l'image est centrée
+/// sur la dalle, ce qu'aucune bande ne montrerait.
+pub fn mire_cercle() -> Vec<u8> {
+    let centre = f32::from(WIDTH) / 2.0;
+    let mut image = Vec::with_capacity(IMAGE_LEN);
+
+    for y in 0..usize::from(HEIGHT) {
+        for x in 0..usize::from(WIDTH) {
+            let dx = x as f32 + 0.5 - centre;
+            let dy = y as f32 + 0.5 - centre;
+            let rayon = dx.hypot(dy);
+
+            // La croix centrale : deux traits de trois pixels, sur cent de long.
+            let croix = dx.abs() < 1.5 && dy.abs() < 50.0 || dy.abs() < 1.5 && dx.abs() < 50.0;
+
+            let (r, g, b) = if croix {
+                (255, 255, 255)
+            } else if rayon < f32::from(MIRE_RAYON_MINIMAL) {
+                // Le cœur reste noir : ce qu'on mesure est au bord.
+                (0, 0, 0)
+            } else {
+                let bande =
+                    ((rayon - f32::from(MIRE_RAYON_MINIMAL)) / f32::from(MIRE_BANDE)) as usize;
+                MIRE_BANDES
+                    .get(bande)
+                    .map_or(MIRE_COINS, |(_, couleur)| *couleur)
+            };
+            image.extend_from_slice(&pixel(r, g, b));
+        }
+    }
+    image
+}
+
 /// Vérifie qu'une image a exactement la taille attendue.
 ///
 /// À appeler **avant** d'ouvrir le moindre périphérique : une image de mauvaise
