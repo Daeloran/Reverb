@@ -1012,10 +1012,27 @@ const UNITE: &str = "°C";
 const COULEUR_CHIFFRE: (u8, u8, u8) = (0xff, 0xff, 0xff);
 const COULEUR_UNITE: (u8, u8, u8) = (0x9a, 0x9c, 0xb0);
 const COULEUR_LIBELLE: (u8, u8, u8) = (0x6f, 0x71, 0x80);
-/// La part parcourue de l'anneau.
-const COULEUR_ANNEAU: (u8, u8, u8) = (0x30, 0xa0, 0xff);
-/// Le reste de la piste, pour que l'anneau vide se distingue d'un écran noir.
-const COULEUR_PISTE: (u8, u8, u8) = (0x1c, 0x1e, 0x28);
+/// La couleur d'un arc — la part parcourue, sur la couronne comme sur le cadran.
+///
+/// Publique parce que les tests la mesurent : un arc se compte en pixels de
+/// **sa** couleur, et une teinte recopiée dans un test casserait au premier
+/// changement d'humeur pour rien.
+pub const ARC_COULEUR: (u8, u8, u8) = (0x30, 0xa0, 0xff);
+
+/// La piste sous l'arc, sur toute l'ouverture du secteur.
+///
+/// ⚠️ **Sans elle, un arc à 20 % se lit comme « une petite barre »** et non
+/// comme « 20 % de quelque chose ». C'est elle qui donne l'échelle, et elle
+/// coûte le même balayage que l'arc.
+pub const ARC_PISTE: (u8, u8, u8) = (0x1c, 0x1e, 0x28);
+
+/// Toute la dalle, pour les tracés qui n'ont pas de boîte à eux.
+const TOUTE_LA_DALLE: Boite = Boite {
+    x: 0,
+    y: 0,
+    largeur: screen::WIDTH,
+    hauteur: screen::HEIGHT,
+};
 
 /// Le texte des chiffres du cadran.
 ///
@@ -1047,19 +1064,35 @@ fn chiffres(valeur: Option<f32>) -> String {
 /// qu'aucun message ne le dise.
 /// La fonte embarquée dans le binaire (issue #90).
 ///
-/// `LiberationSans-Bold`, une grotesque large et grasse — métriquement
-/// compatible Arial, licence OFL-1.1-RFN, redistribuable telle quelle. Elle est
-/// **dans le binaire**, jamais lue sur le système : l'ADR-001 pose qu'un binaire
-/// unique ne doit pas casser à une montée d'image, et une fonte absente de l'OS
-/// est exactement ce genre de casse.
+/// `Nunito`, en graisse 700 — ses traits se terminent par des **demi-cercles**,
+/// ce qui est très exactement ce que la dalle demandait. Elle est **dans le
+/// binaire**, jamais lue sur le système : l'ADR-001 pose qu'un binaire unique ne
+/// doit pas casser à une montée d'image, et une fonte absente de l'OS est
+/// exactement ce genre de casse.
 ///
-/// # Ce qu'elle remplace
+/// # Ce qu'elle remplace, et pourquoi deux fois
 ///
-/// Des chiffres à **sept segments** et une matrice **5 × 7** dessinés à la main.
-/// C'était le bon choix pour afficher « 34.2 » sans traîner de bibliothèque
-/// système (#33) ; ça ne l'était plus dès qu'il a fallu écrire des libellés, et
-/// ça se voyait à six centimètres.
-pub const FONTE: &[u8] = include_bytes!("../assets/LiberationSans-Bold.ttf");
+/// D'abord des chiffres à **sept segments** et une matrice **5 × 7** dessinés à
+/// la main (#33). C'était le bon choix pour afficher « 34.2 » sans traîner de
+/// bibliothèque système ; ça ne l'était plus dès qu'il a fallu écrire des
+/// libellés, et ça se voyait à six centimètres.
+///
+/// Puis `LiberationSans-Bold` (#90), métriquement compatible Arial : très
+/// lisible, mais un dessin de 1982 — terminaisons droites, contreformes carrées.
+/// Jugé « trop archaïque, trop anguleux » à l'usage (#93).
+///
+/// # Une instance statique d'une fonte variable
+///
+/// Nunito n'est publiée qu'en fonte variable, et `fontdue` ne sait pas appliquer
+/// d'axe de variation : la graisse 700 est donc figée hors ligne, par
+/// `fonttools varLib.instancer`, et le résultat vendu dans le dépôt.
+///
+/// ⚠️ **Nunito n'a pas de nom de fonte réservé** — son en-tête OFL ne porte
+/// aucune clause « with Reserved Font Name » —, l'instance garde donc son nom
+/// sans acrobatie de renommage.
+///
+/// Bonus mesuré : **132 Kio contre 414**. Le binaire maigrit de 280 Kio.
+pub const FONTE: &[u8] = include_bytes!("../assets/Nunito-Bold.ttf");
 
 /// La fonte analysée, une fois pour la vie du processus.
 ///
@@ -1250,28 +1283,73 @@ impl Toile {
         self.ecrire(boite, texte, centre, taille, couleur);
     }
 
-    /// Dessine l'arc d'un secteur, rempli de sa proportion (issue #90).
+    /// Dessine l'arc d'un secteur : sa piste, puis sa part remplie (#90, #93).
     ///
-    /// ⚠️ **Rien n'est dessiné pour la part vide.** Une piste de fond ferait
-    /// qu'un arc à zéro pour cent peindrait autant de pixels qu'un arc plein, et
-    /// « rempli proportionnellement » ne se distinguerait plus de « toujours
-    /// dessiné ». La valeur, elle, est écrite à côté : un secteur vide ne cache
-    /// aucune information.
+    /// ⚠️ **La piste couvre l'ouverture entière, l'arc la recouvre en partie.**
+    /// Sans elle, un arc à vingt pour cent se lit comme « une petite barre » au
+    /// lieu de « vingt pour cent de quelque chose » — c'est elle qui porte
+    /// l'échelle.
     fn arc(&mut self, secteur: Secteur, proportion: f32) {
         let part = if proportion.is_nan() {
             0.0
         } else {
             proportion.clamp(0.0, 1.0)
         };
-        let etendue = secteur.ouverture * part;
-        if etendue <= 0.0 {
-            return;
-        }
 
-        let centre = f32::from(screen::WIDTH) / 2.0;
         let interieur = f32::from(composition::COURONNE_RAYON_INTERIEUR);
         let exterieur = f32::from(composition::COURONNE_RAYON_EXTERIEUR);
-        let (interieur2, exterieur2) = (interieur * interieur, exterieur * exterieur);
+
+        self.capsule(
+            secteur.debut,
+            secteur.ouverture,
+            interieur,
+            exterieur,
+            ARC_PISTE,
+        );
+        let etendue = secteur.ouverture * part;
+        if etendue > 0.0 {
+            self.capsule(secteur.debut, etendue, interieur, exterieur, ARC_COULEUR);
+        }
+    }
+
+    /// Une capsule sur la couronne : un ruban d'épaisseur constante suivant un
+    /// arc de cercle, terminé aux deux bouts par un **demi-disque** (#93).
+    ///
+    /// ⚠️ **La couverture se calcule, elle ne se décide pas.** #90 testait
+    /// l'appartenance d'un pixel au secteur — dedans ou dehors — d'où des bords
+    /// radiaux en escalier et deux bouts coupés à l'équerre. Ici chaque pixel
+    /// reçoit sa **distance signée** au ruban, et la couverture en découle : un
+    /// pixel à plus d'un demi-pixel du bord est plein, un pixel à plus d'un
+    /// demi-pixel dehors est vide, et entre les deux la couverture varie.
+    ///
+    /// C'est la même distance qui donne les bouts ronds gratuitement : au-delà
+    /// de l'étendue angulaire, la distance n'est plus radiale mais celle au
+    /// **centre du bout**, ce qui est la définition d'un demi-disque.
+    fn capsule(
+        &mut self,
+        debut: f32,
+        etendue: f32,
+        interieur: f32,
+        exterieur: f32,
+        couleur: (u8, u8, u8),
+    ) {
+        let centre = f32::from(screen::WIDTH) / 2.0;
+        let median = (interieur + exterieur) / 2.0;
+        let demi = (exterieur - interieur) / 2.0;
+
+        // Un pixel de marge de part et d'autre : c'est là que vit
+        // l'anticrénelage, et l'ignorer redonnerait des bords nets.
+        let (proche, loin) = (median - demi - 1.0, median + demi + 1.0);
+        let (proche2, loin2) = (proche * proche, loin * loin);
+
+        // Le centre de chaque bout, en coordonnées relatives au milieu de la
+        // dalle. Zéro au sommet, croissant dans le sens horaire.
+        let bout = |angle: f32| {
+            let a = angle.to_radians();
+            (median * a.sin(), -median * a.cos())
+        };
+        let (debut_x, debut_y) = bout(debut);
+        let (fin_x, fin_y) = bout(debut + etendue);
 
         for y in 0..usize::from(screen::HEIGHT) {
             for x in 0..usize::from(screen::WIDTH) {
@@ -1279,16 +1357,40 @@ impl Toile {
                 let dy = y as f32 + 0.5 - centre;
                 // Le carré du rayon d'abord : la racine et l'arc tangente ne
                 // sont calculés que sur les quelques pour cent de pixels qui
-                // tombent dans la couronne.
+                // approchent la couronne.
                 let rayon2 = dx * dx + dy * dy;
-                if rayon2 < interieur2 || rayon2 > exterieur2 {
+                if rayon2 < proche2 || rayon2 > loin2 {
                     continue;
                 }
-                // Zéro au sommet, croissant dans le sens horaire — la convention
-                // qu'on lit sur une dalle ronde posée à plat.
+                let rayon = rayon2.sqrt();
                 let angle = dx.atan2(-dy).to_degrees().rem_euclid(360.0);
-                if (angle - secteur.debut).rem_euclid(360.0) < etendue {
-                    self.poser(x, y, COULEUR_ANNEAU);
+                let depuis = (angle - debut).rem_euclid(360.0);
+
+                let distance = if depuis <= etendue {
+                    // Dans l'étendue : la distance au ruban est radiale.
+                    (rayon - median).abs()
+                } else {
+                    // Dehors : celle au plus proche des deux bouts, ce qui
+                    // arrondit l'extrémité.
+                    let vers_la_fin = depuis - etendue;
+                    let vers_le_debut = 360.0 - depuis;
+                    let (bx, by) = if vers_la_fin < vers_le_debut {
+                        (fin_x, fin_y)
+                    } else {
+                        (debut_x, debut_y)
+                    };
+                    (dx - bx).hypot(dy - by)
+                };
+
+                let couverture = (demi - distance + 0.5).clamp(0.0, 1.0);
+                if couverture > 0.0 {
+                    self.melanger(
+                        x as i32,
+                        y as i32,
+                        TOUTE_LA_DALLE,
+                        couleur,
+                        (couverture * 255.0).round() as u8,
+                    );
                 }
             }
         }
@@ -1323,30 +1425,47 @@ impl Toile {
 
     /// L'anneau de proportion, parcouru depuis midi dans le sens horaire.
     fn anneau(&mut self, part: f32) {
-        let centre = f64::from(screen::WIDTH) / 2.0;
-        let (interieur, exterieur) = (f64::from(ANNEAU_INTERIEUR), f64::from(ANNEAU_EXTERIEUR));
-        let parcourue = f64::from(part) * std::f64::consts::TAU;
+        // ⚠️ **Le même ruban que les arcs de la couronne** (#93). C'est la barre
+        // la plus visible de la dalle : la laisser en escalier pendant qu'on
+        // lisse les quatre petites aurait été le pire des deux mondes.
+        let interieur = ANNEAU_INTERIEUR;
+        let exterieur = ANNEAU_EXTERIEUR;
+        let part = if part.is_nan() {
+            0.0
+        } else {
+            part.clamp(0.0, 1.0)
+        };
+
+        // Le tour complet ne se dessine pas en capsule : à 360°, ses deux bouts
+        // ronds se recouvriraient au sommet et y creuseraient une encoche.
+        self.couronne_pleine(interieur, exterieur, ARC_PISTE);
+        let etendue = 360.0 * part;
+        if etendue >= 360.0 {
+            self.couronne_pleine(interieur, exterieur, ARC_COULEUR);
+        } else if etendue > 0.0 {
+            self.capsule(0.0, etendue, interieur, exterieur, ARC_COULEUR);
+        }
+    }
+
+    /// Un anneau entier, sans bout ni couture.
+    fn couronne_pleine(&mut self, interieur: f32, exterieur: f32, couleur: (u8, u8, u8)) {
+        let centre = f32::from(screen::WIDTH) / 2.0;
+        let median = (interieur + exterieur) / 2.0;
+        let demi = (exterieur - interieur) / 2.0;
         for y in 0..usize::from(screen::HEIGHT) {
             for x in 0..usize::from(screen::WIDTH) {
-                let (dx, dy) = (x as f64 - centre + 0.5, y as f64 - centre + 0.5);
-                let rayon = dx.hypot(dy);
-                if rayon < interieur || rayon > exterieur {
-                    continue;
+                let dx = x as f32 + 0.5 - centre;
+                let dy = y as f32 + 0.5 - centre;
+                let couverture = (demi - (dx.hypot(dy) - median).abs() + 0.5).clamp(0.0, 1.0);
+                if couverture > 0.0 {
+                    self.melanger(
+                        x as i32,
+                        y as i32,
+                        TOUTE_LA_DALLE,
+                        couleur,
+                        (couverture * 255.0).round() as u8,
+                    );
                 }
-                // Zéro à midi, croissant dans le sens horaire.
-                let mut angle = dx.atan2(-dy);
-                if angle < 0.0 {
-                    angle += std::f64::consts::TAU;
-                }
-                self.poser(
-                    x,
-                    y,
-                    if angle <= parcourue {
-                        COULEUR_ANNEAU
-                    } else {
-                        COULEUR_PISTE
-                    },
-                );
             }
         }
     }

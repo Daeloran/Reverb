@@ -594,16 +594,22 @@ jamais tronqué**. Un mouvement lent et complet se regarde, un mouvement saccad�
 `slug` — `kraken2023elite:coolant-temp`. `echo status | socat - UNIX-CONNECT:/run/reverb/reverbd.sock`
 en donne la liste complète, seize lignes `temp`.
 
-**Il est écrit dans une vraie fonte, embarquée dans le binaire** — `LiberationSans-Bold`, une
-grotesque large et grasse, licence OFL. Le rastériseur est `fontdue` : du Rust pur, `no_std`,
-aucune bibliothèque système. La promesse de l'ADR-001 tient — ce qu'il refuse, c'est une
+**Il est écrit dans une vraie fonte, embarquée dans le binaire** — `Nunito`, en graisse 700, dont
+les traits se terminent par des **demi-cercles**. Le rastériseur est `fontdue` : du Rust pur,
+`no_std`, aucune bibliothèque système. La promesse de l'ADR-001 tient — ce qu'il refuse, c'est une
 bibliothèque *système*, pas une dépendance Rust.
 
-⚠️ **Ce qu'il y avait avant, c'étaient des chiffres à sept segments et une matrice 5 × 7 dessinés à
-la main.** C'était le bon choix pour afficher « 34.2 » sans traîner de moteur de rendu (#33) ; ça a
-cessé de l'être dès qu'il a fallu écrire des libellés, et ça se voyait à six centimètres. Le prix
-est mesuré : `reverbd` passe de 2 243 744 à 2 780 600 octets, soit **+524 Kio**, dont 414 pour la
-fonte elle-même.
+⚠️ **Deux remplacements successifs, et le second est un retour d'usage.** D'abord des chiffres à
+sept segments et une matrice 5 × 7 dessinés à la main (#33) : le bon choix pour afficher « 34.2 »
+sans traîner de moteur de rendu, plus du tout dès qu'il a fallu écrire des libellés. Puis
+`LiberationSans-Bold` (#90), métriquement compatible Arial — très lisible, mais un dessin de 1982,
+jugé « trop archaïque, trop anguleux » devant le boîtier.
+
+⚠️ **Nunito n'est publiée qu'en fonte variable**, et `fontdue` ne sait pas appliquer d'axe de
+variation : la graisse est figée hors ligne par `fonttools varLib.instancer` et l'instance vendue
+dans le dépôt. Elle n'a **pas de nom de fonte réservé**, donc elle garde son nom. Le prix est
+mesuré, et il est négatif : `reverbd` passe de 2 780 600 à **2 499 368** octets — l'instance pèse
+132 Kio là où l'Arial en pesait 414.
 
 ```bash
 cargo run --release --example cadran -p reverb-daemon -- /tmp/cadran.ppm 34.2 0.34
@@ -638,6 +644,21 @@ porte soit une **température** avec un libellé qu'on choisit, soit un **texte 
 **Chaque température dessine son arc sur la couronne**, dans le secteur de son ancre, rempli
 proportionnellement de 0 à 100 °C — la même échelle que le cadran. On lit où en est la valeur d'un
 coup d'œil, sans lire le chiffre.
+
+⚠️ **Une piste sombre occupe l'ouverture entière, sous l'arc.** Sans elle, un arc à vingt pour cent
+se lit comme « une petite barre » et non comme « vingt pour cent de quelque chose » : c'est la piste
+qui porte l'échelle.
+
+⚠️ **Les bords sont lissés et les extrémités arrondies**, parce que la couverture d'un pixel se
+**calcule** au lieu de se décider. #90 testait l'appartenance au secteur — dedans ou dehors —, d'où
+des bords en escalier et des bouts coupés à l'équerre. Chaque pixel reçoit maintenant sa distance au
+ruban, et les demi-disques des extrémités en découlent sans code supplémentaire : au-delà de
+l'étendue angulaire, la distance cesse d'être radiale et devient celle au centre du bout.
+
+⚠️ **L'anneau du cadran passe par le même ruban** — c'est la barre la plus visible de la dalle, et la
+laisser en escalier pendant qu'on lisse les quatre petites aurait été le pire des deux mondes. Seule
+exception : un tour complet se dessine sans bouts, sinon les deux demi-disques se recouvriraient au
+sommet et y creuseraient une encoche.
 
 ⚠️ **`centre` n'a pas d'arc**, et ce n'est pas un oubli : elle est au milieu du disque, pas sur son
 bord. Un **texte** n'en a pas non plus — il n'y a rien à remplir proportionnellement. Et une sonde
