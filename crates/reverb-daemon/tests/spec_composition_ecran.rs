@@ -40,9 +40,19 @@
 //!
 //! ## Quatre points que l'issue laisse ouverts, et que ces tests tranchent
 //!
-//! 1. **Un champ ne dessine que dans la boîte de son ancre.** L'issue exige que la boîte tienne
-//!    dans le disque ; c'est vide de sens si le rendu déborde d'elle. `Ancre::boite()` est donc
-//!    tenue pour la boîte **englobante** du champ, contour ou plaque compris.
+//! 1. **Un champ ne dessine que dans les régions de son ancre.** L'issue exige que la boîte
+//!    tienne dans le disque ; c'est vide de sens si le rendu déborde d'elle. `Ancre::boite()` est
+//!    donc tenue pour la boîte **englobante** du texte, contour ou plaque compris.
+//!
+//!    ⚠️ **Amendé par #90, et c'est une évolution de contrat, pas un assouplissement.** Un champ
+//!    de température dessine désormais un **arc** sur la couronne du disque, hors de sa boîte.
+//!    Englober l'arc dans la boîte était géométriquement impossible : les boîtes englobantes de
+//!    deux secteurs voisins se recouvrent, ce qui aurait cassé le point n° 2 juste en dessous.
+//!
+//!    Ce que ce fichier vérifie est donc devenu : **un champ ne peint que dans sa boîte ou dans
+//!    son propre secteur de couronne**. La raison d'être de la règle est intacte — deux champs
+//!    voisins ne peuvent toujours pas s'effacer l'un l'autre, puisque leurs boîtes sont disjointes
+//!    et leurs secteurs aussi (vérifié au pixel par `spec_police_arcs.rs`).
 //! 2. **`Dalle::composee` ne dépend pas de l'ordre des champs qu'on lui passe.** Les cinq boîtes ne
 //!    se recouvrent pas (vérifié côté `reverb-proto`) : deux tampons qui différeraient selon
 //!    l'ordre trahiraient un débordement.
@@ -72,8 +82,31 @@ use reverb_daemon::ecran::{
     Affichage, ChampRendu, Dalle, Etat, EtatInvalide, ImageInvalide, charger, enregistrer,
     valeur_du_champ, verifier_fichier, verifier_format,
 };
-use reverb_proto::composition::{Ancre, Composition, Fond, Source};
+use reverb_proto::composition::{self, Ancre, Composition, Fond, Source};
 use reverb_proto::screen;
+
+/// Ce pixel est-il dans le secteur de couronne de cette ancre ? (issue #90)
+///
+/// La couronne est l'anneau extérieur du disque, où les champs de température
+/// dessinent leur arc. Aucune boîte d'ancre ne l'atteint : la plus lointaine
+/// s'arrête à un rayon de 286,4 pour un bord intérieur de couronne à 292.
+fn dans_son_secteur(ancre: Ancre, x: u32, y: u32) -> bool {
+    let Some(secteur) = ancre.secteur() else {
+        return false;
+    };
+    let centre = f32::from(screen::WIDTH) / 2.0;
+    let dx = x as f32 + 0.5 - centre;
+    let dy = y as f32 + 0.5 - centre;
+    let rayon = (dx * dx + dy * dy).sqrt();
+    if rayon < f32::from(composition::COURONNE_RAYON_INTERIEUR)
+        || rayon > f32::from(composition::COURONNE_RAYON_EXTERIEUR)
+    {
+        return false;
+    }
+    // Zéro au sommet, croissant dans le sens horaire — la convention de #90.
+    let angle = dx.atan2(-dy).to_degrees().rem_euclid(360.0);
+    (angle - secteur.debut).rem_euclid(360.0) < secteur.ouverture
+}
 
 // ---------------------------------------------------------------------------
 // Dimensions, couleurs et sources témoins
@@ -279,10 +312,11 @@ fn chaque_ancre_dessine_dans_sa_boite_et_jamais_hors_du_disque() {
                     && y >= u32::from(boite.y)
                     && y < u32::from(boite.y) + u32::from(boite.hauteur);
                 assert!(
-                    dedans,
+                    dedans || dans_son_secteur(ancre, x, y),
                     "{ancre:?} porte {champ:?} et a peint le pixel ({x}, {y}), hors de sa boîte \
-                     {boite:?} — deux champs voisins finiraient par s'effacer l'un l'autre, et le \
-                     calcul « la boîte tient dans le disque » ne prouverait plus rien"
+                     {boite:?} et hors de son secteur de couronne — deux champs voisins finiraient \
+                     par s'effacer l'un l'autre, et le calcul « la boîte tient dans le disque » ne \
+                     prouverait plus rien"
                 );
             }
         }
@@ -345,13 +379,15 @@ fn un_texte_plus_large_que_la_corde_ne_sort_jamais_du_disque() {
         for champ in &demesures {
             // `champ_seul` vérifie déjà la taille de la dalle et le disque ; reste la boîte.
             for &(x, y) in &champ_seul(&fond, ancre, champ.clone()) {
+                let dedans = x >= u32::from(boite.x)
+                    && x < u32::from(boite.x) + u32::from(boite.largeur)
+                    && y >= u32::from(boite.y)
+                    && y < u32::from(boite.y) + u32::from(boite.hauteur);
                 assert!(
-                    x >= u32::from(boite.x)
-                        && x < u32::from(boite.x) + u32::from(boite.largeur)
-                        && y >= u32::from(boite.y)
-                        && y < u32::from(boite.y) + u32::from(boite.hauteur),
+                    dedans || dans_son_secteur(ancre, x, y),
                     "{ancre:?} porte {champ:?} et a peint le pixel ({x}, {y}), hors de sa boîte \
-                     {boite:?} — un texte trop large se tronque ou se réduit, il ne déborde pas"
+                     {boite:?} et hors de son secteur de couronne — un texte trop large se tronque \
+                     ou se réduit, il ne déborde pas"
                 );
             }
         }

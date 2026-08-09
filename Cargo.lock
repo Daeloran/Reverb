@@ -1362,6 +1362,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fontdue"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7894823fa221401399e2598f8b63f81ac77ff5c63248b7656779bff1632d7d3d"
+dependencies = [
+ "ttf-parser",
+]
+
+[[package]]
 name = "fontique"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3870,6 +3879,7 @@ dependencies = [
 name = "reverb-daemon"
 version = "0.1.0"
 dependencies = [
+ "fontdue",
  "image",
  "reverb-anim",
  "reverb-hw",

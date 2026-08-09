@@ -50,7 +50,19 @@ const CHAMP_HAUTEUR: u16 = 96;
 const BANDE_LARGEUR: u16 = 300;
 
 /// Largeur d'un champ de la bande médiane, où trois se partagent la place.
-const MEDIANE_LARGEUR: u16 = 196;
+///
+/// ⚠️ **Réduite de 196 à 176 par #90.** La couronne des arcs occupe désormais
+/// l'anneau extérieur du disque, et les boîtes ont dû reculer pour lui laisser
+/// la place. Trois boîtes de 176 séparées de 18 tiennent dans les 564 pixels
+/// qui restent entre les deux marges.
+const MEDIANE_LARGEUR: u16 = 176;
+
+/// Marge latérale des deux champs extrêmes de la bande médiane.
+///
+/// Trente-huit pixels : c'est ce qu'il faut pour que leurs coins retombent sous
+/// [`COURONNE_RAYON_INTERIEUR`], calculé et non estimé — le coin le plus éloigné
+/// est à `√(282² + 48²) ≈ 286,1`.
+const MEDIANE_MARGE: u16 = 38;
 
 /// Rang du haut de la bande médiane : les trois champs y sont centrés
 /// verticalement sur la dalle.
@@ -58,12 +70,48 @@ const MEDIANE_Y: u16 = screen::HEIGHT / 2 - CHAMP_HAUTEUR / 2;
 
 /// Rang du haut du champ supérieur.
 ///
-/// Quarante pixels du bord : plus haut, les coins de la boîte sortiraient du
-/// disque. Le calcul est vérifié par [`Boite::dans_le_disque`], pas supposé.
-const BANDE_HAUT_Y: u16 = 40;
+/// ⚠️ **Descendu de 40 à 76 par #90.** À quarante pixels du bord, les coins de la
+/// boîte étaient à `√(150² + 280²) ≈ 317,6` — dans le disque de 320, mais très
+/// exactement là où la couronne des arcs devait passer. À soixante-seize, ils
+/// retombent à `√(150² + 244²) ≈ 286,4`, sous [`COURONNE_RAYON_INTERIEUR`].
+/// Le calcul est vérifié par [`Boite::dans_le_disque`], pas supposé.
+const BANDE_HAUT_Y: u16 = 76;
 
 /// Rang du haut du champ inférieur, symétrique du précédent.
 const BANDE_BAS_Y: u16 = screen::HEIGHT - BANDE_HAUT_Y - CHAMP_HAUTEUR;
+
+/// Le bord intérieur de la couronne où se dessinent les arcs (issue #90).
+///
+/// Aucune boîte d'ancre ne l'atteint : la plus lointaine s'arrête à 286,4.
+pub const COURONNE_RAYON_INTERIEUR: u16 = 292;
+
+/// Le bord extérieur de la couronne.
+///
+/// Sous [`crate::screen::VISIBLE_DISC_RADIUS`], parce que la dalle est ronde et
+/// que 21 % du tampon ne s'affiche nulle part (`SPEC-KRAKEN-LCD` §2.1.1). Quatre
+/// pixels de retrait : de quoi absorber l'anticrénelage du bord sans mordre sur
+/// ce que le contrôleur coupe.
+pub const COURONNE_RAYON_EXTERIEUR: u16 = 316;
+
+/// L'ouverture d'un secteur d'ancre, en degrés.
+///
+/// Soixante-dix, et quatre secteurs : il reste vingt degrés entre deux voisins,
+/// assez pour qu'aucun arc plein n'en touche un autre — c'est vérifié au pixel,
+/// pas supposé.
+const SECTEUR_OUVERTURE: f32 = 70.0;
+
+/// Un secteur de couronne, en degrés.
+///
+/// ⚠️ **Zéro au sommet, croissant dans le sens horaire.** C'est la convention
+/// qu'on lit sur une dalle ronde posée à plat, et elle est celle des quatre
+/// ancres de bord : `haut` à 0°, `droite` à 90°, `bas` à 180°, `gauche` à 270°.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Secteur {
+    /// L'angle où l'arc commence, en degrés, dans `[0, 360)`.
+    pub debut: f32,
+    /// De combien de degrés il s'étend, dans le sens horaire.
+    pub ouverture: f32,
+}
 
 impl Ancre {
     /// Les cinq, dans l'ordre où les champs sont rendus et écrits.
@@ -119,7 +167,7 @@ impl Ancre {
                 hauteur: CHAMP_HAUTEUR,
             },
             Ancre::Gauche => Boite {
-                x: 20,
+                x: MEDIANE_MARGE,
                 y: MEDIANE_Y,
                 largeur: MEDIANE_LARGEUR,
                 hauteur: CHAMP_HAUTEUR,
@@ -131,12 +179,32 @@ impl Ancre {
                 hauteur: CHAMP_HAUTEUR,
             },
             Ancre::Droite => Boite {
-                x: screen::WIDTH - 20 - MEDIANE_LARGEUR,
+                x: screen::WIDTH - MEDIANE_MARGE - MEDIANE_LARGEUR,
                 y: MEDIANE_Y,
                 largeur: MEDIANE_LARGEUR,
                 hauteur: CHAMP_HAUTEUR,
             },
         }
+    }
+
+    /// Le secteur de couronne où cette ancre dessine son arc (issue #90).
+    ///
+    /// ⚠️ **`Centre` n'en a pas, et ce n'est pas un oubli** : elle est au milieu
+    /// du disque, pas sur son bord. Lui donner une ouverture nulle aurait fait
+    /// d'elle un secteur dégénéré que tout calcul d'angle aurait dû traiter à
+    /// part ; `None` le dit une fois pour toutes.
+    pub fn secteur(self) -> Option<Secteur> {
+        let milieu = match self {
+            Ancre::Haut => 0.0,
+            Ancre::Droite => 90.0,
+            Ancre::Bas => 180.0,
+            Ancre::Gauche => 270.0,
+            Ancre::Centre => return None,
+        };
+        Some(Secteur {
+            debut: (milieu - SECTEUR_OUVERTURE / 2.0).rem_euclid(360.0),
+            ouverture: SECTEUR_OUVERTURE,
+        })
     }
 }
 

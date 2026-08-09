@@ -594,10 +594,16 @@ jamais tronqué**. Un mouvement lent et complet se regarde, un mouvement saccad�
 `slug` — `kraken2023elite:coolant-temp`. `echo status | socat - UNIX-CONNECT:/run/reverb/reverbd.sock`
 en donne la liste complète, seize lignes `temp`.
 
-**Il ne dépend d'aucune pile de texte** : des chiffres à sept segments et une police matricielle de
-5 × 7, dessinés à la main dans le tampon 640 × 640. Charger un moteur de rendu de police pour
-afficher « 34.2 » serait hors de proportion, et ajouterait une bibliothèque système à un démon qui
-n'en veut pas.
+**Il est écrit dans une vraie fonte, embarquée dans le binaire** — `LiberationSans-Bold`, une
+grotesque large et grasse, licence OFL. Le rastériseur est `fontdue` : du Rust pur, `no_std`,
+aucune bibliothèque système. La promesse de l'ADR-001 tient — ce qu'il refuse, c'est une
+bibliothèque *système*, pas une dépendance Rust.
+
+⚠️ **Ce qu'il y avait avant, c'étaient des chiffres à sept segments et une matrice 5 × 7 dessinés à
+la main.** C'était le bon choix pour afficher « 34.2 » sans traîner de moteur de rendu (#33) ; ça a
+cessé de l'être dès qu'il a fallu écrire des libellés, et ça se voyait à six centimètres. Le prix
+est mesuré : `reverbd` passe de 2 243 744 à 2 780 600 octets, soit **+524 Kio**, dont 414 pour la
+fonte elle-même.
 
 ```bash
 cargo run --release --example cadran -p reverb-daemon -- /tmp/cadran.ppm 34.2 0.34
@@ -628,6 +634,19 @@ screen layout                                       ce que la dalle compose
 
 Cinq ancres — `haut`, `bas`, `gauche`, `droite`, `centre` —, **quatre champs au plus**. Chacun
 porte soit une **température** avec un libellé qu'on choisit, soit un **texte fixe**.
+
+**Chaque température dessine son arc sur la couronne**, dans le secteur de son ancre, rempli
+proportionnellement de 0 à 100 °C — la même échelle que le cadran. On lit où en est la valeur d'un
+coup d'œil, sans lire le chiffre.
+
+⚠️ **`centre` n'a pas d'arc**, et ce n'est pas un oubli : elle est au milieu du disque, pas sur son
+bord. Un **texte** n'en a pas non plus — il n'y a rien à remplir proportionnellement. Et une sonde
+muette **vide** son arc plutôt que de le figer au dernier remplissage connu, exactement comme elle
+écrit des tirets plutôt qu'un zéro.
+
+⚠️ **Les boîtes des champs ont reculé pour laisser la place à la couronne.** Celle du haut passait à
+317,6 du centre pour un disque de 320 : il n'y avait pas la place d'un anneau à l'extérieur. Elles
+s'arrêtent maintenant à 286,4, et la couronne occupe 292 à 316.
 
 ⚠️ **La dalle est ronde**, observé le 2026-08-08 (`SPEC-KRAKEN-LCD` §2.1.1). Le tampon, lui, est
 carré : **21 % de ce qu'on transmet ne s'affiche nulle part**, et rien ne le signale — le contrôleur

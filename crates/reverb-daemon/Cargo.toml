@@ -20,6 +20,7 @@ reverb-anim = { path = "../reverb-anim" }
 reverb-proto = { path = "../reverb-proto" }
 reverb-hw = { path = "../reverb-hw" }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif"] }
+fontdue = { version = "0.9.4", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

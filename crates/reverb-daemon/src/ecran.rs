@@ -33,12 +33,13 @@
 use std::fmt;
 use std::io;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use image::AnimationDecoder;
 use image::ImageFormat;
 use image::codecs::gif::GifDecoder;
-use reverb_proto::composition::{Ancre, Boite, Composition, Fond};
+use reverb_proto::composition::{self, Ancre, Boite, Composition, Fond, Secteur};
 use reverb_proto::screen;
 
 use crate::persistance::ecrire;
@@ -716,20 +717,67 @@ impl Dalle {
 
         toile.anneau(part);
 
-        // La valeur, en gros, au centre. Les chiffres sont à sept segments : le
-        // seul alphabet dont on ait besoin pour un nombre.
+        // La valeur, en gros, au centre — dans la fonte embarquée depuis #90.
+        // Les chiffres à sept segments qu'il y avait ici tenaient tant qu'on
+        // n'écrivait que des nombres ; ils ne savaient rien écrire d'autre.
         let texte = chiffres(valeur);
-        toile.sept_segments(&texte, CADRAN_CHIFFRE_HAUTEUR);
+        toile.ligne(
+            CADRAN_BANDE,
+            &texte,
+            CADRAN_CHIFFRE_HAUTEUR as f32,
+            COULEUR_CHIFFRE,
+        );
 
         // L'unité juste sous les chiffres, le libellé au-dessus.
-        toile.matriciel(unite, CADRAN_UNITE_Y, CADRAN_UNITE_ECHELLE, COULEUR_UNITE);
-        toile.matriciel(
+        toile.ligne(
+            Boite {
+                y: CADRAN_UNITE_Y as u16,
+                hauteur: CADRAN_UNITE_HAUTEUR,
+                ..CADRAN_BANDE
+            },
+            unite,
+            f32::from(CADRAN_UNITE_HAUTEUR),
+            COULEUR_UNITE,
+        );
+        toile.ligne(
+            Boite {
+                y: CADRAN_LIBELLE_Y as u16,
+                hauteur: CADRAN_LIBELLE_HAUTEUR,
+                ..CADRAN_BANDE
+            },
             libelle,
-            CADRAN_LIBELLE_Y,
-            CADRAN_LIBELLE_ECHELLE,
+            f32::from(CADRAN_LIBELLE_HAUTEUR),
             COULEUR_LIBELLE,
         );
 
+        toile.dalle()
+    }
+
+    /// Le fond recopié, un texte écrit dessus dans la fonte embarquée (#90).
+    ///
+    /// **Le texte seul** : ni plaque assombrie, ni arc. C'est la primitive que
+    /// `composee` assemble, et celle sur laquelle un test vérifie qu'une vraie
+    /// fonte est à l'œuvre.
+    pub fn texte(fond: &Dalle, texte: &str, boite: Boite) -> Dalle {
+        let mut toile = Toile {
+            octets: fond.octets.clone(),
+        };
+        let taille = taille_qui_tient(
+            texte,
+            f32::from(boite.largeur) * 0.94,
+            f32::from(boite.hauteur) * 0.72,
+        );
+        let centre = f32::from(boite.y) + f32::from(boite.hauteur) / 2.0;
+        toile.ecrire(boite, texte, centre, taille, COULEUR_CHIFFRE);
+        toile.dalle()
+    }
+
+    /// Le fond recopié, un arc de couronne dessiné dessus (#90).
+    pub fn arc(fond: &Dalle, secteur: Secteur, proportion: f32) -> Dalle {
+        let mut toile = Toile {
+            octets: fond.octets.clone(),
+        };
+        toile.arc(secteur, proportion);
         toile.dalle()
     }
 
@@ -747,6 +795,15 @@ impl Dalle {
             octets: fond.octets.clone(),
         };
         for (ancre, rendu) in champs {
+            // ⚠️ **L'arc d'abord, le champ ensuite.** Le champ assombrit sa
+            // boîte ; l'arc, lui, vit sur la couronne, hors d'elle. L'ordre ne
+            // change donc rien au rendu — mais le poser d'abord garde vrai que
+            // la boîte est la dernière chose écrite à cet endroit.
+            if let (Some(secteur), ChampRendu::Temperature { valeur, .. }) =
+                (ancre.secteur(), rendu)
+            {
+                toile.arc(secteur, valeur.map_or(0.0, proportion_de_temperature));
+            }
             toile.champ(ancre.boite(), rendu);
         }
         toile.dalle()
@@ -893,34 +950,36 @@ impl Vigie {
 const CADRAN_CHIFFRE_HAUTEUR: usize = 190;
 /// Largeur dont les chiffres disposent à l'intérieur de l'anneau.
 const CADRAN_LARGEUR_UTILE: usize = 470;
-/// En deçà, on ne réduit plus : mieux vaut un nombre qui dépasse qu'un nombre
-/// qu'on ne lit plus. Un cadran illisible ne dit rien.
-const CADRAN_CHIFFRE_MINIMUM: usize = 70;
 /// Rang de la ligne de l'unité, **sous** les chiffres.
 const CADRAN_UNITE_Y: usize = 432;
-/// Échelle de l'unité : elle se lit d'un mètre, comme les chiffres.
-const CADRAN_UNITE_ECHELLE: usize = 4;
+
+/// La bande horizontale où le cadran écrit, centrée sur la dalle.
+///
+/// Assez étroite pour que les lignes tiennent dans le disque visible quelle que
+/// soit leur longueur : c'est [`Toile::ligne`] qui rétrécit le texte pour y
+/// entrer, jamais un cadrage espéré.
+const CADRAN_BANDE: Boite = Boite {
+    x: (screen::WIDTH - CADRAN_LARGEUR_UTILE as u16) / 2,
+    y: (screen::HEIGHT - CADRAN_CHIFFRE_HAUTEUR as u16) / 2,
+    largeur: CADRAN_LARGEUR_UTILE as u16,
+    hauteur: CADRAN_CHIFFRE_HAUTEUR as u16,
+};
+
+/// La hauteur d'œil de l'unité, sous les chiffres.
+const CADRAN_UNITE_HAUTEUR: u16 = 52;
+
+/// Celle du libellé, au-dessus.
+const CADRAN_LIBELLE_HAUTEUR: u16 = 34;
 /// Rang de la ligne du libellé, **au-dessus** des chiffres et dans l'anneau.
 ///
 /// À ce rang, le disque intérieur de l'anneau est large de quelque 430 pixels :
 /// un nom de sonde de trente caractères à l'échelle 2 en occupe 360, et reste
 /// donc dedans.
 const CADRAN_LIBELLE_Y: usize = 168;
-/// Échelle du libellé. Deux, et pas davantage : c'est la valeur qu'on lit d'un
-/// mètre, pas le nom de la sonde, qu'on lit en se penchant.
-const CADRAN_LIBELLE_ECHELLE: usize = 2;
 
 /// Rayons de l'anneau de proportion, en pixels depuis le centre.
 const ANNEAU_INTERIEUR: f32 = 262.0;
 const ANNEAU_EXTERIEUR: f32 = 300.0;
-
-/// La dalle entière, quand un dessin n'a pas à être borné plus étroitement.
-const TOUTE_LA_DALLE: Boite = Boite {
-    x: 0,
-    y: 0,
-    largeur: screen::WIDTH,
-    hauteur: screen::HEIGHT,
-};
 
 /// Ce qu'il reste d'un fond sous un champ, en pour cent.
 ///
@@ -929,20 +988,13 @@ const TOUTE_LA_DALLE: Boite = Boite {
 /// sous le champ.
 const CHAMP_ASSOMBRISSEMENT: u16 = 30;
 
-/// Hauteur des chiffres d'un champ. Le tiers de ceux du cadran : quatre valeurs
-/// à la taille d'une seule ne tiendraient pas dans un disque de 640 pixels.
-const CHAMP_CHIFFRE_HAUTEUR: usize = 48;
-/// Échelle du libellé d'un champ.
-const CHAMP_LIBELLE_ECHELLE: usize = 2;
-/// Échelle de l'unité d'un champ.
-const CHAMP_UNITE_ECHELLE: usize = 3;
-/// Échelle d'un champ de texte fixe : il n'a rien d'autre à montrer, donc il
-/// prend la place que la mesure aurait prise.
-const CHAMP_TEXTE_ECHELLE: usize = 3;
-/// Entre le libellé et la mesure.
-const CHAMP_INTERLIGNE: usize = 6;
-/// Entre les chiffres et leur unité.
-const CHAMP_ECART_UNITE: usize = 8;
+/// La part de la hauteur d'un champ qu'occupe l'œil d'un texte seul.
+const PART_TEXTE_SEUL: f32 = 0.58;
+/// Celle d'une mesure sans libellé.
+const PART_MESURE_SEULE: f32 = 0.62;
+/// Celle du libellé quand il y en a un ; la mesure prend le reste, et elle est
+/// plus grosse.
+const PART_LIBELLE: f32 = 0.36;
 
 /// Le libellé d'un champ, sur son fond assombri.
 ///
@@ -993,6 +1045,79 @@ fn chiffres(valeur: Option<f32>) -> String {
 /// `screen::pixel` — la seule fonction du projet qui connaisse cet ordre. Une
 /// image en RGB au lieu de BGR s'affiche nette, et de la mauvaise couleur, sans
 /// qu'aucun message ne le dise.
+/// La fonte embarquée dans le binaire (issue #90).
+///
+/// `LiberationSans-Bold`, une grotesque large et grasse — métriquement
+/// compatible Arial, licence OFL-1.1-RFN, redistribuable telle quelle. Elle est
+/// **dans le binaire**, jamais lue sur le système : l'ADR-001 pose qu'un binaire
+/// unique ne doit pas casser à une montée d'image, et une fonte absente de l'OS
+/// est exactement ce genre de casse.
+///
+/// # Ce qu'elle remplace
+///
+/// Des chiffres à **sept segments** et une matrice **5 × 7** dessinés à la main.
+/// C'était le bon choix pour afficher « 34.2 » sans traîner de bibliothèque
+/// système (#33) ; ça ne l'était plus dès qu'il a fallu écrire des libellés, et
+/// ça se voyait à six centimètres.
+pub const FONTE: &[u8] = include_bytes!("../assets/LiberationSans-Bold.ttf");
+
+/// La fonte analysée, une fois pour la vie du processus.
+///
+/// L'analyse coûte quelques centaines de microsecondes ; la refaire à chaque
+/// composition la remettrait dans le chemin des deux secondes de recomposition.
+fn fonte() -> &'static fontdue::Font {
+    static LUE: OnceLock<fontdue::Font> = OnceLock::new();
+    LUE.get_or_init(|| {
+        // Une fonte compilée dans le binaire ne peut pas être absente ni
+        // tronquée : ce qui est vérifié ici l'est une fois, au premier texte.
+        fontdue::Font::from_bytes(FONTE, fontdue::FontSettings::default())
+            .expect("la fonte embarquée par include_bytes! est valide")
+    })
+}
+
+/// La largeur qu'un texte occupe à cette taille.
+fn largeur_du_texte(texte: &str, taille: f32) -> f32 {
+    let fonte = fonte();
+    texte
+        .chars()
+        .map(|caractere| fonte.metrics(caractere, taille).advance_width)
+        .sum()
+}
+
+/// La plus grande taille qui tienne à la fois en largeur et en hauteur.
+///
+/// ⚠️ **Calculée, jamais cherchée par essais.** Les avances d'une fonte sont
+/// proportionnelles à la taille : une mesure à une taille de référence donne la
+/// bonne d'un seul coup. Une boucle qui rétrécirait de proche en proche
+/// tournerait sur chaque champ, quatre fois par composition, toutes les deux
+/// secondes.
+fn taille_qui_tient(texte: &str, largeur_dispo: f32, hauteur_dispo: f32) -> f32 {
+    const REFERENCE: f32 = 100.0;
+    let large = largeur_du_texte(texte, REFERENCE);
+    let par_largeur = if large > 0.0 {
+        REFERENCE * largeur_dispo / large
+    } else {
+        hauteur_dispo
+    };
+    hauteur_dispo.min(par_largeur).max(1.0)
+}
+
+/// La proportion d'anneau qu'une température représente (issue #90).
+///
+/// ⚠️ **L'échelle est celle du cadran** : zéro degré vide l'anneau, cent le
+/// remplit. Ce n'est pas une mesure, c'est une lecture au coup d'œil — la valeur
+/// exacte est écrite à côté.
+///
+/// Tout ce qui sort des bornes y est **ramené** plutôt que de déborder : une
+/// sonde qui rend `NaN` — température divisée par une borne nulle — donnerait
+/// sinon un index calculé hors du tampon.
+pub fn proportion_de_temperature(valeur: f32) -> f32 {
+    if valeur.is_nan() {
+        return 0.0;
+    }
+    (valeur / 100.0).clamp(0.0, 1.0)
+}
+
 struct Toile {
     octets: Vec<u8>,
 }
@@ -1021,29 +1146,150 @@ impl Toile {
         self.octets[debut..debut + screen::PIXEL_LEN].copy_from_slice(&triplet);
     }
 
-    /// Peint un rectangle, **borné** à la boîte donnée.
+    /// Lit un pixel déjà peint.
+    fn lire(&self, x: usize, y: usize) -> (u8, u8, u8) {
+        let debut = (y * usize::from(screen::WIDTH) + x) * screen::PIXEL_LEN;
+        self.octets
+            .get(debut..debut + screen::PIXEL_LEN)
+            .map(screen::composantes)
+            .unwrap_or_default()
+    }
+
+    /// Pose une couleur avec une couverture partielle, sur ce qui est déjà là.
     ///
-    /// ⚠️ Le bornage n'est pas une précaution de style : la boîte du champ
-    /// supérieur passe à 2,4 pixels du bord du disque visible, et un arrondi de
-    /// centrage qui déborderait d'un pixel écrirait hors de la dalle — sans
-    /// qu'aucun message ne le dise, puisque le tampon, lui, est carré.
-    fn rectangle(
+    /// ⚠️ **C'est ce qui rend l'anticrénelage possible**, et donc ce qui
+    /// distingue une vraie fonte d'une matrice dessinée à la main : un
+    /// rastériseur rend une couverture de 0 à 255, pas un pixel allumé ou
+    /// éteint.
+    fn melanger(&mut self, x: i32, y: i32, clip: Boite, couleur: (u8, u8, u8), couverture: u8) {
+        if couverture == 0 || x < 0 || y < 0 {
+            return;
+        }
+        let (x, y) = (x as usize, y as usize);
+        if x < usize::from(clip.x)
+            || x >= usize::from(clip.x) + usize::from(clip.largeur)
+            || y < usize::from(clip.y)
+            || y >= usize::from(clip.y) + usize::from(clip.hauteur)
+            || x >= usize::from(screen::WIDTH)
+            || y >= usize::from(screen::HEIGHT)
+        {
+            return;
+        }
+        let fond = self.lire(x, y);
+        let melee = |dessous: u8, dessus: u8| -> u8 {
+            let a = u16::from(couverture);
+            let melee = u16::from(dessous) * (255 - a) + u16::from(dessus) * a;
+            (melee / 255) as u8
+        };
+        self.poser(
+            x,
+            y,
+            (
+                melee(fond.0, couleur.0),
+                melee(fond.1, couleur.1),
+                melee(fond.2, couleur.2),
+            ),
+        );
+    }
+
+    /// Écrit un texte dans la fonte embarquée, centré horizontalement dans
+    /// `clip`, sa hauteur d'œil centrée sur `centre_y`.
+    ///
+    /// Rien n'est écrit hors de `clip` : le bornage est dans [`Toile::melanger`],
+    /// et non dans un calcul de mise en page qu'il faudrait refaire juste.
+    fn ecrire(
         &mut self,
         clip: Boite,
-        x: usize,
-        y: usize,
-        largeur: usize,
-        hauteur: usize,
-        c: (u8, u8, u8),
+        texte: &str,
+        centre_y: f32,
+        taille: f32,
+        couleur: (u8, u8, u8),
     ) {
-        let (x0, y0) = (usize::from(clip.x), usize::from(clip.y));
-        let (x1, y1) = (
-            x0 + usize::from(clip.largeur),
-            y0 + usize::from(clip.hauteur),
-        );
-        for py in y.max(y0)..(y + hauteur).min(y1) {
-            for px in x.max(x0)..(x + largeur).min(x1) {
-                self.poser(px, py, c);
+        let fonte = fonte();
+        let largeur = largeur_du_texte(texte, taille);
+        let mut plume = f32::from(clip.x) + (f32::from(clip.largeur) - largeur) / 2.0;
+
+        // La ligne de base se déduit des métriques de la fonte : centrer sur la
+        // boîte englobante des glyphes ferait sautiller le texte selon qu'il
+        // porte ou non un jambage.
+        let lignes = fonte.horizontal_line_metrics(taille);
+        let base = match lignes {
+            Some(m) => centre_y + (m.ascent + m.descent) / 2.0,
+            None => centre_y + taille / 2.0,
+        };
+
+        for caractere in texte.chars() {
+            let (metriques, couvertures) = fonte.rasterize(caractere, taille);
+            if metriques.width > 0 && metriques.height > 0 {
+                let x0 = plume + metriques.xmin as f32;
+                let y0 = base - (metriques.height as f32 + metriques.ymin as f32);
+                for (rang, &couverture) in couvertures.iter().enumerate() {
+                    let x = x0 + (rang % metriques.width) as f32;
+                    let y = y0 + (rang / metriques.width) as f32;
+                    self.melanger(
+                        x.round() as i32,
+                        y.round() as i32,
+                        clip,
+                        couleur,
+                        couverture,
+                    );
+                }
+            }
+            plume += metriques.advance_width;
+        }
+    }
+
+    /// Écrit une ligne centrée dans sa boîte, réduite si elle est trop large.
+    ///
+    /// ⚠️ **Réduite, jamais tronquée ni débordante.** Un libellé de sonde fait
+    /// vingt-huit caractères et la dalle six centimètres : sans cette réduction,
+    /// il sortirait du disque, où le contrôleur le coupe sans rien dire.
+    fn ligne(&mut self, boite: Boite, texte: &str, hauteur: f32, couleur: (u8, u8, u8)) {
+        let taille = taille_qui_tient(texte, f32::from(boite.largeur), hauteur);
+        let centre = f32::from(boite.y) + f32::from(boite.hauteur) / 2.0;
+        self.ecrire(boite, texte, centre, taille, couleur);
+    }
+
+    /// Dessine l'arc d'un secteur, rempli de sa proportion (issue #90).
+    ///
+    /// ⚠️ **Rien n'est dessiné pour la part vide.** Une piste de fond ferait
+    /// qu'un arc à zéro pour cent peindrait autant de pixels qu'un arc plein, et
+    /// « rempli proportionnellement » ne se distinguerait plus de « toujours
+    /// dessiné ». La valeur, elle, est écrite à côté : un secteur vide ne cache
+    /// aucune information.
+    fn arc(&mut self, secteur: Secteur, proportion: f32) {
+        let part = if proportion.is_nan() {
+            0.0
+        } else {
+            proportion.clamp(0.0, 1.0)
+        };
+        let etendue = secteur.ouverture * part;
+        if etendue <= 0.0 {
+            return;
+        }
+
+        let centre = f32::from(screen::WIDTH) / 2.0;
+        let interieur = f32::from(composition::COURONNE_RAYON_INTERIEUR);
+        let exterieur = f32::from(composition::COURONNE_RAYON_EXTERIEUR);
+        let (interieur2, exterieur2) = (interieur * interieur, exterieur * exterieur);
+
+        for y in 0..usize::from(screen::HEIGHT) {
+            for x in 0..usize::from(screen::WIDTH) {
+                let dx = x as f32 + 0.5 - centre;
+                let dy = y as f32 + 0.5 - centre;
+                // Le carré du rayon d'abord : la racine et l'arc tangente ne
+                // sont calculés que sur les quelques pour cent de pixels qui
+                // tombent dans la couronne.
+                let rayon2 = dx * dx + dy * dy;
+                if rayon2 < interieur2 || rayon2 > exterieur2 {
+                    continue;
+                }
+                // Zéro au sommet, croissant dans le sens horaire — la convention
+                // qu'on lit sur une dalle ronde posée à plat.
+                let angle = dx.atan2(-dy).to_degrees().rem_euclid(360.0);
+                if (angle - secteur.debut).rem_euclid(360.0) < etendue {
+                    self.poser(x, y, COULEUR_ANNEAU);
+                }
             }
         }
     }
@@ -1105,414 +1351,53 @@ impl Toile {
         }
     }
 
-    /// Le nombre, en chiffres à sept segments, centré sur la dalle.
-    ///
-    /// La hauteur demandée est **réduite** tant que le nombre déborde de
-    /// l'anneau : « 1250.0 » a deux chiffres de plus que « 34.2 », et les
-    /// laisser sortir du cercle ferait un cadran illisible là où la mesure
-    /// compte le plus — les tours par minute d'une pompe.
-    fn sept_segments(&mut self, texte: &str, hauteur: usize) {
-        let mut hauteur = hauteur;
-        while hauteur > CADRAN_CHIFFRE_MINIMUM
-            && largeur_des_chiffres(texte, hauteur) > CADRAN_LARGEUR_UTILE
-        {
-            hauteur -= 2;
-        }
-
-        let total = largeur_des_chiffres(texte, hauteur);
-        let x = usize::from(screen::WIDTH).saturating_sub(total) / 2;
-        let y = usize::from(screen::HEIGHT).saturating_sub(hauteur) / 2;
-        self.sept_segments_a(TOUTE_LA_DALLE, x, y, texte, hauteur);
-    }
-
-    /// Le même nombre, posé où on le demande et borné à une boîte.
-    ///
-    /// La hauteur n'est **pas** réduite ici : c'est l'appelant qui a choisi une
-    /// place, et la réduire sous ses pieds décalerait ce qu'il a centré. Un
-    /// nombre trop large est coupé par le bornage, comme le reste.
-    fn sept_segments_a(&mut self, clip: Boite, x: usize, y: usize, texte: &str, hauteur: usize) {
-        let largeur = largeur_de_chiffre(hauteur);
-        let epaisseur = epaisseur_de_chiffre(hauteur);
-        let ecart = epaisseur;
-        let mut x = x;
-
-        for glyphe in texte.chars() {
-            if glyphe == '.' {
-                self.rectangle(
-                    clip,
-                    x,
-                    y + hauteur - epaisseur,
-                    epaisseur * 2,
-                    epaisseur,
-                    COULEUR_CHIFFRE,
-                );
-                x += epaisseur * 2 + ecart;
-                continue;
-            }
-            self.chiffre(clip, x, y, hauteur, segments(glyphe));
-            x += largeur + ecart;
-        }
-    }
-
-    /// Un chiffre à sept segments, `a` en poids faible jusqu'à `g`.
-    ///
-    /// La largeur et l'épaisseur se **déduisent** de la hauteur plutôt que de
-    /// s'ajouter aux arguments : elles n'ont jamais eu d'autre valeur, et deux
-    /// endroits qui les recalculent finissent par ne plus les recalculer
-    /// pareil.
-    fn chiffre(&mut self, clip: Boite, x: usize, y: usize, hauteur: usize, masque: u8) {
-        let largeur = largeur_de_chiffre(hauteur);
-        let epaisseur = epaisseur_de_chiffre(hauteur);
-        let milieu = y + hauteur / 2 - epaisseur / 2;
-        let bas = y + hauteur - epaisseur;
-        let droite = x + largeur - epaisseur;
-        let demi = hauteur / 2;
-        let barres: [(bool, usize, usize, usize, usize); 7] = [
-            (masque & 0x01 != 0, x, y, largeur, epaisseur),
-            (masque & 0x02 != 0, droite, y, epaisseur, demi),
-            (masque & 0x04 != 0, droite, y + demi, epaisseur, demi),
-            (masque & 0x08 != 0, x, bas, largeur, epaisseur),
-            (masque & 0x10 != 0, x, y + demi, epaisseur, demi),
-            (masque & 0x20 != 0, x, y, epaisseur, demi),
-            (masque & 0x40 != 0, x, milieu, largeur, epaisseur),
-        ];
-        for (allume, bx, by, bl, bh) in barres {
-            if allume {
-                self.rectangle(clip, bx, by, bl, bh, COULEUR_CHIFFRE);
-            }
-        }
-    }
-
-    /// Du texte en police matricielle 5 × 7, centré horizontalement.
-    ///
-    /// `echelle` est le côté, en pixels, d'un point de la matrice. Le texte qui
-    /// ne tient pas dans la dalle est **coupé**, jamais replié : un cadran se
-    /// lit d'un coup d'œil, pas sur deux lignes.
-    fn matriciel(&mut self, texte: &str, y: usize, echelle: usize, c: (u8, u8, u8)) {
-        self.matriciel_centre(TOUTE_LA_DALLE, texte, y, echelle, c);
-    }
-
-    /// Le même texte, centré dans une boîte et borné à elle.
-    ///
-    /// ⚠️ Le texte est **coupé à ce qui tient dans la boîte**, jamais replié :
-    /// un champ se lit d'un coup d'œil, et deux lignes dans une boîte prévue
-    /// pour une écraseraient la valeur qu'elle porte.
-    fn matriciel_centre(
-        &mut self,
-        boite: Boite,
-        texte: &str,
-        y: usize,
-        echelle: usize,
-        c: (u8, u8, u8),
-    ) {
-        let visible = tronque(texte, usize::from(boite.largeur), echelle);
-        if visible.is_empty() {
-            return;
-        }
-        let total = largeur_matricielle(&visible, echelle);
-        let x = usize::from(boite.x) + (usize::from(boite.largeur).saturating_sub(total)) / 2;
-        self.matriciel_a(boite, x, y, &visible, echelle, c);
-    }
-
-    /// Le texte posé où on le demande, borné à la boîte.
-    fn matriciel_a(
-        &mut self,
-        clip: Boite,
-        x: usize,
-        y: usize,
-        texte: &str,
-        echelle: usize,
-        c: (u8, u8, u8),
-    ) {
-        let pas = (POLICE_LARGEUR + 1) * echelle;
-        let mut x = x;
-        for glyphe in texte.chars() {
-            let colonnes = matrice(glyphe);
-            for (dx, colonne) in colonnes.iter().enumerate() {
-                for dy in 0..POLICE_HAUTEUR {
-                    if colonne & (1 << dy) != 0 {
-                        self.rectangle(
-                            clip,
-                            x + dx * echelle,
-                            y + dy * echelle,
-                            echelle,
-                            echelle,
-                            c,
-                        );
-                    }
-                }
-            }
-            x += pas;
-        }
-    }
-
     /// Un champ de la composition, dessiné dans sa boîte (#80).
     fn champ(&mut self, boite: Boite, rendu: &ChampRendu) {
         self.assombrir(boite);
 
+        let hauteur = f32::from(boite.hauteur);
         match rendu {
             ChampRendu::Texte(texte) => {
-                let y = usize::from(boite.y)
-                    + usize::from(boite.hauteur)
-                        .saturating_sub(POLICE_HAUTEUR * CHAMP_TEXTE_ECHELLE)
-                        / 2;
-                self.matriciel_centre(boite, texte, y, CHAMP_TEXTE_ECHELLE, COULEUR_CHIFFRE);
+                self.ligne(boite, texte, hauteur * PART_TEXTE_SEUL, COULEUR_CHIFFRE);
             }
             ChampRendu::Temperature { libelle, valeur: _ } => {
-                let mesure = valeur_du_champ(rendu);
-                let hauteur_libelle = POLICE_HAUTEUR * CHAMP_LIBELLE_ECHELLE;
+                // Les chiffres et leur unité forment **une seule chaîne** depuis
+                // #90. Les composer côte à côte, comme le faisaient les sept
+                // segments, demandait de mesurer chaque morceau puis de centrer
+                // le groupe à la main — un calcul que la fonte fait mieux, et
+                // qui se décalait dès qu'une valeur changeait de longueur.
+                let mesure = format!("{}{UNITE}", valeur_du_champ(rendu));
 
-                // Sans libellé, la mesure occupe seule la boîte et s'y centre.
-                // Avec, les deux forment un bloc qu'on centre ensemble : une
-                // mesure qui garderait sa place laisserait le libellé pendre
-                // au-dessus de la boîte.
-                let (y_libelle, y_mesure) = if libelle.is_some() {
-                    let bloc = hauteur_libelle + CHAMP_INTERLIGNE + CHAMP_CHIFFRE_HAUTEUR;
-                    let haut =
-                        usize::from(boite.y) + usize::from(boite.hauteur).saturating_sub(bloc) / 2;
-                    (haut, haut + hauteur_libelle + CHAMP_INTERLIGNE)
-                } else {
-                    (
-                        0,
-                        usize::from(boite.y)
-                            + usize::from(boite.hauteur).saturating_sub(CHAMP_CHIFFRE_HAUTEUR) / 2,
-                    )
+                let Some(libelle) = libelle else {
+                    // Sans libellé, la mesure occupe seule la boîte.
+                    self.ligne(boite, &mesure, hauteur * PART_MESURE_SEULE, COULEUR_CHIFFRE);
+                    return;
                 };
 
-                if let Some(libelle) = libelle {
-                    self.matriciel_centre(
-                        boite,
-                        libelle,
-                        y_libelle,
-                        CHAMP_LIBELLE_ECHELLE,
-                        COULEUR_CHAMP_LIBELLE,
-                    );
-                }
-
-                // Les chiffres et leur unité forment un groupe qu'on centre
-                // d'un bloc : centrer les chiffres seuls ferait glisser le
-                // « °C » hors de la boîte sur les valeurs longues.
-                let largeur_chiffres = largeur_des_chiffres(&mesure, CHAMP_CHIFFRE_HAUTEUR);
-                let largeur_unite = largeur_matricielle(UNITE, CHAMP_UNITE_ECHELLE);
-                let total = largeur_chiffres + CHAMP_ECART_UNITE + largeur_unite;
-                let x = usize::from(boite.x) + usize::from(boite.largeur).saturating_sub(total) / 2;
-
-                self.sept_segments_a(boite, x, y_mesure, &mesure, CHAMP_CHIFFRE_HAUTEUR);
-                // L'unité s'aligne sur le **bas** des chiffres : alignée en
-                // haut, elle flotterait au-dessus d'un nombre deux fois plus
-                // haut qu'elle.
-                let y_unite =
-                    y_mesure + CHAMP_CHIFFRE_HAUTEUR - POLICE_HAUTEUR * CHAMP_UNITE_ECHELLE;
-                self.matriciel_a(
-                    boite,
-                    x + largeur_chiffres + CHAMP_ECART_UNITE,
-                    y_unite,
-                    UNITE,
-                    CHAMP_UNITE_ECHELLE,
-                    COULEUR_UNITE,
+                // Avec, les deux se partagent la hauteur : le libellé dessus, la
+                // mesure dessous et plus grosse — c'est elle qu'on lit d'un
+                // mètre, le libellé ne sert qu'à savoir de quoi il s'agit.
+                let haut = (hauteur * PART_LIBELLE).round() as u16;
+                self.ligne(
+                    Boite {
+                        hauteur: haut,
+                        ..boite
+                    },
+                    libelle,
+                    hauteur * PART_LIBELLE * 0.82,
+                    COULEUR_CHAMP_LIBELLE,
+                );
+                self.ligne(
+                    Boite {
+                        y: boite.y + haut,
+                        hauteur: boite.hauteur - haut,
+                        ..boite
+                    },
+                    &mesure,
+                    hauteur * (1.0 - PART_LIBELLE) * 0.86,
+                    COULEUR_CHIFFRE,
                 );
             }
         }
     }
 }
-
-/// Ce qui tient d'un texte dans une largeur, en police matricielle.
-fn tronque(texte: &str, largeur: usize, echelle: usize) -> String {
-    let pas = (POLICE_LARGEUR + 1) * echelle;
-    let tenables = largeur.checked_div(pas).unwrap_or(0);
-    texte.chars().take(tenables).collect()
-}
-
-/// La largeur qu'occupe un texte matriciel, sans l'écart de fin.
-fn largeur_matricielle(texte: &str, echelle: usize) -> usize {
-    let compte = texte.chars().count();
-    if compte == 0 {
-        return 0;
-    }
-    compte * (POLICE_LARGEUR + 1) * echelle - echelle
-}
-
-/// La largeur qu'occupera un nombre à cette hauteur de chiffre.
-///
-/// Un point ne prend pas la place d'un chiffre : le compter comme tel
-/// décalerait « 34.2 » d'un demi-caractère vers la gauche.
-fn largeur_des_chiffres(texte: &str, hauteur: usize) -> usize {
-    let largeur = largeur_de_chiffre(hauteur);
-    let epaisseur = epaisseur_de_chiffre(hauteur);
-    texte
-        .chars()
-        .map(|glyphe| {
-            epaisseur
-                + if glyphe == '.' {
-                    epaisseur * 2
-                } else {
-                    largeur
-                }
-        })
-        .sum::<usize>()
-        .saturating_sub(epaisseur)
-}
-
-/// La largeur d'un chiffre à sept segments, à cette hauteur.
-///
-/// La moitié de sa hauteur — les proportions d'un afficheur, et la seule
-/// définition que le projet en donne.
-fn largeur_de_chiffre(hauteur: usize) -> usize {
-    hauteur / 2
-}
-
-/// L'épaisseur d'un segment, à cette hauteur.
-///
-/// Un dixième, et jamais moins de deux pixels : en deçà, un segment disparaît
-/// à l'arrondi et le chiffre change de valeur à l'œil.
-fn epaisseur_de_chiffre(hauteur: usize) -> usize {
-    (hauteur / 10).max(2)
-}
-
-/// Les sept segments d'un caractère, `a` en poids faible.
-///
-/// Ce qui n'est pas un chiffre ni un tiret s'écrit vide plutôt que de prendre
-/// la forme d'un autre caractère : un « 8 » mis à la place d'un caractère
-/// inconnu se lirait comme une mesure.
-fn segments(glyphe: char) -> u8 {
-    match glyphe {
-        '0' => 0x3f,
-        '1' => 0x06,
-        '2' => 0x5b,
-        '3' => 0x4f,
-        '4' => 0x66,
-        '5' => 0x6d,
-        '6' => 0x7d,
-        '7' => 0x07,
-        '8' => 0x7f,
-        '9' => 0x6f,
-        '-' => 0x40,
-        _ => 0x00,
-    }
-}
-
-/// Largeur d'un glyphe matriciel, en points.
-const POLICE_LARGEUR: usize = 5;
-/// Hauteur d'un glyphe matriciel, en points.
-const POLICE_HAUTEUR: usize = 7;
-
-/// Les colonnes d'un glyphe, poids faible en haut.
-///
-/// Table écrite à la main pour l'ASCII imprimable, plus le degré. Ce n'est pas
-/// une pile de texte : pas de fichier de police, pas de crénage, pas de
-/// dépendance — 95 entrées de cinq octets.
-fn matrice(glyphe: char) -> [u8; POLICE_LARGEUR] {
-    // Le degré n'est pas de l'ASCII, et c'est l'unité de la sonde qui compte le
-    // plus sur cette dalle.
-    if glyphe == '°' {
-        return [0x00, 0x06, 0x09, 0x09, 0x06];
-    }
-    let rang = match u32::from(glyphe) {
-        code @ 32..=126 => (code - 32) as usize,
-        // Tout le reste — accents, emoji, caractères de contrôle — prend le
-        // rectangle vide de la fin de table : une case qui se voit, plutôt
-        // qu'un caractère inventé.
-        _ => POLICE.len() - 1,
-    };
-    POLICE[rang]
-}
-
-#[rustfmt::skip]
-const POLICE: [[u8; POLICE_LARGEUR]; 96] = [
-    [0x00, 0x00, 0x00, 0x00, 0x00], // espace
-    [0x00, 0x00, 0x5f, 0x00, 0x00], // !
-    [0x00, 0x07, 0x00, 0x07, 0x00], // "
-    [0x14, 0x7f, 0x14, 0x7f, 0x14], // #
-    [0x24, 0x2a, 0x7f, 0x2a, 0x12], // $
-    [0x23, 0x13, 0x08, 0x64, 0x62], // %
-    [0x36, 0x49, 0x55, 0x22, 0x50], // &
-    [0x00, 0x05, 0x03, 0x00, 0x00], // '
-    [0x00, 0x1c, 0x22, 0x41, 0x00], // (
-    [0x00, 0x41, 0x22, 0x1c, 0x00], // )
-    [0x14, 0x08, 0x3e, 0x08, 0x14], // *
-    [0x08, 0x08, 0x3e, 0x08, 0x08], // +
-    [0x00, 0x50, 0x30, 0x00, 0x00], // ,
-    [0x08, 0x08, 0x08, 0x08, 0x08], // -
-    [0x00, 0x60, 0x60, 0x00, 0x00], // .
-    [0x20, 0x10, 0x08, 0x04, 0x02], // /
-    [0x3e, 0x51, 0x49, 0x45, 0x3e], // 0
-    [0x00, 0x42, 0x7f, 0x40, 0x00], // 1
-    [0x42, 0x61, 0x51, 0x49, 0x46], // 2
-    [0x21, 0x41, 0x45, 0x4b, 0x31], // 3
-    [0x18, 0x14, 0x12, 0x7f, 0x10], // 4
-    [0x27, 0x45, 0x45, 0x45, 0x39], // 5
-    [0x3c, 0x4a, 0x49, 0x49, 0x30], // 6
-    [0x01, 0x71, 0x09, 0x05, 0x03], // 7
-    [0x36, 0x49, 0x49, 0x49, 0x36], // 8
-    [0x06, 0x49, 0x49, 0x29, 0x1e], // 9
-    [0x00, 0x36, 0x36, 0x00, 0x00], // :
-    [0x00, 0x56, 0x36, 0x00, 0x00], // ;
-    [0x00, 0x08, 0x14, 0x22, 0x41], // <
-    [0x14, 0x14, 0x14, 0x14, 0x14], // =
-    [0x41, 0x22, 0x14, 0x08, 0x00], // >
-    [0x02, 0x01, 0x51, 0x09, 0x06], // ?
-    [0x32, 0x49, 0x79, 0x41, 0x3e], // @
-    [0x7e, 0x11, 0x11, 0x11, 0x7e], // A
-    [0x7f, 0x49, 0x49, 0x49, 0x36], // B
-    [0x3e, 0x41, 0x41, 0x41, 0x22], // C
-    [0x7f, 0x41, 0x41, 0x22, 0x1c], // D
-    [0x7f, 0x49, 0x49, 0x49, 0x41], // E
-    [0x7f, 0x09, 0x09, 0x09, 0x01], // F
-    [0x3e, 0x41, 0x49, 0x49, 0x7a], // G
-    [0x7f, 0x08, 0x08, 0x08, 0x7f], // H
-    [0x00, 0x41, 0x7f, 0x41, 0x00], // I
-    [0x20, 0x40, 0x41, 0x3f, 0x01], // J
-    [0x7f, 0x08, 0x14, 0x22, 0x41], // K
-    [0x7f, 0x40, 0x40, 0x40, 0x40], // L
-    [0x7f, 0x02, 0x0c, 0x02, 0x7f], // M
-    [0x7f, 0x04, 0x08, 0x10, 0x7f], // N
-    [0x3e, 0x41, 0x41, 0x41, 0x3e], // O
-    [0x7f, 0x09, 0x09, 0x09, 0x06], // P
-    [0x3e, 0x41, 0x51, 0x21, 0x5e], // Q
-    [0x7f, 0x09, 0x19, 0x29, 0x46], // R
-    [0x46, 0x49, 0x49, 0x49, 0x31], // S
-    [0x01, 0x01, 0x7f, 0x01, 0x01], // T
-    [0x3f, 0x40, 0x40, 0x40, 0x3f], // U
-    [0x1f, 0x20, 0x40, 0x20, 0x1f], // V
-    [0x7f, 0x20, 0x18, 0x20, 0x7f], // W
-    [0x63, 0x14, 0x08, 0x14, 0x63], // X
-    [0x03, 0x04, 0x78, 0x04, 0x03], // Y
-    [0x61, 0x51, 0x49, 0x45, 0x43], // Z
-    [0x00, 0x7f, 0x41, 0x41, 0x00], // [
-    [0x02, 0x04, 0x08, 0x10, 0x20], // \
-    [0x00, 0x41, 0x41, 0x7f, 0x00], // ]
-    [0x04, 0x02, 0x01, 0x02, 0x04], // ^
-    [0x40, 0x40, 0x40, 0x40, 0x40], // _
-    [0x00, 0x01, 0x02, 0x04, 0x00], // `
-    [0x20, 0x54, 0x54, 0x54, 0x78], // a
-    [0x7f, 0x48, 0x44, 0x44, 0x38], // b
-    [0x38, 0x44, 0x44, 0x44, 0x20], // c
-    [0x38, 0x44, 0x44, 0x48, 0x7f], // d
-    [0x38, 0x54, 0x54, 0x54, 0x18], // e
-    [0x08, 0x7e, 0x09, 0x01, 0x02], // f
-    [0x0c, 0x52, 0x52, 0x52, 0x3e], // g
-    [0x7f, 0x08, 0x04, 0x04, 0x78], // h
-    [0x00, 0x44, 0x7d, 0x40, 0x00], // i
-    [0x20, 0x40, 0x44, 0x3d, 0x00], // j
-    [0x7f, 0x10, 0x28, 0x44, 0x00], // k
-    [0x00, 0x41, 0x7f, 0x40, 0x00], // l
-    [0x7c, 0x04, 0x18, 0x04, 0x78], // m
-    [0x7c, 0x08, 0x04, 0x04, 0x78], // n
-    [0x38, 0x44, 0x44, 0x44, 0x38], // o
-    [0x7c, 0x14, 0x14, 0x14, 0x08], // p
-    [0x08, 0x14, 0x14, 0x18, 0x7c], // q
-    [0x7c, 0x08, 0x04, 0x04, 0x08], // r
-    [0x48, 0x54, 0x54, 0x54, 0x20], // s
-    [0x04, 0x3f, 0x44, 0x40, 0x20], // t
-    [0x3c, 0x40, 0x40, 0x20, 0x7c], // u
-    [0x1c, 0x20, 0x40, 0x20, 0x1c], // v
-    [0x3c, 0x40, 0x30, 0x40, 0x3c], // w
-    [0x44, 0x28, 0x10, 0x28, 0x44], // x
-    [0x0c, 0x50, 0x50, 0x50, 0x3c], // y
-    [0x44, 0x64, 0x54, 0x4c, 0x44], // z
-    [0x00, 0x08, 0x36, 0x41, 0x00], // {
-    [0x00, 0x00, 0x7f, 0x00, 0x00], // |
-    [0x00, 0x41, 0x36, 0x08, 0x00], // }
-    [0x08, 0x04, 0x08, 0x10, 0x08], // ~
-    [0x7f, 0x41, 0x41, 0x41, 0x7f], // inconnu : un rectangle vide
-];
