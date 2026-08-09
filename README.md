@@ -748,6 +748,35 @@ d'erreur au client, et un échec au démarrage n'est plus dit au démarrage. Les
 journal. En attendre le résultat remettrait les 51 ms d'ouverture d'un `hidraw` dans le chemin des
 LED, pour rendre au client une erreur qu'il ne peut de toute façon pas corriger.
 
+### Une sonde muette n'emporte pas le démon — ni un canal de ventilation
+
+⚠️ **Le même défaut a été traité trois fois, sur les trois chemins qui le portaient** : les sondes
+(#68), la dalle (#83), et les canaux de ventilation (#88). À chaque fois, un périphérique qui cesse
+de répondre à son pilote noyau gelait le fil qui sert le socket.
+
+Pour les canaux, mesuré sur SHYNAEL le 2026-08-09, Kraken en rade :
+
+```
+$ status
+36,306 s · 811 octets
+30,708 s · 811 octets        ← reproductible, pas un hoquet
+unreadable kraken2023elite:fan-speed:mode  Connection timed out (os error 110)
+```
+
+La fenêtre demande `status` **une fois par seconde**. Mesuré : `geometry`, qui ne touche aucun
+matériel, a mis **10,2 s** à répondre pour la seule raison qu'un `status` le précédait. Le boîtier
+s'animait à 21 img/s pendant ce temps — d'où l'impression d'une fenêtre morte devant un boîtier
+vivant.
+
+⚠️ **La clef d'écartement est le canal entier, pas l'attribut.** Un canal porte `rpm`, `pwm` et
+`mode` là où une sonde n'a qu'une valeur ; quand un contrôleur ne répond plus, aucun des trois ne
+répond, et écarter attribut par attribut ferait payer trois fois cinq secondes pour l'apprendre.
+
+⚠️ **Le budget des 100 ms vaut en régime établi, la retente exceptée.** Relire est le seul moyen de
+savoir si un canal est revenu, et cette relecture coûte ses cinq secondes. Sur une minute de fenêtre
+ouverte avec les deux canaux du Kraken en rade : **une** relecture, cinquante-neuf `status`
+gratuits, et un coût moyen de 174 ms là où un seul `status` en coûtait 30 000.
+
 ### Une sonde muette n'emporte pas le démon
 
 ⚠️ **Une lecture sysfs peut bloquer cinq secondes**, en sommeil non interruptible, quand un

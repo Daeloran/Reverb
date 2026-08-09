@@ -85,7 +85,27 @@ pub enum Releve<T> {
     Muette { signaler: bool },
 }
 
-/// L'état d'une sonde qui s'est tue.
+/// Ce qu'un tour de relevé a donné, **avec la raison du silence** (issue #88).
+///
+/// ⚠️ **Pourquoi une seconde forme de verdict.** Une sonde muette disparaît
+/// simplement du relevé : sa ligne `temp` n'est pas écrite, et la cause n'a
+/// nulle part où aller. Un canal, lui, est rendu par une ligne
+/// `unreadable <sujet> <raison>`, et cette raison est **le seul diagnostic que
+/// l'opérateur reçoit** — c'est « Connection timed out (os error 110) » qui a
+/// permis d'écrire #88. Elle doit donc **survivre à la mise à l'écart**, et être
+/// redite à chaque tour où le canal dort sa quarantaine.
+///
+/// C'est ce qui fait que la quarantaine est **étendue** et non dupliquée : la
+/// raison est retenue ici, à côté du compte d'échecs et de l'échéance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReleveMotive<T> {
+    /// La cible a répondu.
+    Valeur(T),
+    /// Elle s'est tue, ou dort sa quarantaine — et voici pourquoi.
+    Muette { signaler: bool, raison: String },
+}
+
+/// L'état d'une cible qui s'est tue.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Ecartee {
     /// Combien de fois elle a échoué d'affilée. Décide du délai.
@@ -94,6 +114,11 @@ struct Ecartee {
     echeance: Duration,
     /// A-t-elle déjà été signalée ? Une seule fois par épisode.
     signalee: bool,
+    /// Ce que la **dernière** lecture ratée a dit.
+    ///
+    /// Gardée parce qu'elle doit être redite tour après tour : la lecture
+    /// n'ayant plus lieu, plus personne n'est en mesure de la reformuler.
+    raison: String,
 }
 
 /// Les sondes écartées, et depuis quand.
@@ -125,21 +150,47 @@ impl Quarantaine {
         maintenant: Duration,
         relever: impl FnOnce() -> Option<T>,
     ) -> Releve<T> {
+        // Une seule mécanique pour les deux verdicts : une sonde est un canal
+        // dont personne ne lit la raison. L'écrire deux fois ferait diverger le
+        // calcul du délai, qui est ce que ce module a de plus délicat.
+        match self.tour_motive(slug, maintenant, || relever().ok_or_else(String::new)) {
+            ReleveMotive::Valeur(valeur) => Releve::Valeur(valeur),
+            ReleveMotive::Muette { signaler, .. } => Releve::Muette { signaler },
+        }
+    }
+
+    /// Un tour de relevé, dont le silence porte sa raison (issue #88).
+    ///
+    /// Mêmes règles que [`Quarantaine::tour`] — `relever` n'est appelée que si la
+    /// cible n'est pas en quarantaine, le délai double, une réussite efface tout
+    /// — avec une seule différence : la cause de l'échec est **retenue**, et
+    /// redite à chaque tour où la cible dort.
+    pub fn tour_motive<T>(
+        &mut self,
+        slug: &str,
+        maintenant: Duration,
+        relever: impl FnOnce() -> Result<T, String>,
+    ) -> ReleveMotive<T> {
         if let Some(ecartee) = self.ecartees.get(slug)
             && maintenant < ecartee.echeance
         {
-            return Releve::Muette { signaler: false };
+            return ReleveMotive::Muette {
+                signaler: false,
+                raison: ecartee.raison.clone(),
+            };
         }
 
         match relever() {
-            Some(valeur) => {
-                // Une retente réussie efface tout : le compte, l'échéance, et le
-                // fait d'avoir été signalée. Une sonde qui retomberait en panne
-                // plus tard est un nouvel épisode, et se journalise à nouveau.
+            Ok(valeur) => {
+                // Une retente réussie efface tout : le compte, l'échéance, la
+                // raison, et le fait d'avoir été signalée. Une cible qui
+                // retomberait en panne plus tard est un nouvel épisode, et se
+                // journalise à nouveau — sans quoi un contrôleur qui clignote
+                // serait celui dont on n'entendrait jamais parler.
                 self.ecartees.remove(slug);
-                Releve::Valeur(valeur)
+                ReleveMotive::Valeur(valeur)
             }
-            None => {
+            Err(raison) => {
                 let ecartee = self.ecartees.entry(slug.to_owned()).or_default();
                 // Le délai vient du nombre d'échecs **déjà** essuyés : le premier
                 // échec vaut `DELAI_INITIAL`, le deuxième le double, et ainsi de
@@ -150,9 +201,10 @@ impl Quarantaine {
                     .min(DELAI_MAXIMAL);
                 ecartee.echecs = ecartee.echecs.saturating_add(1);
                 ecartee.echeance = maintenant.saturating_add(delai);
+                ecartee.raison = raison.clone();
                 let signaler = !ecartee.signalee;
                 ecartee.signalee = true;
-                Releve::Muette { signaler }
+                ReleveMotive::Muette { signaler, raison }
             }
         }
     }
