@@ -733,11 +733,19 @@ ne reprenne la main.
 `reverb screen --mire` affiche quatre quadrants de couleurs connues. C'est la mire qui a confirmé
 l'ordre BGR, que la rétro-ingénierie n'avait jamais pu vérifier.
 
-`reverb screen --mire=cercle` **mesure le rayon du disque visible** : neuf anneaux de huit pixels,
-nommés — blanc, rouge, orange, jaune, vert, cyan, bleu, magenta, gris —, de 248 à 320 px de rayon.
-On dit la dernière couleur qu'on voit entièrement, et la ligne de commande imprime la
-correspondance. Les quatre coins sont en rouge sombre : en voir un dirait que la dalle n'est pas
-ronde. Une croix blanche au centre dit si l'image est centrée.
+`reverb screen --mire=cercle` **mesure le rayon du disque visible** : seize anneaux blancs, un tous
+les 20 px du centre jusqu'à 320, dont un sur quatre est un **repère rouge** deux fois plus épais —
+à 80, 160, 240 et 320 px. Quatre rayons blancs et un point central disent si l'image est centrée.
+Les quatre coins sont en rouge sombre : en voir un dirait que la dalle n'est pas ronde.
+
+⚠️ **Elle se photographie, elle ne se lit pas.** Compter seize anneaux fins à l'œil derrière une
+vitre teintée est une source d'erreur à soi seule ; sur une photo prise bien en face, on compte les
+repères rouges et on ajoute les anneaux fins qui restent.
+
+⚠️ **Une première version couvrait le seul quart extérieur** — neuf bandes colorées entre 248 et
+320 — et laissait le centre noir. Essayée sur SHYNAEL le 2026-08-09, elle n'a **rien montré** : du
+noir rétroéclairé. Une mire qui ne sait mesurer que ce qu'elle présuppose confond son résultat avec
+une panne. Celle-ci couvre le disque entier.
 
 ⚠️ **La mire des quadrants ne pouvait pas répondre à cette question** — un disque montre ses quatre
 quadrants exactement comme un carré. D'où une seconde mire, et non un réglage de la première.

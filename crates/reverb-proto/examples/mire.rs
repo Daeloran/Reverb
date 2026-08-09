@@ -15,7 +15,9 @@ use reverb_proto::screen;
 
 fn main() -> std::io::Result<()> {
     let mut arguments = std::env::args().skip(1);
-    let chemin = arguments.next().unwrap_or_else(|| "/tmp/mire.ppm".to_owned());
+    let chemin = arguments
+        .next()
+        .unwrap_or_else(|| "/tmp/mire.ppm".to_owned());
     let laquelle = arguments.next().unwrap_or_else(|| "cercle".to_owned());
 
     let image = match laquelle.as_str() {
