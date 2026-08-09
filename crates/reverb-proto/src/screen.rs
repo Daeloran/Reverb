@@ -252,39 +252,23 @@ pub fn test_pattern() -> Vec<u8> {
 // La mire qui mesure le disque visible (issue #77, étape 1)
 // ---------------------------------------------------------------------------
 
-/// Le rayon où commence la première bande de la mire de mesure.
+/// L'écart entre deux anneaux de la mire, en pixels du tampon.
 ///
-/// Assez bas pour qu'au moins une bande soit vue sur n'importe quelle dalle
-/// plausible, assez haut pour que les neuf bandes tiennent en 8 pixels chacune.
-pub const MIRE_RAYON_MINIMAL: u16 = 248;
+/// Vingt : sur une dalle de six centimètres, deux anneaux distants de vingt
+/// pixels sont à moins de deux millimètres l'un de l'autre. C'est fin, et c'est
+/// voulu — la mire n'est pas faite pour être lue à l'œil mais **photographiée**,
+/// et une photo se mesure au pixel.
+pub const MIRE_PAS: u16 = 20;
 
-/// L'épaisseur d'une bande, donc la précision de la mesure.
+/// Un anneau sur quatre est un repère : rouge, et deux fois plus épais.
 ///
-/// Huit pixels : la réponse sera connue à ±4, ce qui suffit très largement pour
-/// décider entre « le disque est inscrit » et « il est plus petit ». Des bandes
-/// plus fines seraient indiscernables à l'œil sur six centimètres.
-pub const MIRE_BANDE: u16 = 8;
+/// ⚠️ **Sans lui, compter seize anneaux sur une photo est une source d'erreur à
+/// elle seule.** Avec, on compte quatre repères et on ajoute les anneaux fins qui
+/// restent — ce qui ne se trompe pas.
+pub const MIRE_REPERE_TOUS_LES: u16 = 4;
 
-/// Les bandes de la mire, de la plus intérieure à la plus extérieure.
-///
-/// ⚠️ **Nommées, et non seulement colorées.** La mesure se fait à l'œil nu
-/// devant un boîtier : l'observateur dit « je vois jusqu'à l'orange », pas
-/// « je vois jusqu'à `(255, 128, 0)` ». Le nom est donc le résultat de la
-/// mesure, et la ligne de commande imprime la correspondance.
-///
-/// Choisies pour rester distinctes même photographiées derrière un panneau
-/// teinté : aucune paire n'est voisine en teinte, et aucune n'est sombre.
-pub const MIRE_BANDES: [(&str, (u8, u8, u8)); 9] = [
-    ("blanc", (255, 255, 255)),
-    ("rouge", (255, 40, 40)),
-    ("orange", (255, 140, 0)),
-    ("jaune", (255, 240, 0)),
-    ("vert", (0, 220, 60)),
-    ("cyan", (0, 230, 230)),
-    ("bleu", (60, 120, 255)),
-    ("magenta", (255, 60, 220)),
-    ("gris", (160, 160, 160)),
-];
+/// Le nombre d'anneaux, du centre au disque inscrit.
+pub const MIRE_ANNEAUX: u16 = VISIBLE_DISC_RADIUS / MIRE_PAS;
 
 /// La couleur des quatre coins, hors du disque quel qu'il soit.
 ///
@@ -292,9 +276,15 @@ pub const MIRE_BANDES: [(&str, (u8, u8, u8)); 9] = [
 /// disque — et toute la géométrie de #80 serait à refaire.
 pub const MIRE_COINS: (u8, u8, u8) = (120, 0, 0);
 
-/// Le rayon extérieur d'une bande, la première étant la plus intérieure.
-pub fn mire_rayon(bande: usize) -> u16 {
-    MIRE_RAYON_MINIMAL + MIRE_BANDE * (bande as u16 + 1)
+/// La couleur d'un anneau ordinaire.
+pub const MIRE_ANNEAU: (u8, u8, u8) = (255, 255, 255);
+
+/// Celle d'un repère.
+pub const MIRE_REPERE: (u8, u8, u8) = (255, 40, 40);
+
+/// Le rayon du n-ième anneau, le premier étant le plus intérieur.
+pub fn mire_rayon(anneau: u16) -> u16 {
+    MIRE_PAS * (anneau + 1)
 }
 
 /// Engendre la mire qui **mesure le rayon du disque visible** (issue #77).
@@ -306,15 +296,26 @@ pub fn mire_rayon(bande: usize) -> u16 {
 /// inscrit à 320, ou plus petit ? La mire des quadrants ne tranche pas — un
 /// disque montre ses quatre quadrants exactement comme un carré.
 ///
-/// Celle-ci pose des **anneaux concentriques de couleurs nommées**, de 8 pixels
-/// chacun. L'observateur dit quelle est la dernière couleur qu'il voit
-/// entièrement, et le rayon s'en déduit à ±4 pixels. C'est une mesure faite à
-/// l'œil, et c'est le seul instrument dont on dispose.
+/// # ⚠️ Ce que la première version de cette mire a raté
 ///
-/// Au centre, une croix blanche : elle dit du même coup si l'image est centrée
-/// sur la dalle, ce qu'aucune bande ne montrerait.
+/// Elle posait neuf bandes colorées **entre 248 et 320**, c'est-à-dire dans le
+/// quart extérieur du tampon, et laissait tout le centre noir. Essayée sur
+/// SHYNAEL le 2026-08-09 : **rien de visible, du noir rétroéclairé**. La mire ne
+/// savait mesurer que ce qu'elle présupposait — si le disque est plus petit que
+/// 248, elle n'affiche rien du tout, et son résultat se confond avec une panne.
+///
+/// Celle-ci couvre le disque **entier**. Quelle que soit la réponse, il y a
+/// quelque chose à voir.
+///
+/// # Faite pour être photographiée, pas lue
+///
+/// L'autre défaut de la première était de demander à un humain de nommer une
+/// couleur à travers une vitre teintée. Des anneaux fins régulièrement espacés,
+/// avec un repère plus épais tous les quatre, se **mesurent sur une photo** — ce
+/// qui est plus précis et demande moins.
 pub fn mire_cercle() -> Vec<u8> {
     let centre = f32::from(WIDTH) / 2.0;
+    let pas = f32::from(MIRE_PAS);
     let mut image = Vec::with_capacity(IMAGE_LEN);
 
     for y in 0..usize::from(HEIGHT) {
@@ -323,20 +324,32 @@ pub fn mire_cercle() -> Vec<u8> {
             let dy = y as f32 + 0.5 - centre;
             let rayon = dx.hypot(dy);
 
-            // La croix centrale : deux traits de trois pixels, sur cent de long.
-            let croix = dx.abs() < 1.5 && dy.abs() < 50.0 || dy.abs() < 1.5 && dx.abs() < 50.0;
+            // Les quatre rayons, du centre au bord : ils donnent le centre et
+            // l'orientation d'un seul coup d'œil sur la photo.
+            let rayon_trace =
+                (dx.abs() < 1.5 || dy.abs() < 1.5) && rayon < f32::from(VISIBLE_DISC_RADIUS);
+            // Le point central, pour dire si l'image est centrée sur la dalle.
+            let mille = rayon < 5.0;
 
-            let (r, g, b) = if croix {
-                (255, 255, 255)
-            } else if rayon < f32::from(MIRE_RAYON_MINIMAL) {
-                // Le cœur reste noir : ce qu'on mesure est au bord.
-                (0, 0, 0)
+            // À quel anneau ce pixel appartient-il, s'il en touche un ?
+            let rang = (rayon / pas).round();
+            let ecart = (rayon - rang * pas).abs();
+            let anneau = rang as u16;
+            let repere = anneau > 0 && anneau.is_multiple_of(MIRE_REPERE_TOUS_LES);
+            let epaisseur = if repere { 2.0 } else { 1.0 };
+            let sur_un_anneau = (1..=MIRE_ANNEAUX).contains(&anneau) && ecart <= epaisseur;
+
+            // ⚠️ **Les anneaux avant les coins.** Le dernier tombe exactement
+            // sur le disque inscrit : tester les coins d'abord le mangerait à
+            // moitié, et c'est justement celui qui répond à la question.
+            let (r, g, b) = if mille || rayon_trace {
+                MIRE_ANNEAU
+            } else if sur_un_anneau {
+                if repere { MIRE_REPERE } else { MIRE_ANNEAU }
+            } else if rayon > f32::from(VISIBLE_DISC_RADIUS) {
+                MIRE_COINS
             } else {
-                let bande =
-                    ((rayon - f32::from(MIRE_RAYON_MINIMAL)) / f32::from(MIRE_BANDE)) as usize;
-                MIRE_BANDES
-                    .get(bande)
-                    .map_or(MIRE_COINS, |(_, couleur)| *couleur)
+                (0, 0, 0)
             };
             image.extend_from_slice(&pixel(r, g, b));
         }

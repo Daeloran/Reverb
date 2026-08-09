@@ -643,18 +643,35 @@ fn piloter_ecran(action: ActionEcran) -> Result<(), String> {
             // mire lisible : sans elle, on regarde neuf anneaux colorés sans
             // savoir à quel rayon chacun correspond, et la mesure ne se fait
             // pas. L'imprimer après supposerait que l'envoi réussisse.
+            // ⚠️ **Cette mire se photographie, elle ne se lit pas.** La
+            // première version demandait de nommer une couleur à l'œil derrière
+            // une vitre teintée, et posait ses bandes dans le seul quart
+            // extérieur : essayée sur SHYNAEL, elle n'a rien montré du tout.
             println!("Mire de mesure du disque visible (issue #77).");
-            println!("Dis la dernière couleur que tu vois ENTIÈREMENT, du centre vers le bord :");
-            for (rang, (nom, _)) in screen::MIRE_BANDES.iter().enumerate() {
-                println!(
-                    "  {nom:<8} → le disque visible atteint au moins {} px de rayon",
-                    screen::mire_rayon(rang)
-                );
-            }
+            println!();
             println!(
-                "Les quatre coins sont rouge sombre : si tu en vois un, la dalle n'est pas ronde."
+                "  {} anneaux blancs, un tous les {} px de rayon.",
+                screen::MIRE_ANNEAUX,
+                screen::MIRE_PAS
             );
-            println!("La croix blanche au centre dit si l'image est bien centrée.");
+            println!(
+                "  Un anneau sur {} est un repère ROUGE, deux fois plus épais :",
+                screen::MIRE_REPERE_TOUS_LES
+            );
+            let mut reperes = Vec::new();
+            for anneau in 0..screen::MIRE_ANNEAUX {
+                if (anneau + 1).is_multiple_of(screen::MIRE_REPERE_TOUS_LES) {
+                    reperes.push(format!("{} px", screen::mire_rayon(anneau)));
+                }
+            }
+            println!("    {}", reperes.join(", "));
+            println!();
+            println!("  → PHOTOGRAPHIE la dalle bien en face, et compte les repères rouges.");
+            println!("  → Les quatre coins sont rouge sombre : en voir un dirait que la");
+            println!("    dalle n'est pas ronde.");
+            println!("  → Les quatre rayons blancs et le point central disent si l'image");
+            println!("    est centrée sur la dalle.");
+            println!();
             diffuser(&screen::mire_cercle(), once)
         }
     }
