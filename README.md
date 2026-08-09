@@ -731,9 +731,25 @@ ne reprenne la main.
 ### Ce qui reste en direct
 
 `reverb screen --mire` affiche quatre quadrants de couleurs connues. C'est la mire qui a confirmé
-l'ordre BGR, que la rétro-ingénierie n'avait jamais pu vérifier. Elle n'est **pas** dans le
-protocole — c'est un outil de diagnostic — et elle écrit donc en direct, ce qui suppose le démon
-arrêté : le nœud USB ne se réclame pas deux fois.
+l'ordre BGR, que la rétro-ingénierie n'avait jamais pu vérifier.
+
+`reverb screen --mire=cercle` **mesure le rayon du disque visible** : neuf anneaux de huit pixels,
+nommés — blanc, rouge, orange, jaune, vert, cyan, bleu, magenta, gris —, de 248 à 320 px de rayon.
+On dit la dernière couleur qu'on voit entièrement, et la ligne de commande imprime la
+correspondance. Les quatre coins sont en rouge sombre : en voir un dirait que la dalle n'est pas
+ronde. Une croix blanche au centre dit si l'image est centrée.
+
+⚠️ **La mire des quadrants ne pouvait pas répondre à cette question** — un disque montre ses quatre
+quadrants exactement comme un carré. D'où une seconde mire, et non un réglage de la première.
+
+```bash
+cargo run --release --example mire -p reverb-proto -- /tmp/mire.ppm cercle
+```
+
+la rend dans un fichier, sans matériel : une mire se regarde avant de se brancher.
+
+Ni l'une ni l'autre n'est dans le protocole — ce sont des outils de diagnostic — et elles écrivent
+donc en direct, ce qui suppose le démon arrêté : le nœud USB ne se réclame pas deux fois.
 
 Sans démon, `reverb screen` retrouve tout ce qu'il savait faire seul : l'état lu sur le
 contrôleur, la luminosité, et une image **brute** de 1 228 800 octets en BGR, telle que

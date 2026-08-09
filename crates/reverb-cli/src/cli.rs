@@ -88,6 +88,8 @@ pub enum ActionEcran {
     },
     /// Affiche la mire de quadrants qui a tranché l'ordre des composantes.
     Mire { once: bool },
+    /// Affiche la mire d'anneaux qui **mesure** le rayon du disque visible.
+    MireCercle { once: bool },
     /// Joue un GIF en boucle. **Passe par le démon**, qui seul décode.
     Gif { chemin: std::path::PathBuf },
     /// Affiche un cadran sur une sonde. **Passe par le démon**, qui seul lit.
@@ -143,6 +145,7 @@ USAGE :
     reverb screen --brightness <0-100>
     reverb screen --image <FICHIER.raw> [--once]
     reverb screen --mire [--once]
+    reverb screen --mire=cercle [--once]
     reverb ram
     reverb ram   --all|--slot <0-3> --color <HEX>
     reverb ram   --slot <0-3> --colors <11 HEX>
@@ -175,6 +178,10 @@ OPTIONS de « screen » — écran du Kraken (aucun droit root nécessaire) :
                           ni PNG ni JPEG :
                             ffmpeg -i img.png -vf scale=640:640 \
                                    -f rawvideo -pix_fmt bgr24 img.raw
+    --mire=cercle         mire d'anneaux nommés qui MESURE le rayon du disque
+                          visible : neuf bandes de huit pixels, de 248 à 320. On
+                          dit la dernière couleur qu'on voit entièrement, et la
+                          ligne de commande imprime la correspondance.
     --mire                mire de quadrants — rouge, vert, bleu, blanc — qui
                           tranche l'ordre des composantes. Si le quadrant
                           haut-gauche apparaît bleu, l'ordre est inversé
@@ -364,12 +371,18 @@ fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String>
     let mut sonde: Option<String> = None;
     let mut eteindre = false;
     let mut mire = false;
+    let mut cercle = false;
     let mut once = false;
 
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--once" => once = true,
             "--mire" => mire = true,
+            // ⚠️ **Deux mires, et elles ne répondent pas à la même question.**
+            // Celle des quadrants a tranché l'ordre des composantes ; celle-ci
+            // mesure le rayon du disque visible, ce qu'un damier ne peut pas
+            // faire — un disque montre ses quatre quadrants comme un carré.
+            "--mire=cercle" => cercle = true,
             "--off" => eteindre = true,
             "--gif" => {
                 let brut = args
@@ -410,28 +423,35 @@ fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String>
         + usize::from(gif.is_some())
         + usize::from(sonde.is_some())
         + usize::from(eteindre)
-        + usize::from(mire);
+        + usize::from(mire)
+        + usize::from(cercle);
     if demandes > 1 {
         return Err(
             "« --brightness », « --image », « --gif », « --gauge », « --off » et \
-             « --mire » s'excluent. Régler la luminosité AVANT d'envoyer l'image, en deux \
+             les mires s'excluent. Régler la luminosité AVANT d'envoyer l'image, en deux \
              commandes : un changement de luminosité réinitialise l'affichage."
                 .to_owned(),
         );
     }
 
-    let action = match (luminosite, image, gif, sonde, eteindre, mire) {
+    let action = match (luminosite, image, gif, sonde, eteindre, mire, cercle) {
         (Some(percent), ..) => ActionEcran::Luminosite(percent),
         (_, Some(chemin), ..) => ActionEcran::Image { chemin, once },
         (_, _, Some(chemin), ..) => ActionEcran::Gif { chemin },
         (_, _, _, Some(sonde), ..) => ActionEcran::Cadran { sonde },
-        (_, _, _, _, true, _) => ActionEcran::Eteindre,
-        (.., true) => ActionEcran::Mire { once },
+        (_, _, _, _, true, ..) => ActionEcran::Eteindre,
+        (.., true, _) => ActionEcran::Mire { once },
+        (.., true) => ActionEcran::MireCercle { once },
         _ => ActionEcran::Etat,
     };
 
-    if once && !matches!(action, ActionEcran::Image { .. } | ActionEcran::Mire { .. }) {
-        return Err("« --once » ne s'applique qu'à « --image » ou « --mire ».".to_owned());
+    if once
+        && !matches!(
+            action,
+            ActionEcran::Image { .. } | ActionEcran::Mire { .. } | ActionEcran::MireCercle { .. }
+        )
+    {
+        return Err("« --once » ne s'applique qu'à « --image » ou à une mire.".to_owned());
     }
 
     Ok(Command::Screen { action })

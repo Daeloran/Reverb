@@ -110,12 +110,13 @@ fn ceder_le_pas(commande: &Command) -> Result<(), String> {
             | Command::Fan { .. }
             | Command::Curve { .. }
             | Command::Ram { .. }
-            // La mire est la seule commande d'écran qui ne passe pas par le
-            // socket : c'est un outil de diagnostic, et elle n'a pas sa place
-            // dans le protocole. Elle écrit donc en direct, ce qui suppose un
-            // démon arrêté — le nœud USB ne se réclame pas deux fois.
+            // Les mires sont les seules commandes d'écran qui ne passent pas
+            // par le socket : ce sont des outils de diagnostic, et elles n'ont
+            // pas leur place dans le protocole. Elles écrivent donc en direct,
+            // ce qui suppose un démon arrêté — le nœud USB ne se réclame pas
+            // deux fois.
             | Command::Screen {
-                action: ActionEcran::Mire { .. }
+                action: ActionEcran::Mire { .. } | ActionEcran::MireCercle { .. }
             }
     );
     if !ecrit {
@@ -637,6 +638,25 @@ fn piloter_ecran(action: ActionEcran) -> Result<(), String> {
             diffuser(&donnees, once)
         }
         ActionEcran::Mire { once } => diffuser(&screen::test_pattern(), once),
+        ActionEcran::MireCercle { once } => {
+            // ⚠️ **La légende s'imprime avant l'envoi.** C'est elle qui rend la
+            // mire lisible : sans elle, on regarde neuf anneaux colorés sans
+            // savoir à quel rayon chacun correspond, et la mesure ne se fait
+            // pas. L'imprimer après supposerait que l'envoi réussisse.
+            println!("Mire de mesure du disque visible (issue #77).");
+            println!("Dis la dernière couleur que tu vois ENTIÈREMENT, du centre vers le bord :");
+            for (rang, (nom, _)) in screen::MIRE_BANDES.iter().enumerate() {
+                println!(
+                    "  {nom:<8} → le disque visible atteint au moins {} px de rayon",
+                    screen::mire_rayon(rang)
+                );
+            }
+            println!(
+                "Les quatre coins sont rouge sombre : si tu en vois un, la dalle n'est pas ronde."
+            );
+            println!("La croix blanche au centre dit si l'image est bien centrée.");
+            diffuser(&screen::mire_cercle(), once)
+        }
     }
 }
 
@@ -674,7 +694,7 @@ fn requete_d_ecran(action: &ActionEcran) -> Result<Option<Request>, String> {
         ActionEcran::Gif { chemin } => Some(Request::Screen(ScreenAction::Gif(absolu(chemin)?))),
         ActionEcran::Cadran { sonde } => Some(Request::Screen(ScreenAction::Gauge(sonde.clone()))),
         ActionEcran::Eteindre => Some(Request::Screen(ScreenAction::Off)),
-        ActionEcran::Mire { .. } => None,
+        ActionEcran::Mire { .. } | ActionEcran::MireCercle { .. } => None,
     })
 }
 
