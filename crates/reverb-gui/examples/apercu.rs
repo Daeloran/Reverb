@@ -346,6 +346,29 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     interface.set_libelle_champ(SharedString::from("GPU"));
     interface.set_ancre_visee(SharedString::from("droite"));
 
+    // `REVERB_TRACE=x0,y0,x1,y1` pose un geste de sélection **en cours**, en
+    // fractions de la maquette.
+    //
+    // ⚠️ **C'est ce qui manquait pour que #76 soit vérifiable.** Ce rectangle ne
+    // vit que pendant un appui de souris : aucune des quatre autres variables ne
+    // pouvait le montrer, et personne n'a donc pu constater qu'il restait large
+    // de zéro. Un correctif de couleur avait été livré, et n'avait rien corrigé.
+    if let Ok(trace) = std::env::var("REVERB_TRACE") {
+        let coins: Vec<f32> = trace
+            .split(',')
+            .filter_map(|nombre| nombre.trim().parse().ok())
+            .collect();
+        if let [x0, y0, x1, y1] = coins[..] {
+            interface.set_trace_x0(x0);
+            interface.set_trace_y0(y0);
+            interface.set_trace_x1(x1);
+            interface.set_trace_y1(y1);
+            interface.set_trace(true);
+        } else {
+            eprintln!("REVERB_TRACE attend quatre fractions séparées par des virgules");
+        }
+    }
+
     // `REVERB_AFFICHAGE=composition` déroule le panneau de composition ; sinon
     // c'est le cadran, l'affichage le plus courant.
     if std::env::var("REVERB_AFFICHAGE").as_deref() == Ok("composition") {
@@ -426,10 +449,14 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     ])));
     interface.set_cible(SharedString::from("la zone « radiateur »"));
     interface.set_animation_courante(SharedString::from("Comète"));
-    interface.set_message(SharedString::from(if vraies.is_some() {
-        "aperçu de la vraie image, prise sur le socket"
-    } else {
-        "aperçu hors ligne — aucun démon interrogé"
+    // `REVERB_MESSAGE=` (vide) montre la tête de fenêtre telle qu'elle est au
+    // repos — c'est-à-dire au moment où la pastille verte est la seule chose à
+    // lire, et où son libellé doit donc apparaître. Sans ça, l'aperçu porte
+    // toujours un message et ne montre jamais le repli.
+    interface.set_message(SharedString::from(match std::env::var("REVERB_MESSAGE") {
+        Ok(pose) => pose,
+        Err(_) if vraies.is_some() => "aperçu de la vraie image, prise sur le socket".to_owned(),
+        Err(_) => "aperçu hors ligne — aucun démon interrogé".to_owned(),
     }));
     interface.set_connecte(true);
 }

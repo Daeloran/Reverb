@@ -318,6 +318,18 @@ export component Fenetre inherits Window {
     // Lequel des trois onglets du panneau de droite est ouvert.
     in-out property <int> onglet: 0;
 
+    // Le trace en cours, en **fractions** de la maquette — jamais en pixels.
+    //
+    // Il vit sur `root` et non dans la `TouchArea` pour une raison qui n'est pas
+    // esthetique : #76 avait cru rendre le rectangle visible en montant son
+    // opacite, et personne n'a pu constater qu'il restait large de zero. Pose
+    // ici, `apercu` sait le dessiner sans souris ni session graphique.
+    in-out property <bool> trace;
+    in-out property <float> trace-x0;
+    in-out property <float> trace-y0;
+    in-out property <float> trace-x1;
+    in-out property <float> trace-y1;
+
     // Le geste sur la maquette : deux coins et « faut-il ajouter a la selection ».
     // Un clic est un rectangle de cote nul — c'est le meme geste, et les
     // distinguer dans le Slint dupliquerait la regle des deux cotes.
@@ -395,8 +407,14 @@ export component Fenetre inherits Window {
                 background: root.connecte ? #35c46a : #d9534f;
                 y: (parent.height - self.height) / 2;
             }
+            // ⚠️ **Un message reel prend toujours le pas.** Le libelle de
+            // connexion n'est qu'un repli : sans lui, le seul moyen d'apprendre
+            // ce que signifie la pastille verte etait de la voir passer au
+            // rouge — un indicateur qui n'enseigne son sens qu'au pire moment.
             Text {
-                text: root.message;
+                text: root.message != ""
+                    ? root.message
+                    : (root.connecte ? "Démon connecté" : "Démon injoignable");
                 font-size: 12px;
                 color: root.connecte ? #8a8c9b : #ffb3b0;
                 vertical-alignment: center;
@@ -703,15 +721,22 @@ export component Fenetre inherits Window {
                                 // Le rectangle en cours de tracé. Il ne vit que pendant
                                 // le geste : ce qu'il attrape n'est décidé qu'au
                                 // relâchement, par `plan.rs`.
-                                // ⚠️ Le trace se voyait a peine : un remplissage
-                                // a 12 % d'opacite et un trait d'un pixel, sur
-                                // une maquette qui brille de cent vingt-quatre
-                                // halos. On ne savait pas qu'on selectionnait.
-                                if zone.trace: Rectangle {
-                                    x: min(zone.depart-x, zone.pressed-x);
-                                    y: min(zone.depart-y, zone.pressed-y);
-                                    width: abs(zone.pressed-x - zone.depart-x);
-                                    height: abs(zone.pressed-y - zone.depart-y);
+                                //
+                                // ⚠️ **Le coin mobile est `mouse-x`, jamais `pressed-x`.**
+                                // En Slint, `pressed-x` est la position de l'APPUI ;
+                                // c'est `mouse-x` qui suit le curseur. Et `depart-x`
+                                // est justement capte a l'appui, depuis `mouse-x` :
+                                // les deux coins etaient donc le meme point, et le
+                                // rectangle avait une largeur nulle pendant tout le
+                                // geste. #76 avait deja tente de le rendre visible en
+                                // montant l'opacite et en ajoutant des poignees — sans
+                                // effet, forcement : aucune couleur ne rend visible un
+                                // rectangle de largeur zero.
+                                if root.trace: Rectangle {
+                                    x: min(root.trace-x0, root.trace-x1) * parent.width;
+                                    y: min(root.trace-y0, root.trace-y1) * parent.height;
+                                    width: abs(root.trace-x1 - root.trace-x0) * parent.width;
+                                    height: abs(root.trace-y1 - root.trace-y0) * parent.height;
                                     background: #4d7cff38;
                                     border-width: 2px;
                                     border-color: #8fb0ff;
@@ -740,22 +765,31 @@ export component Fenetre inherits Window {
                                     }
 
                                     zone := TouchArea {
-                                        property <length> depart-x;
-                                        property <length> depart-y;
-                                        property <bool> trace: false;
+                                        moved => {
+                                            // Le coin mobile, a chaque deplacement.
+                                            // C'est la seule chose qui rende le
+                                            // rectangle vivant : `pressed-x` ne bouge
+                                            // pas d'un pixel pendant le geste.
+                                            if (root.trace) {
+                                                root.trace-x1 = self.mouse-x / self.width;
+                                                root.trace-y1 = self.mouse-y / self.height;
+                                            }
+                                        }
 
                                         pointer-event(evenement) => {
                                             clavier.focus();
                                             if (evenement.kind == PointerEventKind.down) {
-                                                self.depart-x = self.mouse-x;
-                                                self.depart-y = self.mouse-y;
-                                                self.trace = true;
+                                                root.trace-x0 = self.mouse-x / self.width;
+                                                root.trace-y0 = self.mouse-y / self.height;
+                                                root.trace-x1 = root.trace-x0;
+                                                root.trace-y1 = root.trace-y0;
+                                                root.trace = true;
                                             }
                                             if (evenement.kind == PointerEventKind.up) {
-                                                self.trace = false;
+                                                root.trace = false;
                                                 root.geste-maquette(
-                                                    self.depart-x / self.width,
-                                                    self.depart-y / self.height,
+                                                    root.trace-x0,
+                                                    root.trace-y0,
                                                     self.mouse-x / self.width,
                                                     self.mouse-y / self.height,
                                                     root.ajout
