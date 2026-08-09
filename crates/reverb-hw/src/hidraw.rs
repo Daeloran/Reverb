@@ -216,14 +216,19 @@ impl OpenController {
 ///
 /// Ces contrôleurs **émettent sans qu'on leur demande** — un rapport d'état des
 /// ventilateurs `67 02` par seconde et par contrôleur (`SPEC-PROTOCOLE-NZXT`
-/// §7.1), des accusés `ff 01` (§7.2). Une réponse à une question n'est donc pas
-/// forcément la première trame qui arrive, et il faut savoir en écarter quelques
-/// unes.
+/// §7.1), des accusés `ff 01` (§7.2), et sur le Kraken un `75 02` mesuré au
+/// milieu de l'attente d'un accusé d'image (`SPEC-KRAKEN-LCD` §7). Une réponse à
+/// une question n'est donc pas forcément la première trame qui arrive.
+///
+/// **Huit, et non plus vingt.** Le relevé du 2026-08-09 n'a jamais vu qu'**une
+/// seule** trame écartée avant un accusé. Vingt n'était pas une marge, c'était un
+/// chiffre : multiplié par [`DELAI_LECTURE`], il donnait un pire cas plus long
+/// que le repli du firmware, donc une borne qui ne bornait plus rien d'utile.
 ///
 /// ⚠️ **Cette borne compte des trames, jamais du temps** — voir
 /// [`DELAI_LECTURE`], qui est l'autre moitié, et sans laquelle celle-ci ne borne
 /// rien du tout.
-pub const MAX_LECTURES: usize = 20;
+pub const MAX_LECTURES: usize = 8;
 
 /// Le temps laissé à **une** trame pour arriver.
 ///
@@ -237,20 +242,48 @@ pub const MAX_LECTURES: usize = 20;
 /// pas échouer la lecture — il la fait attendre. Vingt lectures dont la première
 /// ne revient jamais, c'est une attente infinie déguisée en boucle bornée.
 ///
-/// # Pourquoi une demi-seconde
+/// # Pourquoi deux secondes, et ce que la première valeur a coûté
 ///
-/// Le pire acquittement relevé est de **18 ms** (`SPEC-KRAKEN-LCD` §3.2 :
-/// 3 ms pour `36 01` → `37 01`, 18 ms pour `36 02` → `37 02`). Une demi-seconde
-/// en laisse vingt-sept fois plus.
+/// ⚠️ **Une demi-seconde a été essayée, et elle éteignait l'écran.** Elle venait
+/// des 18 ms que relève `SPEC-KRAKEN-LCD` §3.2 pour `36 02` → `37 02` — une
+/// mesure faite sous Windows, et qui ne décrit pas ce matériel-ci. Relevé sur
+/// SHYNAEL le 2026-08-09, en journalisant chaque accusé :
 ///
-/// ⚠️ **Le délai vaut par lecture, pas pour la question entière**, si bien que le
-/// pire cas est `DELAI_LECTURE × MAX_LECTURES`, soit dix secondes. C'est
-/// délibéré : un périphérique vivant mais bavard ne doit pas être déclaré mort,
-/// parce que trois questions expirées font **rendre la dalle au firmware** (#70).
-/// Dix secondes restent sous les [`reverb_proto::screen::FIRMWARE_FALLBACK_SECS`]
-/// au bout desquelles le firmware la reprend de toute façon — au-delà, insister
-/// ne servirait plus à rien.
-pub const DELAI_LECTURE: Duration = Duration::from_millis(500);
+/// | accusé | latence mesurée | trames écartées |
+/// |---|---|---|
+/// | `37 01`, l'annonce | **2 ms**, invariablement | 0 |
+/// | `37 02`, la validation | **98 ms**, puis **1,17 s**, puis **1,17 s** | 0, puis 1, puis 1 |
+///
+/// La validation suit les 1 228 800 octets : le contrôleur digère l'image avant
+/// d'accuser, et il y met jusqu'à **soixante-cinq fois** ce que la spec annonce.
+/// Le créneau d'attente le plus long relevé — entre `36 02` et la première trame
+/// reçue — est de **673 ms**, juste au-dessus des 500 ms fixées. D'où trois faux
+/// refus, l'abandon de #70, et la dalle rendue au firmware au bout d'une
+/// trentaine de secondes alors que **l'image s'affichait correctement**.
+///
+/// Deux secondes laissent trois fois le pire créneau relevé.
+///
+/// ⚠️ **Le délai vaut par lecture, pas pour la question entière.** Le pire cas est
+/// `DELAI_LECTURE × MAX_LECTURES`, soit seize secondes, et il reste sous les
+/// [`reverb_proto::screen::FIRMWARE_FALLBACK_SECS`] au bout desquelles le
+/// firmware reprend la dalle de toute façon. C'est délibéré : un périphérique
+/// vivant mais bavard ne doit pas être déclaré mort, parce que trois questions
+/// expirées font **rendre la dalle au firmware** (#70) — et c'est exactement ce
+/// qui vient d'arriver.
+pub const DELAI_LECTURE: Duration = Duration::from_secs(2);
+
+/// Le pire cas d'une question doit rester sous le repli du firmware.
+///
+/// Vérifié à la **compilation**, et non par un test : ces deux constantes se
+/// règlent séparément — l'une sur une latence mesurée, l'autre sur un nombre de
+/// trames observé — et rien n'empêcherait leur produit de dériver au fil des
+/// relevés. Passé les trente secondes, le firmware a repris la dalle : insister
+/// au-delà, c'est attendre l'accusé d'un affichage qui n'existe plus.
+const _: () = assert!(
+    DELAI_LECTURE.as_millis() as u64 * MAX_LECTURES as u64
+        <= reverb_proto::screen::FIRMWARE_FALLBACK_SECS * 1000,
+    "DELAI_LECTURE × MAX_LECTURES dépasse le repli du firmware"
+);
 
 /// Entre deux tentatives de lecture sur un descripteur non bloquant.
 ///
