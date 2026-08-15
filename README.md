@@ -306,23 +306,78 @@ cohérentes. Tctl saute de 20 °C entre deux secondes sur un Zen 5 et demanderai
 les 250 ms au repos, un par image sous animation — et relit le liquide au plus une fois par seconde.
 Sans canal régulé, elle rend la main avant même de lire l'horloge : le démon reste au repos absolu.
 
-⚠️ **On n'écrit que ce qui change**, comme le cache de LED : aucune de ces cibles n'a de watchdog, et
-le tour passe une fois par seconde — l'écart entre une régulation qui se tait et une qui réécrit,
-c'est 86 400 trames par jour pour rien.
+⚠️ **On n'écrit que ce que le canal ne porte pas** — et non ce qu'on a cru y écrire. Le tour relit
+chacun des canaux régulés, compare la consigne à ce que le matériel porte vraiment, et n'écrit que
+l'écart. Le silence reste celui du cache de LED — aucune de ces cibles n'a de watchdog, et le tour
+passe une fois par seconde, soit 86 400 trames par jour pour rien —, mais il est désormais vrai du
+matériel et non de nos intentions.
+
+Parce que l'autre version était fausse, mesuré sur SHYNAEL le 2026-08-15 à 15:52, machine au repos :
+
+```
+journal   régulation : nzxtsmart2:fan-3 à 46 % (liquide 40.2 °C)
+sysfs     pwm3 = 130  →  51 %
+```
+
+`fs::write` sur `pwmN` avait rendu `Ok` sans que le matériel applique — piste : `nzxt-smart2`
+regroupe les duty de ses canaux dans un même rapport HID. La consigne calculée ne changeant plus, le
+cache disait « déjà écrit » et **rien n'était jamais réémis** : le canal est resté figé sur une
+consigne d'il y a plusieurs minutes pendant que le démon en annonçait une autre, sans une erreur
+nulle part. C'est la leçon que [`docs/VENTILATEURS.md`](docs/VENTILATEURS.md) avait tirée le
+2026-07-30 — « restaurer une valeur n'est pas restaurer un comportement » — reprise par l'autre bout.
+
+Ce que la relecture achète, et ce qu'elle coûte :
+
+- une consigne qui n'a pas pris est **rejouée au tour suivant**, indéfiniment et sans intervention.
+  Un plafond de tentatives recréerait le défaut qu'on corrige : un canal abandonné en silence à son
+  duty d'allumage ;
+- **la comparaison est exacte**, sans tolérance : l'aller-retour pourcentage → duty → pourcentage
+  est l'identité sur les 101 valeurs — un point vaut 2,55 pas de duty, le pas est expansif. Un écart
+  relu est donc un écart réel, jamais un artefact d'arrondi ;
+- **un canal qu'on ne sait pas relire n'est pas écrit.** Écrire là où on ne mesure pas, c'est refaire
+  le défaut à l'identique — annoncer une consigne sans aucun moyen de savoir si elle a pris. La
+  fenêtre l'affiche illisible (#100), et c'est plus honnête ;
+- le coût est une lecture sysfs par canal régulé et par tour — **0,001 s** sur `nzxtsmart2`, trois
+  ordres de grandeur sous les 5 s d'un contrôleur muet. Elle passe par la **quarantaine et sous la
+  même clef que `status`** (#88) : un canal qui se tairait est écarté une fois pour les deux chemins,
+  pas deux fois pour cinq secondes chacune. Et seuls les canaux **régulés** sont relus : relire tous
+  les canaux ferait payer chaque seconde une lecture du Kraken, celui-là même dont on sait qu'il se
+  tait ;
+- le journal, lui, ne se répète pas. Une réémission part à chaque tour, soit 86 400 lignes par jour
+  si on les imprimait toutes — le chiffre même qui justifiait le cache, retourné contre lui. Le démon
+  dit l'**entrée** dans l'épisode, en nommant ce que le canal portait, puis se tait, puis dit sa
+  **sortie** :
+
+```
+attention : régulation : « nzxtsmart2:fan-3 » porte 25 % alors qu'il a reçu 50 % — la consigne est
+rejouée à chaque tour, en silence, jusqu'à ce qu'elle prenne
+régulation : « nzxtsmart2:fan-3 » porte enfin sa consigne (50 %)
+```
+
+⚠️ **L'écart d'un point n'est pas traité ici**, et c'est un choix : la sonde du liquide oscille de
+0,3 °C au repos, ce qui a produit trente écritures en huit minutes le 2026-08-15. C'est l'hystérésis
+de #111 qui s'en chargera, et elle porte sur le **seuil** ; #110 porte sur ce **sur quoi** la
+décision se prend.
 
 ⚠️ **Un liquide illisible fait retomber la consigne à 50 %, jamais à la dernière valeur connue.**
 C'est le mode de défaillance rassurant que le projet refuse partout ailleurs : une consigne figée à
 30 % derrière une sonde morte, c'est un CPU qui chauffe sans que rien ne le signale — et le Kraken
-se plante périodiquement. Le repli part **une fois**, pas à chaque tour, et le retour de la sonde
-reprend la courbe sans redémarrage.
+se plante périodiquement. Le repli part **une fois** — puis, comme toute consigne, à chaque tour tant
+que le canal ne le porte pas —, et le retour de la sonde reprend la courbe sans redémarrage.
 
-⚠️ **`fan <canal> pwm …` reprend le canal**, et la régulation le lâche : sans cela elle réécrirait
-la valeur posée à la main au prochain changement de palier, et elle disparaîtrait sans explication.
+⚠️ **`fan <canal> pwm …` reprend le canal**, et la régulation le lâche : sans cela elle réécrirait la
+valeur posée à la main **au tour suivant**, une seconde plus tard, et elle disparaîtrait sans
+explication. C'est plus vrai depuis #110 qu'avant lui : la régulation ne compare plus à ce qu'elle a
+écrit, mais à ce que le canal porte — donc une valeur posée à la main lui apparaît exactement comme
+une consigne qui n'a pas pris.
 
 Les canaux régulés et la courbe vivent dans `/var/lib/reverb/regulation.conf`, relu au démarrage —
-et **le cache d'écriture n'y figure pas** : rien ne survit au redémarrage côté matériel, les canaux
-repartent à `pwm = 64`, et une régulation qui se souviendrait d'avoir déjà écrit 33 % les y
-laisserait jusqu'au prochain changement de palier. Un fichier tronqué ou répété est refusé **en
+et **ce qui a été écrit sur le bus n'y figure pas** : rien ne survit au redémarrage côté matériel,
+les canaux repartent à `pwm = 64`, et un démon qui se souviendrait d'avoir déjà écrit 33 % prendrait
+la reprise de ses trois canaux pour la réparation d'une écriture perdue — le journal dirait « fan-1
+porte 25 % alors qu'il a reçu 33 % » là où il doit dire que le démon vient de prendre ce canal. Ce
+que le fichier conserve, c'est l'**intention** : quels canaux, quelle courbe. Un fichier tronqué ou
+répété est refusé **en
 nommant l'entrée fautive**, et n'empêche jamais le démarrage : le démon part alors sans réguler,
 et le dit. Sans canal, il ne décide rien — poser 50 % sur des canaux qu'on n'a pas su relire serait
 choisir à la place de l'utilisateur.

@@ -25,6 +25,26 @@
 //! démon, seul à savoir ce que la machine expose et seul à payer les cinq
 //! secondes d'une sonde muette (#68).
 //!
+//! # Ce que le canal porte, et non ce qu'on a cru y écrire (issue #110)
+//!
+//! Le 2026-08-15, quelques minutes après le déploiement de #99, le journal
+//! annonçait les trois canaux à 50 % pendant que `nzxtsmart2:fan-3` portait 25 %.
+//! `fs::write` sur `pwmN` avait rendu `Ok` sans que le matériel applique ; le
+//! cache retenait l'intention, la consigne calculée ne changeait plus, et **rien
+//! n'était jamais réémis**.
+//!
+//! ⚠️ **Le défaut n'était pas qu'une écriture échoue, c'est qu'elle réussisse
+//! sans rien appliquer.** C'est la leçon que `docs/VENTILATEURS.md` avait déjà
+//! tirée le 2026-07-30 — « restaurer une valeur n'est pas restaurer un
+//! comportement », « toute sonde future doit **mesurer** l'état, pas le
+//! supposer » — reprise par l'autre bout.
+//!
+//! [`Regulation::tour`] reçoit donc en second paramètre ce que chaque canal
+//! **porte**, relu par le démon, et décide dessus. La relecture entre par la
+//! porte : la faire ici rendrait ce module dépendant d'un `hwmon`, donc
+//! intestable sans matériel — exactement ce que #99 avait acheté en rendant les
+//! écritures au lieu de les faire.
+//!
 //! # Millidegrés partout, jamais de degrés flottants
 //!
 //! `Sonde::lire` rend des millidegrés entiers, comme `hwmon` ; une conversion
@@ -258,20 +278,63 @@ impl fmt::Display for CourbeInvalide {
 
 impl std::error::Error for CourbeInvalide {}
 
-/// Une écriture à faire sur un canal, et rien de plus.
+/// Pourquoi cette écriture part (issue #110).
+///
+/// ⚠️ **Ce n'est pas une phrase de journal, c'est de quoi en écrire une juste.**
+/// Une consigne que le canal n'applique pas repart **à chaque tour**, donc une
+/// fois par seconde : 86 400 écritures par jour, et autant de lignes si
+/// l'appelant les traite toutes pareil — très exactement le chiffre que #99
+/// invoquait pour justifier son cache, retourné contre lui. Le motif laisse au
+/// démon le choix de n'imprimer que ce qui est neuf, comme
+/// [`crate::telemetrie::TourCanaux::a_signaler`] le fait pour la quarantaine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motif {
+    /// La consigne a changé — ou le canal vient d'être pris en charge.
+    Consigne,
+    /// La consigne n'a pas changé, mais le canal ne la porte pas : on rejoue.
+    ///
+    /// `porte` est ce que la relecture a rendu — les `25 %` qui manquaient au
+    /// journal du 2026-08-15. Il est `Option<u8>` par symétrie avec la relecture,
+    /// mais un canal illisible n'est jamais écrit : en pratique il est toujours
+    /// renseigné.
+    NonAppliquee { porte: Option<u8> },
+}
+
+/// Une écriture à faire sur un canal, et pourquoi.
 ///
 /// La régulation ne touche aucun bus : elle dit quoi écrire, le démon écrit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ecriture {
     pub canal: String,
     pub consigne: u8,
+    pub motif: Motif,
 }
 
 /// Quels canaux sont régulés, sur quelle courbe, et où ils en sont.
 #[derive(Debug)]
 pub struct Regulation {
     courbe: Courbe,
-    /// Les canaux régulés, et la **dernière consigne écrite** sur chacun.
+    /// Les canaux régulés, et la **dernière consigne écrite** sur chacun —
+    /// `None` tant que rien ne lui a été écrit depuis son activation.
+    ///
+    /// ⚠️ **Ce n'est plus la source de vérité, et c'est tout le sujet de #110.**
+    /// Ce champ portait « on n'écrit que ce qui change », et il mesurait ce
+    /// changement sur **nos intentions** : une écriture qui rendait `Ok` sans
+    /// rien appliquer y était retenue comme faite, et n'était plus jamais
+    /// rejouée. C'est ce qui a laissé `nzxtsmart2:fan-3` à son duty d'allumage
+    /// pendant que le démon annonçait 50 %. Ce qu'il faut écrire se décide
+    /// désormais sur `portees`, ce que le canal **porte** vraiment.
+    ///
+    /// Ce qu'il reste ici est une **mémoire d'activation** : ce canal a-t-il reçu
+    /// quelque chose depuis qu'on l'a pris en charge, et quoi. Elle sert deux
+    /// fois, et deux fois seulement :
+    ///
+    /// - un canal tout juste activé est écrit même s'il porte déjà la consigne —
+    ///   `un_canal_coupe_puis_repris_est_reecrit` (#99) l'exige, parce qu'entre
+    ///   la coupure et la reprise le canal appartenait à l'utilisateur ;
+    /// - elle départage [`Motif::Consigne`] de [`Motif::NonAppliquee`], donc ce
+    ///   que le journal a le droit d'imprimer. La supprimer tout à fait rendrait
+    ///   les deux indiscernables.
     ///
     /// ⚠️ **Un cache par canal, jamais un « dernier état global ».** Un canal
     /// qu'on vient d'activer n'a jamais rien reçu : il doit être écrit au tour
@@ -331,7 +394,13 @@ impl Regulation {
     }
 
     /// Un tour de régulation : `liquide` en millidegrés, `None` si la sonde est
-    /// illisible.
+    /// illisible ; `portees` ce que chaque canal **porte réellement**, en
+    /// **pourcentage**, relu par le démon avant ce tour.
+    ///
+    /// Une entrée absente ou `None` veut dire « je ne sais pas ce qu'il porte » —
+    /// une quarantaine installée (#68, #88), une lecture qui échoue, un canal que
+    /// le démon n'a pas listé. Les trois se valent ici : la régulation ne peut
+    /// rien faire de la différence.
     ///
     /// Rend ce qu'il faut écrire, et **seulement** ce qu'il faut écrire : aucune
     /// de ces cibles n'a de watchdog, et réécrire une consigne identique ne fait
@@ -339,10 +408,31 @@ impl Regulation {
     /// une régulation qui se tait et une qui réécrit, c'est 86 400 trames par
     /// jour pour rien.
     ///
-    /// ⚠️ **Le cache porte sur la valeur écrite, pas sur le régime qui l'a
-    /// produite.** Un repli qui vaut ce qui est déjà écrit ne réécrit rien, et
-    /// le retour de la sonde reprend la courbe sans aucun drapeau à réarmer.
-    pub fn tour(&mut self, liquide: Option<i32>) -> Vec<Ecriture> {
+    /// # La règle, en une ligne
+    ///
+    /// On écrit si le canal est **lisible** et (**jamais écrit depuis son
+    /// activation** ou **ce qu'il porte diffère de la consigne**).
+    ///
+    /// ⚠️ **La comparaison est exacte, sans tolérance**, et elle peut l'être :
+    /// `Percent::from_raw(Percent::raw(p)) == p` sur les 101 valeurs — un point
+    /// de pourcentage vaut 2,55 pas de duty, le pas est expansif, donc aucun
+    /// arrondi ne replie deux pourcentages sur le même duty. Un écart relu est
+    /// donc un écart réel, et une tolérance « au cas où l'arrondi » masquerait
+    /// une vraie dérive sans rien corriger.
+    ///
+    /// ⚠️ **Un canal qu'on ne sait pas relire n'est pas écrit.** Ni écriture à
+    /// l'aveugle, ni « une fois pour voir » : écrire là où on ne mesure pas,
+    /// c'est refaire #110 à l'identique — annoncer une consigne sans aucun moyen
+    /// de savoir si elle a pris.
+    ///
+    /// ⚠️ **La consigne, elle, ne vient jamais de la relecture.** Sonde muette,
+    /// c'est [`REPLI`] et non ce que le canal porte — qui serait précisément « la
+    /// dernière valeur connue », lue à la source cette fois.
+    pub fn tour(
+        &mut self,
+        liquide: Option<i32>,
+        portees: &BTreeMap<String, Option<u8>>,
+    ) -> Vec<Ecriture> {
         // Sans canal régulé, la boucle ne tourne pas : ni écriture, ni repli, ni
         // « juste une fois pour initialiser ». Le démon doit rester au repos
         // absolu quand rien ne l'occupe.
@@ -352,14 +442,34 @@ impl Regulation {
         };
 
         let mut ecritures = Vec::new();
+        // ⚠️ **Les canaux régulés, jamais ceux de la relecture.** `portees` porte
+        // tout le matériel de la machine — le démon le relit pour servir
+        // `status` —, y compris les deux canaux du Kraken dont le firmware
+        // régule déjà correctement. Le parcourir écraserait une courbe firmware
+        // par une boucle hôte.
         for (canal, derniere) in &mut self.canaux {
-            if *derniere == Some(consigne) {
+            let Some(porte) = portees.get(canal).copied().flatten() else {
+                continue;
+            };
+            let jamais_ecrit = derniere.is_none();
+            if !jamais_ecrit && porte == consigne {
                 continue;
             }
+            // Quand les deux motifs se disputent — la consigne change **et** le
+            // canal ne l'applique pas —, c'est `Consigne` qui l'emporte : le
+            // palier a bougé, c'est l'information neuve. Sans cette règle, un
+            // canal durablement bloqué ne journaliserait plus jamais un
+            // changement de palier.
+            let motif = if *derniere == Some(consigne) {
+                Motif::NonAppliquee { porte: Some(porte) }
+            } else {
+                Motif::Consigne
+            };
             *derniere = Some(consigne);
             ecritures.push(Ecriture {
                 canal: canal.clone(),
                 consigne,
+                motif,
             });
         }
         ecritures

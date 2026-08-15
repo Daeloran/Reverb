@@ -179,6 +179,42 @@ Deux leçons :
 La sortie de secours est `tools/repose_kraken.sh`, qui écrit une vraie courbe et l'active — ou, à
 défaut, un **arrêt complet** de la machine, pas un redémarrage.
 
+#### La première leçon, reprise par l'autre bout — issue #110 ✅
+
+Le 2026-08-15, seize jours plus tard, la régulation côté hôte de #99 a commis la même faute dans
+l'autre sens : au lieu de supposer qu'une valeur restaurée restaure un comportement, elle a supposé
+qu'une valeur **écrite** est une valeur **portée**.
+
+```
+journal   régulation : nzxtsmart2:fan-3 à 46 % (liquide 40.2 °C)
+sysfs     pwm3 = 130  →  51 %
+```
+
+`fs::write` sur `pwmN` avait rendu `Ok` sans que le matériel applique — piste, non vérifiée :
+`nzxt-smart2` regroupe les duty de ses canaux dans un même rapport HID, et trois écritures coup sur
+coup se marcheraient dessus. Le cache de #99 retenait alors l'intention, la consigne calculée ne
+changeait plus, et **rien n'était jamais réémis** : le canal restait figé sur une consigne d'il y a
+plusieurs minutes pendant que le démon en annonçait une autre, sans une erreur nulle part.
+
+⚠️ **Ce document l'avait prédit**, à la ligne près : « toute sonde future doit **mesurer** l'état,
+pas le supposer ». Il faut donc l'écrire dans les deux sens, parce que la faute se commet dans les
+deux :
+
+- **restaurer une valeur n'est pas restaurer un comportement** — ce que le Kraken a montré le
+  2026-07-30 ;
+- **écrire une valeur n'est pas la porter** — ce que le `nzxtsmart2` a montré le 2026-08-15. Un
+  `write()` qui rend `Ok` dit que le noyau a accepté l'octet, jamais que le contrôleur l'a appliqué.
+
+Dans les deux cas, le remède est le même et il est unique : **relire**. La régulation compare
+désormais la consigne à ce que le canal porte, relu par sysfs à chaque tour, et réémet tant que
+l'écart dure. Le coût est de 0,001 s par canal `nzxtsmart2`, mesuré — à comparer aux cinq secondes
+d'un contrôleur muet, et à la demi-heure de diagnostic qu'a coûtée un journal qui affirmait sans
+vérifier.
+
+⚠️ **Ce qui reste inconnu, c'est la cause.** #110 rend le symptôme auto-réparable, elle n'explique
+pas le pilote. Le blocage a été observé transitoire à l'installation *puis* en régime établi, et il
+a cédé à un `fan nzxtsmart2:fan-3 pwm 70` posé à la main.
+
 ### Conséquence sur `reverb fan --auto`
 
 L'option écrivait `pwm_enable = 0` et son aide annonçait « rend le canal à sa courbe firmware ».
