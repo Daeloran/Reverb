@@ -166,7 +166,7 @@ commande **entière**, pas seulement la clé.
 | `respiration` | le boîtier respire, et la respiration se propage | couleur, vitesse, direction |
 | `arc-en-ciel` | le spectre déroulé — elle produit ses teintes | vitesse, direction |
 | `balayage` | une bande nette dont on voit la limite bouger | couleur, vitesse, direction |
-| `braise` | deux ondes incommensurables, sans cycle apparent | couleur, vitesse, direction |
+| `braise` | **un lit de braises, sans axe ni cycle** | couleur, vitesse |
 | `rotation` | **chaque anneau tourne sur lui-même** | couleur, vitesse |
 | `thermique` | **la couleur suit une sonde** | vitesse, **sonde** |
 | `pouls` | **une onde sphérique née à la pompe** | couleur, vitesse |
@@ -217,7 +217,34 @@ ne fait. La quarantaine de #68 s'applique, et le gradient reprend dès que la so
 La sonde est relue **une fois par seconde**, jamais à la cadence des images : une lecture sysfs sur
 un périphérique muet bloque cinq secondes en sommeil non interruptible.
 
-#### `rotation`, `pouls`, `scintillement` — trois motifs qui ne suivent aucun axe
+#### `braise`, `rotation`, `pouls`, `scintillement` — quatre motifs qui ne suivent aucun axe
+
+**`braise`** est un lit de braises : des zones chaudes et froides qui respirent et se déplacent, où
+aucun sens de lecture ne se devine. Une onde **lente** respire depuis la pompe et porte les sept
+dixièmes de l'amplitude, une onde **vive** tourne en sens inverse sur chaque anneau, et un
+frémissement d'un quinzième de cycle — tiré du numéro de LED, jamais d'un `rand` — casse ce qui
+resterait de régulier. Les deux grandeurs qu'elle croise, la distance à la pompe et l'angle sur
+l'anneau, ne sont l'axe de personne.
+
+⚠️ **Elle en suivait un jusqu'à #119, et ça se voyait** — signalé devant le boîtier : « le *sens* de
+l'effet a un effet sur l'animation et du coup on voit clairement un pattern ». Le code le disait :
+deux ondes planes superposées défilant le long de la direction demandée. La promesse annoncée, « deux
+ondes de périodes incommensurables : l'œil n'y voit pas de cycle », valait **dans le temps** — 3 et 7
+ne se referment pas — et ne disait rien de l'**espace**, qui est justement ce qu'on regarde. Le
+défaut vivait dans la moitié de la propriété que personne n'avait énoncée.
+
+⚠️ **`animate braise direction=…` est désormais refusé, et la commande entière avec** — c'est la
+règle du projet, une clé de trop fait rejeter l'`animate` complet. **Un profil enregistré qui porte
+cette clé cesse donc de s'appliquer**, et doit être réenregistré : sur SHYNAEL, l'état courant au
+moment de l'issue était `anim braise couleur=3939ff vitesse=2 direction=centre-bords`. L'exemple
+`forge` livré par le dépôt a été corrigé, les profils personnels non — rien ne les réécrit à votre
+place. Accepter la clé pour ne rien en faire aurait été le réglage qui ment, refusé partout ailleurs.
+
+⚠️ **Elle est aussi la seule famille avec `scintillement` à ne pas se refermer sur le cycle du
+catalogue.** Elle défilait sur l'horloge qui se replie toutes les cent vingt étapes — quarante
+valeurs seulement à la vitesse 3 —, et repart donc à l'identique d'un cycle au suivant ; elle suit
+désormais celle de `scintillement`, dont la période de 1021 pas est première et n'a de facteur commun
+avec aucune vitesse.
 
 **`rotation`** fait tourner chaque anneau **sur lui-même**, à sa place dans le boîtier. C'est le
 motif le plus « ventilateur » du catalogue, et il manquait : `horaire` est une rotation dans le
@@ -242,7 +269,7 @@ numéro d'ordre. C'est ce que la [géométrie mesurée](docs/GEOMETRIE.md) rend 
 
 ⚠️ **Une onde purement plane aplatit ce qui n'a pas d'épaisseur dans sa direction.** Six
 ventilateurs sur dix sont couchés : leurs vingt-quatre LED sont exactement à la même hauteur, et
-`bas-haut` les allumerait d'un seul bloc. Cinq familles suivent donc l'**écoulement** plutôt que
+`bas-haut` les allumerait d'un seul bloc. Quatre familles suivent donc l'**écoulement** plutôt que
 la seule position : chaque ventilateur est traversé d'un bord à l'autre depuis un point d'entrée
 relevé à l'œil (`docs/GEOMETRIE.md`), de sorte que le motif le franchit LED par LED même quand la
 direction ne lui donne aucune épaisseur. Sur un ventilateur que la direction n'aplatit pas, cette
