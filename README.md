@@ -1401,3 +1401,11 @@ protocole HUE 2 classique ne fonctionne plus sur le contrôleur `0x2019`. Conser
 Le protocole du `0x2019` était inconnu du monde open source
 ([liquidctl #541](https://github.com/liquidctl/liquidctl/issues/541), ouverte depuis 2022).
 Les spécifications produites ici sont de quoi la fermer.
+
+## Licence
+
+**GPL-3.0-or-later**, comme `Cargo.toml` l'annonce depuis le début du projet — le texte
+complet est désormais dans [`LICENSE`](LICENSE), qui manquait.
+
+Ce n'est pas un détail de forme sur un dépôt public : sans le texte, la mention du
+`Cargo.toml` ne donne à personne les droits qu'elle prétend accorder.
