@@ -312,10 +312,16 @@ enum Famille {
     Pouls,
     /// Des LED s'allument au hasard, sans période (#75).
     Scintillement,
+    /// Chaque LED vacille seule, par creux irréguliers (#127).
+    Bougie,
+    /// Un champ de bruit 3D qui dérive à travers le boîtier (#127).
+    Nuee,
+    /// Des éclats naissent au hasard et se propagent en sphère (#127).
+    Artifice,
 }
 
 /// Nom et famille, dans l'ordre du [`CATALOGUE`].
-const FAMILLES: [(&str, Famille); 10] = [
+const FAMILLES: [(&str, Famille); 13] = [
     ("vague", Famille::Vague),
     ("comete", Famille::Comete),
     ("respiration", Famille::Respiration),
@@ -326,6 +332,9 @@ const FAMILLES: [(&str, Famille); 10] = [
     ("thermique", Famille::Thermique),
     ("pouls", Famille::Pouls),
     ("scintillement", Famille::Scintillement),
+    ("bougie", Famille::Bougie),
+    ("nuee", Famille::Nuee),
+    ("artifice", Famille::Artifice),
 ];
 
 /// Les animations que le démon sait jouer.
@@ -344,6 +353,12 @@ pub const CATALOGUE: &[&str] = &[
     "thermique",
     "pouls",
     "scintillement",
+    // Les trois de #127, reprises de WLED. ⚠️ **`nuee` sans accent** : un nom
+    // accentué serait refusé par le décodeur du socket sans que rien ne dise
+    // pourquoi — comme les dix autres, le slug reste en ASCII minuscule.
+    "bougie",
+    "nuee",
+    "artifice",
 ];
 
 /// Les clés acceptées par une animation qui se colore.
@@ -411,9 +426,18 @@ impl Animation {
             // porte cette clé cesse de s'appliquer tant qu'il n'est pas
             // réenregistré. Le prix est assumé — accepter la clé pour ne rien en
             // faire serait le réglage qui ment que ce projet refuse partout.
-            Famille::Rotation | Famille::Pouls | Famille::Scintillement | Famille::Braise => {
-                SANS_DIRECTION
-            }
+            // ⚠️ **Les trois de #127 les rejoignent, et pour trois raisons
+            // distinctes.** `bougie` est LED par LED — il n'y a rien à
+            // traverser. `nuee` échantillonne un champ de bruit en trois
+            // dimensions, qui se déforme sur place au lieu de défiler. Et
+            // `artifice` naît d'origines tirées, qui ne sont l'axe de personne.
+            Famille::Rotation
+            | Famille::Pouls
+            | Famille::Scintillement
+            | Famille::Braise
+            | Famille::Bougie
+            | Famille::Nuee
+            | Famille::Artifice => SANS_DIRECTION,
             _ => AVEC_COULEUR,
         }
     }
@@ -604,6 +628,24 @@ impl Animation {
         let locale = reglages.direction.est_locale();
         let pompe = geometrie.pompe();
         let etendue = distance(bornes.0, bornes.1).max(1.0);
+        // Ramène un point du boîtier au cube unité (#127). Une borne dégénérée —
+        // un boîtier plat dans une dimension — rend le milieu plutôt qu'un
+        // infini : la géométrie de test en a une, et un NaN s'y propagerait
+        // jusqu'aux composantes.
+        let au_cube = |point: Point| -> Point {
+            let part = |v: f32, bas: f32, haut: f32| {
+                if haut > bas {
+                    (v - bas) / (haut - bas)
+                } else {
+                    0.5
+                }
+            };
+            Point {
+                x: part(point.x, bornes.0.x, bornes.1.x),
+                y: part(point.y, bornes.0.y, bornes.1.y),
+                z: part(point.z, bornes.0.z, bornes.1.z),
+            }
+        };
 
         let mut ventilateurs = [(Position::BasGauche, [Rgb::BLACK; LEDS_PER_FAN as usize]); 10];
         for (rang, (place, position)) in ventilateurs.iter_mut().zip(Position::ALL).enumerate() {
@@ -657,6 +699,7 @@ impl Animation {
                             graine: (rang * LEDS_PER_FAN as usize + led) as u32,
                             derive,
                             mesure,
+                            unite: au_cube(point),
                         },
                     );
                 }
@@ -695,6 +738,7 @@ impl Animation {
                             graine: (10 * LEDS_PER_FAN as usize + slot * LEDS_PER_STICK + led)
                                 as u32,
                             derive,
+                            unite: au_cube(point),
                             mesure,
                         },
                     );
@@ -749,6 +793,7 @@ impl Animation {
             graine,
             derive,
             mesure,
+            unite,
         } = *ou;
         let place = fraction(flux);
 
@@ -955,6 +1000,96 @@ impl Animation {
                     )
                 }
             }
+
+            // Chaque LED vacille seule, par creux irréguliers (#127).
+            //
+            // WLED tient par LED un triplet `(niveau, cible, pas)` et tire
+            // `hw_random8()` à chaque arrivée. `image()` étant **pure**, la
+            // marche se réécrit sur un hachage de `(numéro de LED, segment)` :
+            // même allure — maintiens irréguliers, rampes, creux — et rendu
+            // reproductible, comme `scintillement` le fait déjà.
+            //
+            // ⚠️ **Chaque LED tient sa propre cadence**, tirée de son numéro :
+            // c'est ce qui les désynchronise sans horloge partagée, et ce qui
+            // sépare `bougie` d'une respiration commune à tout le boîtier.
+            Famille::Bougie => {
+                let cadence = CADENCE_BOUGIE.0
+                    + (CADENCE_BOUGIE.1 - CADENCE_BOUGIE.0) * tirage(graine, 0x9e37_79b9);
+                let horloge = derive * cadence;
+                let segment = horloge.floor();
+                let part = adoucir(horloge - segment);
+                let niveau = melanger(
+                    cible_de_bougie(graine, segment),
+                    cible_de_bougie(graine, segment + 1.0),
+                    part,
+                );
+                teinter(teinte_de(niveau), niveau)
+            }
+
+            // Un champ de bruit qui dérive à travers le boîtier (#127).
+            //
+            // WLED échantillonne `perlin8(i * echelle, derive + i * echelle)` :
+            // deux axes, mais le premier est l'**indice** de la LED sur son
+            // ruban. Ici c'est la position **réelle** qui est échantillonnée, si
+            // bien que deux LED voisines de deux ventilateurs différents
+            // partagent leur couleur — ce qu'une version 1D ne peut pas faire.
+            //
+            // ⚠️ **La dérive porte sur une QUATRIÈME dimension**, jamais sur un
+            // décalage le long d'un axe. Décaler ferait *défiler* le motif,
+            // c'est-à-dire lui rendrait exactement l'axe que `nuee` ne doit pas
+            // avoir — le défaut que `braise` a porté jusqu'à #119. Sur la
+            // quatrième, le champ se déforme **sur place**.
+            Famille::Nuee => {
+                let valeur = bruit(
+                    unite.x * ECHELLE_NUEE,
+                    unite.y * ECHELLE_NUEE,
+                    unite.z * ECHELLE_NUEE,
+                    derive * DERIVE_NUEE,
+                );
+                // Étalé sur toute la plage : un bruit de valeur se serre autour
+                // de son milieu, et sans cet étalement la nuée serait un gris
+                // uniforme qui respire à peine.
+                let etale = ((valeur - 0.5) * 2.2 + 0.5).clamp(0.0, 1.0);
+                teinter(teinte_de(etale), 0.15 + 0.85 * etale)
+            }
+
+            // Des éclats naissent au hasard et se propagent en sphère (#127).
+            //
+            // ⚠️ **Le premier motif événementiel du catalogue.** Tout le reste
+            // est continu ; ici un éclat a une **date de naissance** et une
+            // **origine**, toutes deux tirées de son numéro, lui-même déduit de
+            // la dérive. L'intensité ne dépend que de la **distance à
+            // l'origine** et du temps écoulé — la géométrie de `pouls`, mais
+            // depuis un point qui change, et avec une extinction.
+            //
+            // ⚠️ **L'intensité est fonction de la seule distance**, et c'est ce
+            // qui rend vraie la propriété que le test exige : deux LED
+            // équidistantes d'une même origine s'allument ensemble, quels que
+            // soient leur organe et leur axe.
+            Famille::Artifice => {
+                let courant = (derive / PERIODE_ECLAT).floor();
+                let mut total = 0.0;
+                for recul in 0..ECLATS_VIVANTS {
+                    let numero = courant - recul as f32;
+                    if numero < 0.0 {
+                        continue;
+                    }
+                    let age = derive - numero * PERIODE_ECLAT;
+                    let ecart =
+                        (distance(unite, origine_d_eclat(numero)) - age * VITESSE_ECLAT).abs();
+                    if ecart < EPAISSEUR_ECLAT {
+                        let vif = 1.0 - ecart / EPAISSEUR_ECLAT;
+                        let reste = 1.0 - age / (ECLATS_VIVANTS as f32 * PERIODE_ECLAT);
+                        total += vif * reste.max(0.0);
+                    }
+                }
+                let intensite = total.min(1.0);
+                if intensite <= 0.0 {
+                    Rgb::BLACK
+                } else {
+                    teinter(teinte_de(intensite), intensite)
+                }
+            }
         }
     }
 }
@@ -988,6 +1123,21 @@ struct Place {
     derive: f32,
     /// La valeur de la sonde suivie, en degrés, ou `None` si elle est muette.
     mesure: Option<f32>,
+    /// La position de la LED dans le boîtier, ramenée au cube unité (#127).
+    ///
+    /// ⚠️ **La seule grandeur de `Place` qui soit une position et non une
+    /// projection.** Les six autres réduisent la LED à un scalaire — sa place le
+    /// long d'un axe, son angle sur son anneau, sa distance à la pompe — parce
+    /// que les dix premières familles n'ont besoin que de ça.
+    ///
+    /// `nuee` échantillonne un champ de bruit **en trois dimensions**, et
+    /// `artifice` mesure la distance à une origine qui n'est ni la pompe ni un
+    /// axe : ni l'une ni l'autre ne se ramène à un scalaire calculé d'avance.
+    ///
+    /// Ramenée aux **bornes du boîtier**, donc dans `[0, 1]³` : c'est ce qui rend
+    /// l'échelle du bruit indépendante de la taille de la machine, et les
+    /// origines d'`artifice` tirables sans connaître la géométrie.
+    unite: Point,
 }
 
 /// Intensité la plus basse du blanc pulsant d'une sonde muette.
@@ -1062,6 +1212,166 @@ const fn melange(graine: u32) -> u32 {
     valeur ^= valeur >> 13;
     valeur = valeur.wrapping_mul(0xc2b2_ae35);
     valeur ^ (valeur >> 16)
+}
+
+// ---------------------------------------------------------------------------
+// De quoi les trois familles de #127 sont faites
+// ---------------------------------------------------------------------------
+
+/// Segments de vacillement par unité de dérive, du plus lent au plus vif.
+///
+/// Une plage et non une valeur : chaque LED tire la sienne dedans, et c'est ce
+/// qui les désynchronise sans horloge partagée.
+const CADENCE_BOUGIE: (f32, f32) = (2.5, 4.5);
+
+/// Profondeur maximale d'un creux de bougie, en fraction du plein éclat.
+const CREUX_BOUGIE: f32 = 0.65;
+
+/// Combien de mailles de bruit tiennent dans le boîtier, pour `nuee`.
+///
+/// Quatre : de quoi voir deux ou trois taches par dimension. Plus serré, la nuée
+/// devient un grésillement — et le grésillement est déjà `scintillement`.
+const ECHELLE_NUEE: f32 = 4.0;
+
+/// Vitesse de déformation du champ, sur sa quatrième dimension.
+///
+/// ⚠️ **Choisie par mesure, pas au jugé.** L'horloge [`derive`] fait un tour en
+/// 1021 pas ; à la vitesse 1, trente pas ne la font avancer que de 3 %. Une
+/// dérive de 1,5 — la première essayée — déformait le champ si peu qu'il ne
+/// changeait **pas mesurablement** en trente pas, et « rien ne le reconstitue »
+/// ne voulait alors plus rien dire : le test d'intention le refuse par son
+/// propre appareil, avant même de mesurer une translation.
+///
+/// Relevé : 10 rend 19 couples mesurables quand 20 sont exigés, 12 passe, 14
+/// laisse de la marge. Au-delà la nuée s'agite, et ce n'est plus une nuée.
+///
+/// À la vitesse 1, un tour d'horloge — 51 s à 20 img/s — déplace le champ de
+/// quatorze mailles, soit une maille toutes les 3,6 s. C'est le « lentement »
+/// que l'issue demande.
+const DERIVE_NUEE: f32 = 14.0;
+
+/// Unités de dérive entre deux éclats.
+///
+/// ⚠️ **Les quatre constantes d'`artifice` se tiennent, et la première rédaction
+/// les avait toutes trop lentes d'un ordre de grandeur.** Avec une période de
+/// 0,35, l'horloge [`derive`] — qui fait un tour complet en 1021 pas — ne
+/// portait que **trois** éclats par tour, et le front n'atteignait jamais que
+/// 0,32 du cube unité alors que sa diagonale vaut 1,73 : le boîtier restait uni,
+/// mesuré par le test d'intention avant qu'aucun œil ne le voie.
+///
+/// À 0,03, un tour porte trente-trois éclats — un toutes les 1,5 s à la
+/// vitesse 1 —, et le front traverse le boîtier avant de s'éteindre.
+const PERIODE_ECLAT: f32 = 0.03;
+/// Combien d'éclats se recouvrent au plus.
+///
+/// Six : leur durée de vie vaut donc `6 × 0,03 = 0,18` unité de dérive.
+const ECLATS_VIVANTS: u32 = 6;
+/// À quelle vitesse le front d'un éclat s'éloigne de son origine, en cube unité.
+///
+/// Huit : en 0,18 unité de vie, le front parcourt 1,44 — de quoi couvrir la
+/// diagonale du cube depuis la plupart des origines avant de s'éteindre.
+const VITESSE_ECLAT: f32 = 8.0;
+/// L'épaisseur du front, en cube unité.
+const EPAISSEUR_ECLAT: f32 = 0.22;
+
+/// Un tirage dans `[0, 1)`, depuis deux entiers.
+fn tirage(un: u32, autre: u32) -> f32 {
+    (melange(un ^ melange(autre)) % 65536) as f32 / 65536.0
+}
+
+/// Le niveau visé par une bougie au segment donné, dans `[1 - CREUX, 1]`.
+///
+/// ⚠️ **Deux tirages MULTIPLIÉS, et non moyennés.** La moyenne donne une loi
+/// triangulaire centrée, donc un niveau qui passe la moitié de son temps sous
+/// les deux tiers : mesuré sur prototype, 41 % du temps au-dessus de 0,7. C'est
+/// un stroboscope, pas une bougie. Le produit concentre la masse près de zéro —
+/// donc la cible près du plein éclat — et ne plonge que rarement : 85 % du temps
+/// au-dessus de 0,7, ce que décrit la rétro-ingénierie d'une vraie bougie.
+///
+/// ⚠️ **Le plein éclat est le plafond, jamais un point qu'on dépasse** : une
+/// bougie faiblit, elle ne surbrille pas.
+fn cible_de_bougie(graine: u32, segment: f32) -> f32 {
+    let numero = segment as i64 as u32;
+    let creux = tirage(graine, numero.wrapping_mul(2_654_435_761))
+        * tirage(graine ^ 0x5bf0_3635, numero.wrapping_mul(40_503));
+    1.0 - CREUX_BOUGIE * creux
+}
+
+/// L'origine d'un éclat, dans le cube unité.
+///
+/// Tirée du seul numéro d'éclat : aucun état, aucune horloge, et deux appels au
+/// même numéro rendent le même point — c'est ce qui garde `artifice` pure.
+fn origine_d_eclat(numero: f32) -> Point {
+    let n = numero as i64 as u32;
+    Point {
+        x: tirage(n, 0x2545_f491),
+        y: tirage(n, 0x9e37_79b9),
+        z: tirage(n, 0x85eb_ca6b),
+    }
+}
+
+/// Lissage de Hermite — ce qui sépare un bruit d'un damier.
+///
+/// Sans lui l'interpolation est linéaire et la grille se voit, en arêtes
+/// franches là où les mailles se touchent.
+fn adoucir(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Une interpolation linéaire, écrite une fois.
+fn melanger(depuis: f32, vers: f32, part: f32) -> f32 {
+    depuis + (vers - depuis) * part
+}
+
+/// La valeur pseudo-aléatoire d'un nœud de la grille du bruit.
+fn noeud(ix: i32, iy: i32, iz: i32, iw: i32) -> f32 {
+    let graine = (ix as u32).wrapping_mul(0x9e37_79b9)
+        ^ (iy as u32).wrapping_mul(0x85eb_ca6b)
+        ^ (iz as u32).wrapping_mul(0xc2b2_ae35)
+        ^ (iw as u32).wrapping_mul(0x27d4_eb2f);
+    melange(graine) as f32 / u32::MAX as f32
+}
+
+/// Un bruit de valeur en **quatre** dimensions, dans `[0, 1]`.
+///
+/// Trois d'espace, une de dérive. Un bruit de valeur interpolé sur une grille
+/// suffit — pas besoin d'un Perlin complet, et celui-ci se teste.
+///
+/// ⚠️ **Mesuré avant d'être écrit** : à l'échelle employée, deux points séparés
+/// de 20 mm diffèrent 6,6 fois moins que deux points séparés de 250 mm — c'est
+/// la structure spatiale, celle qui a manqué à `braise` jusqu'à #119. Et aucun
+/// décalage le long d'un axe ne reconstitue une image antérieure : le meilleur
+/// essayé fait 0,1719 contre 0,1697 sur place, donc **pire**. Le champ se
+/// déforme, il ne défile pas.
+fn bruit(x: f32, y: f32, z: f32, w: f32) -> f32 {
+    let (ix, iy, iz, iw) = (
+        x.floor() as i32,
+        y.floor() as i32,
+        z.floor() as i32,
+        w.floor() as i32,
+    );
+    let (fx, fy, fz, fw) = (
+        adoucir(x - x.floor()),
+        adoucir(y - y.floor()),
+        adoucir(z - z.floor()),
+        adoucir(w - w.floor()),
+    );
+    let mut accumule = 0.0;
+    // Les seize coins de l'hypercube, pondérés par leur distance lissée.
+    for coin in 0..16u32 {
+        let (dx, dy, dz, dw) = (
+            (coin & 1) as i32,
+            ((coin >> 1) & 1) as i32,
+            ((coin >> 2) & 1) as i32,
+            ((coin >> 3) & 1) as i32,
+        );
+        let poids = melanger(1.0 - fx, fx, dx as f32)
+            * melanger(1.0 - fy, fy, dy as f32)
+            * melanger(1.0 - fz, fz, dz as f32)
+            * melanger(1.0 - fw, fw, dw as f32);
+        accumule += poids * noeud(ix + dx, iy + dy, iz + dz, iw + dw);
+    }
+    accumule
 }
 
 /// La distance entre deux points du boîtier, en millimètres.

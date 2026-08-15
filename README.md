@@ -127,7 +127,8 @@ saute que ce qui n'a pas bougé :
 |---|---|---|
 | `balayage` | 3 | ~90 img/s |
 | `comete`, `pouls` | 5 | ~45 img/s |
-| `vague`, `respiration`, `arc-en-ciel`, `braise`, `rotation`, `scintillement` | **14** | **~20 img/s** |
+| `artifice` | 12 | ~23 img/s |
+| `vague`, `respiration`, `arc-en-ciel`, `braise`, `rotation`, `scintillement`, `bougie`, `nuee` | **14** | **~20 img/s** |
 
 `thermique` ne figure pas dans ce tableau : à température stable elle **ne change pas d'image**, et
 le cache saute alors les quatorze cibles. C'est la seule animation du catalogue qui laisse le démon
@@ -155,7 +156,7 @@ echo 'animate arc-en-ciel direction=avant-arriere'
 echo 'animate off'
 ```
 
-Dix familles, réglables par `couleur` (six chiffres hexadécimaux), `vitesse` (1 à 10) et
+Treize familles, réglables par `couleur` (six chiffres hexadécimaux), `vitesse` (1 à 10) et
 `direction`. Chacune n'accepte que ce qu'elle sait porter — une clé de trop fait refuser la
 commande **entière**, pas seulement la clé.
 
@@ -171,11 +172,94 @@ commande **entière**, pas seulement la clé.
 | `thermique` | **la couleur suit une sonde** | vitesse, **sonde** |
 | `pouls` | **une onde sphérique née à la pompe** | couleur, vitesse |
 | `scintillement` | **des LED s'allument au hasard** | couleur, vitesse |
+| `bougie` | **chaque LED vacille seule, par creux irréguliers** | couleur, vitesse |
+| `nuee` | **un champ de bruit dérive à travers le boîtier** | couleur, vitesse |
+| `artifice` | **des éclats naissent au hasard et se propagent en sphère** | couleur, vitesse |
 
 Partout où `couleur` figure, **`palette` la remplace** (voir ci-dessous).
 
 Huit directions : `bas-haut`, `haut-bas`, `avant-arriere`, `arriere-avant`, `horaire`,
 `antihoraire`, et les deux **locales** — `bords-centre`, `centre-bords`.
+
+#### `bougie`, `nuee`, `artifice` — trois motifs repris de WLED
+
+```bash
+echo 'animate bougie palette=lava vitesse=2'
+echo 'animate nuee palette=atlantica'
+echo 'animate artifice couleur=ff40ff vitesse=6'
+```
+
+WLED a une centaine d'effets, et **la plupart sont 1D** : ils indexent les LED le long d'un ruban.
+Reverb refuse ce modèle — traiter les 124 LED comme une file d'attente ferait sauter un motif d'un
+ventilateur à l'autre dans l'ordre arbitraire où les canaux sont énumérés. Trois familles échappent
+à cette limite, pour deux raisons distinctes : **par LED** (la disposition n'entre pas) ou **par
+champ spatial** (remplacer l'indice 1D par la position 3D réelle rend l'effet *meilleur*, pas
+approximatif).
+
+| famille | origine WLED | ce qui a dû être réécrit |
+|---|---|---|
+| `bougie` | Candle Multi | la marche aléatoire, qui était **à état** |
+| `nuee` | Noise Pal | l'indice de ruban, devenu une **position 3D** |
+| `artifice` | Fireworks | rien d'équivalent au catalogue : le premier motif **événementiel** |
+
+⚠️ **Aucune n'accepte `direction`**, et elles rejoignent `braise`, `rotation`, `pouls` et
+`scintillement` : `bougie` est LED par LED, `nuee` se déforme sur place, `artifice` naît d'origines
+tirées. Aucune de ces grandeurs n'est l'axe de personne.
+
+⚠️ **Les trois lisent l'horloge de 1021 pas, pas le cycle de 120.** Elles ne se referment donc pas
+sur le cycle du catalogue, comme `scintillement` et `braise`. Leur demander de boucler serait leur
+demander de redevenir périodiques.
+
+##### `bougie` — la marche aléatoire, sans état
+
+WLED tient par LED un triplet `(niveau, cible, pas)` et tire `hw_random8()` à chaque arrivée.
+`image()` étant **pure**, la marche se réécrit sur un hachage de `(numéro de LED, segment)` : même
+allure — maintiens irréguliers, rampes, creux —, rendu reproductible.
+
+⚠️ **Deux tirages *multipliés*, et non moyennés.** C'est le seul détail qui décide si ça ressemble à
+une bougie. La moyenne donne une loi triangulaire **centrée**, donc un niveau qui passe la moitié de
+son temps sous les deux tiers : mesuré sur prototype, **41 % du temps au-dessus de 0,7**, ce qui est
+un stroboscope. Le produit concentre la masse près du plein éclat : **85 %**. Le plein éclat est un
+**plafond** — une bougie faiblit, elle ne surbrille pas.
+
+##### `nuee` — le bruit en trois dimensions, pas en une
+
+WLED échantillonne `perlin8(i × échelle, dérive + i × échelle)` : deux axes, mais le premier est
+l'**indice** de la LED. Ici c'est la **position réelle** qui est échantillonnée, si bien que deux LED
+voisines de deux ventilateurs différents partagent leur couleur.
+
+⚠️ **La dérive porte sur une *quatrième* dimension**, jamais sur un décalage le long d'un axe.
+Décaler ferait *défiler* le motif — c'est-à-dire lui rendrait exactement l'axe qu'il ne doit pas
+avoir, le défaut que `braise` a porté jusqu'à #119. Mesuré avant d'écrire une ligne : deux points
+séparés de 20 mm diffèrent **6,6 fois moins** que deux points séparés de 250 mm, et aucun décalage
+n'améliore la ressemblance avec une image antérieure — le meilleur essayé fait 0,1719 contre 0,1697
+sur place, donc **pire**.
+
+⚠️ **Sa vitesse de dérive a été choisie par mesure.** La première valeur essayée déformait le champ
+si peu qu'il ne changeait pas mesurablement en trente pas, et « rien ne le reconstitue » ne voulait
+alors plus rien dire — le test d'intention le refuse par son propre appareil, avant même de mesurer
+une translation.
+
+##### `artifice` — le premier motif événementiel du catalogue
+
+Tout le reste est continu. Ici un éclat a une **date de naissance** et une **origine**, toutes deux
+tirées de son numéro : l'intensité ne dépend que de la **distance à l'origine** et du temps écoulé —
+la géométrie de `pouls`, mais depuis un point qui change, et avec une extinction.
+
+⚠️ **Ses quatre constantes se tiennent, et la première rédaction les avait toutes trop lentes d'un
+ordre de grandeur** : le boîtier restait uni, le front n'atteignant jamais que 0,32 du cube unité
+quand sa diagonale vaut 1,73. Mesuré par le test d'intention avant qu'aucun œil ne le voie.
+
+##### Ce qui a été laissé de côté
+
+- **Plasma** — transposable, mais très proche de `vague` munie d'une palette. Une famille de plus
+  pour une différence que l'œil ne ferait pas.
+- **Chase, Running, Scanner, Theater, Larson, Meteor** — 1D par construction.
+- **Glitter, Sparkle** — déjà couverts par `scintillement`.
+
+⚠️ **Les trois sont réécrites, jamais recopiées** : le code de WLED est du C++ à état, lié à son API
+de segments. La question de licence est traitée avec [les palettes](#les-palettes--douze-dégradés-repris-de-wled),
+qui, elles, reprennent des données.
 
 #### Les palettes — douze dégradés, repris de WLED
 
