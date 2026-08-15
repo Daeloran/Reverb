@@ -716,6 +716,11 @@ impl Etat {
         let regules = self.regulation.canaux();
         let portees = self.relire_les_canaux(peripheriques, &regules, maintenant);
 
+        // ⚠️ **Ces deux ensembles portent la décision, pas son issue.** Une
+        // écriture qui échoue laisse le canal exactement où il était : la ranger
+        // avec celles qui n'ont pas eu lieu ferait conclure à `clore_les_episodes`
+        // qu'il porte enfin sa consigne — et le démon annoncerait une réparation
+        // qui n'a pas eu lieu, très exactement la faute que #110 corrige.
         let mut rejoues: HashSet<String> = HashSet::new();
         let mut neuves: HashSet<String> = HashSet::new();
         for regulation::Ecriture {
@@ -724,6 +729,11 @@ impl Etat {
             motif,
         } in self.regulation.tour(liquide, &portees)
         {
+            match motif {
+                regulation::Motif::Consigne => neuves.insert(canal.clone()),
+                regulation::Motif::NonAppliquee { .. } => rejoues.insert(canal.clone()),
+            };
+
             let ecrite = Percent::new(consigne)
                 .map_err(|erreur| erreur.to_string())
                 .and_then(|percent| {
@@ -736,24 +746,20 @@ impl Etat {
                     // Une consigne qui change se dit : sept ventilateurs sur dix
                     // en dépendent, et c'est la trace qui manquait pendant les
                     // soixante-douze minutes mesurées le 2026-08-15.
-                    regulation::Motif::Consigne => {
-                        neuves.insert(canal.clone());
-                        println!(
-                            "régulation : {canal} à {consigne} %{}",
-                            match liquide {
-                                Some(millidegres) =>
-                                    format!(" (liquide {:.1} °C)", f64::from(millidegres) / 1000.0),
-                                None => " (liquide illisible — repli)".to_owned(),
-                            }
-                        );
-                    }
+                    regulation::Motif::Consigne => println!(
+                        "régulation : {canal} à {consigne} %{}",
+                        match liquide {
+                            Some(millidegres) =>
+                                format!(" (liquide {:.1} °C)", f64::from(millidegres) / 1000.0),
+                            None => " (liquide illisible — repli)".to_owned(),
+                        }
+                    ),
                     // ⚠️ **Une seule ligne par épisode.** Cette écriture-ci repart
                     // à chaque tour tant que le canal n'applique pas, soit 86 400
                     // par jour — le chiffre même que #99 invoquait pour justifier
                     // son cache. Un journal qui les imprimerait toutes serait
                     // illisible au moment précis où il servirait.
                     regulation::Motif::NonAppliquee { porte } => {
-                        rejoues.insert(canal.clone());
                         if self.non_appliques.insert(canal.clone()) {
                             eprintln!(
                                 "attention : régulation : « {canal} » porte {} alors qu'il a reçu \
