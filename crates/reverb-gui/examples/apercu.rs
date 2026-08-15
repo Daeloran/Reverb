@@ -382,12 +382,20 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
         interface.set_argument_ecran(SharedString::from("kraken2023elite:coolant"));
         interface.set_affichage_ecran(SharedString::from("gauge:kraken2023elite:coolant"));
     }
+    // `REVERB_VERROU=ouvert` montre les deux canaux verrouillés cadenas ouvert.
+    // ⚠️ **Sans elle, la moitié du verrou ne se verrait sur aucune image** : le
+    // grisé et le libellé du bouton sont deux états d'un même geste, et celui
+    // qu'on ne rend pas est justement celui qui laisse écrire.
+    let ouvert = std::env::var("REVERB_VERROU").as_deref() == Ok("ouvert");
     interface.set_ventilateurs(ModelRc::new(VecModel::from(vec![
         // Un canal de chaque espèce : celui qui n'a pas de mode automatique et
-        // n'affiche donc pas de bouton « auto », celui qui en a un (#50), et
-        // celui qui est en quarantaine (#100, #102) — sans cette troisième
-        // ligne, ni le grisé d'un canal muet ni ce qu'il écrit à côté de sa
-        // barre ne se vérifieraient autrement qu'en débranchant un Kraken.
+        // n'affiche donc pas de bouton « auto », celui qui régule seul sur une
+        // courbe, celui qui régule seul sur le profil d'usine du périphérique
+        // (#112) — c'est le mode des deux canaux du Kraken sur SHYNAEL, et donc
+        // le cadenas qu'on verra vraiment —, et celui qui est en quarantaine
+        // (#100, #102). Sans ces lignes, ni le grisé d'un canal muet, ni ce
+        // qu'il écrit à côté de sa barre, ni le cadenas ne se vérifieraient
+        // autrement qu'en débranchant un Kraken.
         LigneVentilateur {
             canal: SharedString::from("nzxtsmart2:fan-1"),
             position: SharedString::from("radiateur haut"),
@@ -397,19 +405,35 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             mode: SharedString::from("manuel"),
             lisible: true,
             sait_faire_auto: false,
+            regule_seul: false,
+            deverrouille: false,
         },
         LigneVentilateur {
-            canal: SharedString::from("kraken2023elite:pump"),
+            canal: SharedString::from("kraken2023elite:pump-speed"),
             position: SharedString::new(),
-            rpm: SharedString::from("2400"),
+            rpm: SharedString::from("1357"),
+            pwm: 30,
+            consigne: consigne(Some(30)),
+            mode: SharedString::from("non-piloté"),
+            lisible: true,
+            sait_faire_auto: false,
+            regule_seul: true,
+            deverrouille: ouvert,
+        },
+        LigneVentilateur {
+            canal: SharedString::from("kraken2023elite:fan-speed"),
+            position: SharedString::new(),
+            rpm: SharedString::from("714"),
             pwm: 75,
             consigne: consigne(Some(75)),
             mode: SharedString::from("courbe-de-l'hôte"),
             lisible: true,
             sait_faire_auto: true,
+            regule_seul: true,
+            deverrouille: ouvert,
         },
         LigneVentilateur {
-            canal: SharedString::from("kraken2023elite:fan-speed"),
+            canal: SharedString::from("nct6687:sys-fan-1"),
             position: SharedString::new(),
             // Ni régime ni mode : rien n'a été mesuré à ce tour, et la ligne ne
             // montre donc aucune mesure. Le curseur, lui, **reste où il était**
@@ -425,6 +449,11 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             mode: SharedString::new(),
             lisible: false,
             sait_faire_auto: true,
+            // Le mode d'une ligne en quarantaine est vide : elle ne régule donc
+            // seule aux yeux de personne, et n'a pas de cadenas. Elle reste
+            // inerte pour l'autre raison, celle de #100.
+            regule_seul: false,
+            deverrouille: false,
         },
     ])));
     // Les cinq sondes retenues, avec une courbe dessinée à la main : de quoi

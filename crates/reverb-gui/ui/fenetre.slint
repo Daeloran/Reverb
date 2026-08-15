@@ -62,6 +62,32 @@ export struct LigneVentilateur {
     // les trois canaux de nzxtsmart2, dont le pilote n'a aucun mode
     // automatique : on ne montre pas un bouton qui ne peut qu'echouer (#50).
     sait-faire-auto: bool,
+    // Ce canal regule-t-il seul — « non-pilote » ou « courbe-de-l'hote » ?
+    // Alors quelque chose d'AUTRE que l'hote decide de sa vitesse, et une
+    // consigne ecrite la remplace sans retour possible : aucune valeur de
+    // pwmN_enable ne rend le Kraken a son profil d'usine, seule une coupure
+    // d'alimentation complete le fait (#112).
+    //
+    // ⚠️ C'est un fait LU sur le materiel, jamais une liste de noms de
+    // controleurs : un canal du Kraken deja passe en manuel n'a plus rien a
+    // proteger, et lui laisser un cadenas serait mentir.
+    regule-seul: bool,
+    // Le cadenas a-t-il ete ouvert a la main. Memoire de FENETRE : il repart
+    // ferme a chaque ouverture, un verrou qui se souviendrait d'avoir ete
+    // ouvert ne protegerait plus rien le lendemain.
+    deverrouille: bool,
+}
+
+// Un mode de la colonne MODE, et ce qu'il veut dire (#112).
+//
+// Le texte vient de `telemetrie::aide_des_modes()` — six libelles dont trois
+// demandent un contexte que seul `docs/VENTILATEURS.md` porte. Chacun dit QUI
+// decide de la vitesse et CE QU'ON PERD en y touchant : c'est l'information qui
+// manquait le 2026-08-15, quand un clic sur « auto » a mis la consigne de la
+// pompe a 0 %.
+export struct AideMode {
+    mode: string,
+    texte: string,
 }
 
 export struct LigneTemperature {
@@ -254,6 +280,10 @@ export component Fenetre inherits Window {
     // Les couches de halo, de la plus large a la plus serree.
     in property <[PointHalo]> halos;
     in property <[LigneVentilateur]> ventilateurs;
+    // Les six modes et leur explication. La liste vient de la bibliotheque, pas
+    // d'ici : elle est celle du protocole, et l'ecrire dans ce fichier la
+    // mettrait hors de portee des tests.
+    in property <[AideMode]> aides-des-modes;
     in property <[LigneTemperature]> temperatures;
     in property <[FamilleAnimation]> familles;
     // Ce que le menu deroulant propose : « aucune » d'abord, puis les dix
@@ -378,6 +408,8 @@ export component Fenetre inherits Window {
     // reprendre — mais pas tout de suite.
     callback relacher-ventilateur(string);
     callback rendre-au-firmware(string);
+    // Le geste explicite qui ouvre — ou referme — le cadenas d'un canal (#112).
+    callback basculer-verrou(string);
 
     // La famille retenue, ou une famille vide quand c'est « aucune ». Evite de
     // repeter le decalage de rang — le menu commence par « aucune », le
@@ -1285,7 +1317,70 @@ export component Fenetre inherits Window {
                             // ── Onglet VENTILATEURS ────────────────────────
                             if root.onglet == 2: VerticalLayout {
                                 spacing: 8px;
-                                Titre { text: "VENTILATEURS"; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Titre {
+                                        text: "VENTILATEURS";
+                                        horizontal-stretch: 1;
+                                        vertical-alignment: center;
+                                    }
+                                    // ⚠️ UN point d'interrogation pour le
+                                    // panneau, et non un par ligne. Le panneau
+                                    // qu'il ouvre liste les SIX modes quelle que
+                                    // soit la ligne d'ou l'on part : cinq icones
+                                    // ouvriraient cinq fois le meme texte, dans
+                                    // la rangee meme ou le cadenas vient de
+                                    // prendre de la place.
+                                    Rectangle {
+                                        width: 20px;
+                                        height: 20px;
+                                        border-radius: 10px;
+                                        background: #1f1f28;
+                                        border-width: 1px;
+                                        border-color: #2a2a36;
+                                        Text {
+                                            text: "?";
+                                            font-size: 12px;
+                                            font-weight: 700;
+                                            color: #b9bbc9;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                        }
+                                        TouchArea { clicked => { modes.show(); } }
+                                    }
+                                }
+                                modes := PopupWindow {
+                                    close-policy: close-on-click-outside;
+                                    width: 320px;
+                                    height: 460px;
+                                    Rectangle {
+                                        background: #14141b;
+                                        border-radius: 10px;
+                                        border-width: 1px;
+                                        border-color: #2a2a36;
+                                        VerticalLayout {
+                                            padding: 12px;
+                                            spacing: 8px;
+                                            Titre { text: "CE QUE LA COLONNE MODE VEUT DIRE"; }
+                                            for aide in root.aides-des-modes: VerticalLayout {
+                                                spacing: 2px;
+                                                Text {
+                                                    text: aide.mode;
+                                                    font-size: 12px;
+                                                    font-weight: 700;
+                                                    color: #e6e6ef;
+                                                }
+                                                Text {
+                                                    text: aide.texte;
+                                                    font-size: 11px;
+                                                    color: #8a8c9b;
+                                                    wrap: word-wrap;
+                                                }
+                                            }
+                                            Rectangle { vertical-stretch: 1; }
+                                        }
+                                    }
+                                }
                                 for canal in root.ventilateurs: VerticalLayout {
                                     spacing: 2px;
                                     HorizontalLayout {
@@ -1323,7 +1418,17 @@ export component Fenetre inherits Window {
                                             // il était plutôt que de retomber à
                                             // zéro, qui se lirait comme un
                                             // ventilateur qu'on vient d'arrêter.
-                                            enabled: canal.lisible;
+                                            //
+                                            // ⚠️ Ni celle d'un canal qui régule
+                                            // seul, tant que son cadenas est
+                                            // fermé (#112) : la tirer
+                                            // remplacerait une régulation
+                                            // qu'aucune commande ne rétablit.
+                                            // Les deux règles se composent, et
+                                            // c'est `commande_verrouillable`
+                                            // qui en décide vraiment — ceci
+                                            // n'est que ce qui se voit.
+                                            enabled: canal.lisible && (!canal.regule-seul || canal.deverrouille);
                                             changed(valeur) => {
                                                 root.regler-ventilateur(canal.canal, Math.round(valeur));
                                             }
@@ -1350,6 +1455,46 @@ export component Fenetre inherits Window {
                                             vertical-alignment: center;
                                             horizontal-alignment: right;
                                             min-width: 40px;
+                                        }
+                                        // Le cadenas. ⚠️ Il ne parait QUE sur un
+                                        // canal qui regule seul : sept
+                                        // ventilateurs sur dix sont en
+                                        // « manuel », et leur imposer un geste
+                                        // de plus serait payer le prix du
+                                        // verrou sans en tirer la protection.
+                                        //
+                                        // ⚠️ Le libelle dit ce que le CLIC FAIT,
+                                        // et non l'etat courant. C'est ce qui
+                                        // rend le geste explicite — critere
+                                        // d'acceptation de #112.
+                                        //
+                                        // Un glyphe tiendrait : U+1F512 sort bien
+                                        // de la police de repli du rendu logiciel,
+                                        // mesure le 2026-08-15 — U+26BF, lui, sort
+                                        // en carre vide. Mais un cadenas seul ne
+                                        // dit pas dans quel sens il bascule :
+                                        // montre-t-il l'etat, ou l'action ? C'est
+                                        // l'arbitrage des dix pastilles
+                                        // d'animation contre un menu deroulant, et
+                                        // ce projet ecrit les mots. Le prix est en
+                                        // largeur, et il tombe sur les seuls
+                                        // canaux qu'on ne regle presque jamais —
+                                        // ceux qui regulent tout seuls.
+                                        //
+                                        // ⚠️ `width: 0px` en plus de `visible` :
+                                        // un element invisible garde sa place
+                                        // en layout, et le laisser la
+                                        // creuserait un trou.
+                                        Button {
+                                            text: canal.deverrouille ? "Verrouiller" : "Déverrouiller";
+                                            visible: canal.regule-seul;
+                                            width: canal.regule-seul ? self.preferred-width : 0px;
+                                            // Inerte sur un canal muet, comme
+                                            // « auto » (#100) : deverrouiller
+                                            // une barre qui n'atteint personne
+                                            // ne fait qu'annuler la protection.
+                                            enabled: canal.lisible;
+                                            clicked => { root.basculer-verrou(canal.canal); }
                                         }
                                         // ⚠️ `width: 0px` en plus de `visible` : un
                                         // element invisible garde sa place en

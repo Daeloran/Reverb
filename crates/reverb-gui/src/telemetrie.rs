@@ -68,7 +68,10 @@
 use std::collections::HashMap;
 
 use reverb_proto::Position;
-use reverb_proto::ipc::{FanAction, Request, ResponseLine};
+use reverb_proto::ipc::{
+    FanAction, MODE_COURBE_DE_L_HOTE, MODE_INCONNU_PREFIXE, MODE_MANUEL, MODE_NON_PILOTE,
+    MODE_NON_REGLABLE, MODE_PLEIN_REGIME, Request, ResponseLine,
+};
 
 use crate::sondes::Releve;
 
@@ -103,6 +106,153 @@ impl LigneCanal {
             action,
         })
     }
+
+    /// Ce canal régule-t-il seul ? (#112)
+    ///
+    /// Vrai en `non-piloté` et en `courbe-de-l'hôte` — les deux modes où
+    /// **quelque chose d'autre que l'hôte** décide de la vitesse. Une consigne
+    /// écrite là ne s'ajoute pas à la régulation, elle la remplace, et le canal
+    /// n'y revient pas : `docs/VENTILATEURS.md` établit qu'aucune valeur de
+    /// `pwmN_enable` ne rend le Kraken à son profil d'usine, seule une coupure
+    /// d'alimentation complète le fait.
+    ///
+    /// ⚠️ **Le déclencheur est le mode, jamais le nom du contrôleur.** Verrouiller
+    /// sur « kraken » donnerait aujourd'hui le bon résultat — seuls ses deux
+    /// canaux lisent `non-piloté` — et mentirait sur un canal du Kraken déjà
+    /// passé en manuel, où il n'y a plus rien à protéger.
+    ///
+    /// ⚠️ **Ni le drapeau `sait_faire_auto`.** Depuis #97 il vaut « le pilote sait
+    /// faire auto **et** une courbe a été posée », donc toujours faux : il ne dit
+    /// plus rien du matériel.
+    pub fn regule_seul(&self) -> bool {
+        self.mode == MODE_NON_PILOTE || self.mode == MODE_COURBE_DE_L_HOTE
+    }
+
+    /// La requête qu'une consigne produit, verrou compris (#112).
+    ///
+    /// `None` si le canal est illisible (#100) **ou** s'il régule seul et que le
+    /// verrou n'a pas été ouvert. Les deux règles se composent : ouvrir le
+    /// cadenas d'un canal en quarantaine ne rend pas sa barre manipulable, sans
+    /// quoi on tirerait une poignée vers un périphérique dont on sait qu'il ne
+    /// répond plus.
+    ///
+    /// ⚠️ **Une seconde méthode plutôt qu'un garde dans [`LigneCanal::commande`]** :
+    /// celle-ci est figée par #100 — « les commandes d'un canal illisible
+    /// n'émettent rien », et rien d'autre. Et le verrou n'est pas une propriété
+    /// de la ligne : c'est une propriété de la ligne **et** d'un geste que
+    /// l'utilisateur vient de faire ou non, d'où le booléen en argument. Rangé
+    /// dans [`LigneCanal`], il se refermerait tout seul au tour de `status`
+    /// suivant, une seconde plus tard, au milieu du geste.
+    ///
+    /// ⚠️ **La consigne part telle quelle** une fois le verrou ouvert. Le borner
+    /// ou le remplacer au passage rendrait le déverrouillage plus dangereux que
+    /// son absence.
+    pub fn commande_verrouillable(&self, action: FanAction, deverrouille: bool) -> Option<Request> {
+        if self.regule_seul() && !deverrouille {
+            return None;
+        }
+        self.commande(action)
+    }
+}
+
+/// Le libellé sous lequel la table d'aide nomme la **famille** `inconnu-<n>`.
+///
+/// ⚠️ **Ce n'est pas un jeton de fil** : le démon n'écrit jamais « N », il écrit
+/// le nombre lu dans `pwmN_enable`. C'est un nom d'affichage, et il vit donc ici
+/// et non à côté des six jetons de `reverb-proto`. Une table qui listerait
+/// `inconnu-0`, `inconnu-1`, … dirait 256 fois la même chose ; une table qui
+/// n'exposerait rien laisserait sans aide le seul mode qu'on ne peut pas
+/// deviner.
+const INCONNU_GENERIQUE: &str = "inconnu-N";
+
+/// Les six modes de la colonne MODE, et ce que chacun veut dire.
+///
+/// Chaque texte dit **qui décide de la vitesse** et **ce qu'on perd en y
+/// touchant**. C'est l'information qui manquait le 2026-08-15 : rien, nulle
+/// part, ne disait qu'un canal en `non-piloté` exécutait une régulation d'usine,
+/// ni qu'un geste la remplacerait sans retour. La matière vient de
+/// `docs/VENTILATEURS.md` et de la documentation de `reverb_hw::hwmon::Mode`.
+const AIDES: [(&str, &str); 6] = [
+    (
+        MODE_NON_PILOTE,
+        "Le pilote n'a jamais touché ce canal : c'est le périphérique qui décide, \
+         sur son propre profil. Lui écrire une consigne l'en sort, et aucune commande \
+         ne l'y rend — seule une coupure d'alimentation complète.",
+    ),
+    (
+        MODE_MANUEL,
+        "C'est l'hôte qui décide : la consigne écrite est appliquée telle quelle, \
+         et elle ne bouge plus. Aucune régulation n'est en cours, donc rien ne se \
+         perd à la changer.",
+    ),
+    (
+        MODE_COURBE_DE_L_HOTE,
+        "Le firmware suit la courbe que l'hôte lui a posée : elle décide de la \
+         vitesse d'après la température. Une consigne fixe la remplace, et c'est \
+         la seule courbe que vous ayez posée vous-même.",
+    ),
+    (
+        MODE_PLEIN_REGIME,
+        "Personne ne régule : le pilote a lâché la barre et le canal tourne à fond. \
+         C'est ce qu'une écriture de zéro provoque, jamais ce qu'une lecture établit \
+         — rien à perdre, et tout à gagner à en sortir.",
+    ),
+    (
+        INCONNU_GENERIQUE,
+        "Le fichier de mode porte une valeur que l'hôte ne sait pas interpréter, et \
+         le nombre affiché est celle qui a été lue. On ne sait donc ni qui décide de \
+         la vitesse, ni ce qu'une consigne remplacerait.",
+    ),
+    (
+        MODE_NON_REGLABLE,
+        "La source n'expose aucun fichier de mode — le cas des canaux de la carte \
+         mère. La vitesse se lit, elle ne s'écrit pas : aucun mode ne s'y pose, \
+         donc aucun ne s'y perd.",
+    ),
+];
+
+/// Le texte d'aide d'un libellé de mode — `None` s'il n'est aucun des six.
+///
+/// La clé est le libellé **verbatim** de la ligne `chan`, celui que la colonne
+/// affiche : le point d'interrogation est à côté du mode, et c'est donc ce
+/// texte-là qui sert de clé.
+///
+/// ⚠️ **Reconnu exactement, jamais approximativement.** Une recherche tolérante
+/// accepterait `non-pilote` sans accent ou `manual` en anglais, et masquerait
+/// donc le jour où le libellé du démon dérive — au moment précis où il faudrait
+/// le voir, puisque la fenêtre décide dessus (#112).
+///
+/// Seule exception, et elle est dans le protocole : la famille `inconnu-<n>`
+/// porte un nombre, et se reconnaît donc à son préfixe. Les 256 valeurs
+/// partagent une seule aide — le nombre est justement ce que personne ne sait
+/// interpréter, et 256 textes seraient 256 façons d'écrire « on ne sait pas ».
+pub fn aide_du_mode(mode: &str) -> Option<&'static str> {
+    if mode.starts_with(MODE_INCONNU_PREFIXE) {
+        return aide_generique_des_inconnus();
+    }
+    AIDES
+        .iter()
+        .find(|(libelle, _)| *libelle == mode)
+        .map(|(_, texte)| *texte)
+}
+
+/// Les six modes et leur aide, de quoi garnir le panneau que le `?` ouvre.
+///
+/// La famille `inconnu-<n>` y figure sous son nom générique, les cinq autres
+/// tels que la colonne les écrit. C'est la **même** donnée que celle
+/// qu'[`aide_du_mode`] retrouve : deux sources séparées divergeraient au premier
+/// texte corrigé d'un seul côté, et c'est le genre d'écart qu'on ne voit jamais
+/// parce qu'on ne regarde jamais les deux en même temps.
+pub fn aide_des_modes() -> Vec<(&'static str, &'static str)> {
+    AIDES.to_vec()
+}
+
+/// L'aide de la famille `inconnu-<n>`, prise dans la table plutôt que recopiée.
+fn aide_generique_des_inconnus() -> Option<&'static str> {
+    AIDES
+        .iter()
+        .find(|(libelle, _)| *libelle == INCONNU_GENERIQUE)
+        .map(|(_, texte)| *texte)
 }
 
 /// Ce qu'un tour de `status` donne à montrer.
@@ -210,5 +360,35 @@ impl Tri {
             }
         }
         vue
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests de logique de l'aide sur les modes (#112).
+    //!
+    //! Ce que l'aide **dit** est figé par les tests d'intention
+    //! (`tests/spec_verrou_canal.rs`). Ce qui reste ici est ce que ceux-là ne
+    //! peuvent pas voir : que le seul libellé écrit à la main dans ce fichier
+    //! appartient bien à la famille que le démon écrit.
+
+    use super::*;
+
+    #[test]
+    fn le_libelle_generique_appartient_a_la_famille_des_inconnus() {
+        // C'est le seul endroit de `reverb-gui` où une graphie de mode est
+        // écrite plutôt que lue dans `reverb-proto` — le `N` est un nom
+        // d'affichage, le démon écrit un nombre. Si le préfixe du protocole
+        // changeait, la table nommerait une famille qui n'existe plus et le
+        // point d'interrogation d'un `inconnu-7` ouvrirait sur du vide.
+        assert!(
+            INCONNU_GENERIQUE.starts_with(MODE_INCONNU_PREFIXE),
+            "« {INCONNU_GENERIQUE} » doit commencer par « {MODE_INCONNU_PREFIXE} »"
+        );
+        assert_eq!(
+            aide_du_mode(INCONNU_GENERIQUE),
+            aide_du_mode(&format!("{MODE_INCONNU_PREFIXE}7")),
+            "le nom générique et un libellé réel doivent ouvrir la même aide"
+        );
     }
 }
