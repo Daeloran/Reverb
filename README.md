@@ -654,6 +654,27 @@ les positions réelles — aucun ventilateur n'y est vu par la tranche, et les q
 s'y distinguent. Son plafond reste **ouvert** : une plaque pleine masquerait les trois ventilateurs
 du dessus, qui sont ce qu'elle sert à montrer. La sélection survit au changement de vue.
 
+**Le geste de sélection porte sur tout le panneau, le dessin reste dans son carré.** La maquette
+vit dans un carré de côté `min(largeur, hauteur)`, centré dans le panneau « LE BOÎTIER » : ses
+tracés sont des `Path` en `viewbox` carré, que Slint met à l'échelle **uniformément**, et les
+élargir demanderait de tous les reprendre — c'est le sujet de #118. La **surface sensible**, elle,
+a quitté le carré pour le panneau (#121) : ses bords tombaient près des extrémités des
+ventilateurs, si bien qu'un rectangle commencé dans une marge ne traçait rien, et qu'une maquette
+qui répond partout sauf sur ses bords se lit comme une maquette en panne.
+
+⚠️ **Les deux repères diffèrent d'une demi-marge, et la conversion se teste.** Elle vit dans
+`plan::trace_dans_la_maquette` — une fonction pure, sans fenêtre ni souris —, jamais dans le
+`.slint` : ce qui est du calcul se teste, ce qui est du dessin se regarde. Mesuré sur la fenêtre de
+l'aperçu, dont le panneau fait 576 × 548 px : `REVERB_TRACE=0,0,1,1` couvrait **276 à 824 px**, le
+carré ; il couvre désormais **262 à 838**, le panneau — quatorze pixels de chaque côté qui ne
+répondaient pas.
+
+⚠️ **Un geste parti d'une marge sort de `0..1`, et rien ne l'écrête.** Écrêter serait la correction
+qu'on écrit sans y penser, pour « rester dans le cadre » : elle replierait le coin sur le bord du
+carré, où il attraperait la première rangée de LED — la zone morte d'hier deviendrait une sélection
+au hasard. Un rectangle **entièrement** dans une marge ne retient donc rien, et c'est un résultat :
+il désélectionne, comme n'importe quel coin vide du carré.
+
 Les deux vues sont habillées d'un châssis, de parois et des organes internes — plateau de carte
 mère, carte graphique, cache d'alimentation —, d'un cadre par ventilateur, du corps des quatre
 barrettes et de la dalle du Kraken. **Aucune de ces formes n'a de coordonnée dans le `.slint`** :
@@ -687,6 +708,11 @@ REVERB_ONGLET=ventilos                      apercu ventilos.ppm   # les quatorze
 REVERB_TRACE=0.2,0.2,0.6,0.7                apercu trace.ppm      # une sélection en cours
 REVERB_MESSAGE=                             apercu tete.ppm       # la tête de fenêtre au repos
 ```
+
+⚠️ **`REVERB_TRACE` s'exprime en fractions du panneau, et non plus du carré** (#121) — le repère
+du geste, celui où le rectangle se dessine. `0,0,1,1` couvre donc le panneau entier, marges
+comprises, et `0,0.12,0.55,0.78` est un geste parti de la marge gauche : c'est le cas que l'issue
+existe pour corriger, et il ne se voit sur aucune autre image.
 
 ⚠️ **Les deux dernières sont nées d'un correctif qui n'a rien corrigé.** Le rectangle de sélection
 ne vit que pendant un appui de souris : aucune des autres variables ne pouvait le montrer. On a
