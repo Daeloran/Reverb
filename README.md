@@ -40,6 +40,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Un Kraken muet, le démon tente de le réparer | ✅ trois resets USB bornés, sur son propre fil, puis redécouverte |
 | Régulation des ventilateurs | ✅ les trois canaux sans mode auto, sur la courbe du liquide |
 | Un canal qui régule seul ne se défait pas d'un geste | ✅ verrou dans la fenêtre, refus en ligne de commande |
+| La régulation se pilote à la souris | ✅ prise en charge, courbe éditée et tracée par la fonction du démon |
 
 ## Ce que les protocoles permettent
 
@@ -79,7 +80,8 @@ reverb  (outil de validation, garde l'usbfs ──► 1e71:300c bulk, écran Kra
    │
    ├── reverb-hw     (les quatre chemins d'E/S — hidraw, usbfs, i2c, hwmon)
    ├── reverb-anim   (géométrie du boîtier + catalogue d'animations — pur)
-   └── reverb-proto  (encodage des trames, conversions, CRC-8, protocole IPC — pur)
+   └── reverb-proto  (encodage des trames, conversions, CRC-8, protocole IPC,
+                      courbe de régulation — pur)
 ```
 
 `reverb-anim` est importé par le démon **et** par la fenêtre : la maquette place ses LED avec la
@@ -450,8 +452,11 @@ de mode automatique » (#50) — et ajoute désormais où aller.
 
 **Ce qui n'y est pas** : une courbe par canal — tant que la répartition physique des ventilateurs
 par canal reste l'inconnue documentée de [`docs/VENTILATEURS.md`](docs/VENTILATEURS.md), les trois
-en partagent une —, toute sonde autre que le liquide, les deux canaux du Kraken dont le firmware
-régule déjà correctement, et l'édition de la courbe depuis la fenêtre.
+en partagent une —, toute sonde autre que le liquide, et les deux canaux du Kraken dont le firmware
+régule déjà correctement.
+
+Tout cela se pilote aussi [depuis la fenêtre](#la-régulation-depuis-la-fenêtre) depuis #113 — y
+compris la courbe, que #99 laissait en hors scope.
 
 ### Un canal qui régule seul ne se défait pas d'un geste distrait
 
@@ -737,6 +742,46 @@ ne le disait.
 `REVERB_ONGLET=ventilos REVERB_VERROU=ouvert` le rend verrou ouvert — les deux moitiés d'un même
 geste, dont celle qui laisse écrire ne se verrait sinon sur aucune image.
 
+### La régulation depuis la fenêtre
+
+Chaque canal **régulable** — celui dont le pilote n'a aucun mode automatique — porte un bouton
+« Réguler », et « Ne plus réguler » une fois pris en charge. La courbe s'édite sous la liste, avec
+le tracé de ce qu'elle donne, et le bouton « Appliquer la courbe » la pose par le socket.
+
+⚠️ **« Régulé » et « verrouillé » grisent tous deux une barre, pour des raisons opposées**, et la
+fenêtre doit donc les distinguer : un canal régulé est piloté **par le démon** et on protège la
+boucle ; un canal verrouillé régule **tout seul** et on protège sa régulation. D'où deux signes
+différents — une pastille « régulé » d'un côté, un bouton « Déverrouiller » de l'autre. Les
+confondre laisserait « pourquoi je ne peux pas bouger cette barre » sans réponse.
+
+⚠️ **Le fait « ce canal se régule côté hôte » vient du protocole, pas d'une liste tenue dans la
+fenêtre.** La ligne `chan` porte un drapeau de plus, lu dans le **nom du pilote** (#50). Le champ
+voisin `sait_faire_auto` ne pouvait pas servir : depuis #97 il vaut « le bouton auto marcherait
+maintenant », donc toujours `non`, et il ne dit plus rien du matériel.
+
+⚠️ **Le tracé passe par `Courbe::consigne`, la fonction que le démon exécute** — d'où la descente de
+`Courbe` dans `reverb-proto`, que la fenêtre et le démon partagent. Une seconde interpolation écrite
+côté fenêtre n'aurait aucune raison d'être la bonne, et l'aperçu montrerait une courbe que le
+boîtier n'applique pas. Le **refus** d'une courbe invalide vient du même juge, `Courbe::depuis`, et
+arrive donc devant la poignée qu'on vient de bouger plutôt que dans un journal après coup.
+
+⚠️ **Le tracé était écrasé dans un carré, et c'est l'image d'aperçu qui l'a montré.** Slint met un
+`Path` à l'échelle **uniformément** — `min(largeur/viewbox_largeur, hauteur/viewbox_hauteur)` — et
+il **ne rogne pas** au viewbox : un carré unité dans un cadre de 359 × 88 px n'occupait que 88 px de
+large, centré. **24 % du cadre, mesuré au pixel**, les deux plateaux comprimés avec la rampe — c'est
+justement l'écrêtage aux bornes qu'on ne voyait plus. Et ne corriger que le `viewbox-height` fait
+**déborder** la courbe par le haut au lieu de l'étirer, puisque rien ne la rogne : essayé, mesuré
+aussi. Le tracé est donc émis sur `TRACE_ASPECT` × 1, et le cadre tient ce même rapport ; la
+constante vit dans le Rust et sert deux fois côté fenêtre, pour n'exister qu'une seule fois.
+
+```bash
+REVERB_ONGLET=ventilos                          apercu ventilos.ppm  # la liste et la courbe
+REVERB_ONGLET=ventilos REVERB_COURBE=invalide   apercu refus.ppm     # le refus, sans tracé
+```
+
+⚠️ **La seconde n'est pas un ornement** : un refus ne vit que le temps d'un réglage de travers, et
+sans elle il ne se verrait sur aucune image.
+
 ### Ce que la fenêtre ne fait pas
 
 - Elle **n'ouvre aucun périphérique** et **n'écrit aucun fichier**. Tout passe par le socket, qui
@@ -751,7 +796,8 @@ geste, dont celle qui laisse écrire ne se verrait sinon sur aucune image.
   `nzxt-smart2` n'a aucun mode automatique — sa vitesse est celle que l'hôte écrit —, et montrer un
   bouton qui ne peut qu'échouer vaut moins que ne pas le montrer. Ce que le démon sait faire pour
   ces trois canaux-là s'appelle [`regule`](#la-régulation--les-sept-ventilateurs-que-personne-ne-pilotait),
-  et ne se pilote pour l'instant que par le socket.
+  et se pilote depuis #113 [par la fenêtre comme par le socket](#la-régulation-depuis-la-fenêtre) —
+  sous un bouton « Réguler », à la place où « auto » ne peut pas s'afficher.
   ⚠️ **Depuis #97, il ne s'affiche donc nulle part** : « auto » écrit `pwm_enable = 2`, qui fait
   exécuter la courbe de l'**hôte** — zéro partout tant qu'aucune n'a été téléversée, ce qui arrête
   la régulation de la pompe au lieu de la rendre. Le démon n'ayant pas de verbe `curve` sur le
