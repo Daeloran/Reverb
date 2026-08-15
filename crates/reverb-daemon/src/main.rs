@@ -26,7 +26,8 @@ use reverb_daemon::zones::{self, Rendu, Tampon, Zones};
 use reverb_hw::hwmon::Percent;
 use reverb_proto::composition::{Ancre, Composition, Fond, Source};
 use reverb_proto::ipc::{
-    FanAction, LightTarget, ProfilAction, ReguleAction, Request, ResponseLine, ScreenAction,
+    CURVE_POINTS, FanAction, LightTarget, ProfilAction, ReguleAction, Request, ResponseLine,
+    ScreenAction,
 };
 use reverb_proto::ram::{self, SlotAddress};
 use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
@@ -1669,6 +1670,46 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
                     }]
                 }
                 Err(message) => vec![ResponseLine::Error { message }],
+            }
+        }
+
+        // ⚠️ **Poser et activer dans le même appel** (#104). Le carnet de #97 ne
+        // peut vivre que dans le processus qui écrit — les quarante fichiers de
+        // courbe sont en écriture seule —, donc deux commandes seraient deux
+        // carnets neufs et la seconde refuserait. C'est la raison d'être du
+        // drapeau, pas une commodité.
+        //
+        // ⚠️ **Aucune ligne de réponse ne rend la courbe posée.** Le matériel ne
+        // la relit pas, et un `curve` qui répondrait par ce qu'il vient d'écrire
+        // dirait ce qu'on a *voulu*, jamais ce que le canal porte — exactement le
+        // mode de défaillance rassurant que #110 a corrigé sur la régulation.
+        Request::Curve {
+            channel,
+            points,
+            activer,
+        } => {
+            // `Percent::new` refait la borne que `parse_request` a déjà posée :
+            // le socket ne doit pas être une porte dérobée sur les garde-fous de
+            // la ligne de commande, et c'est ce type qui les porte.
+            let mut consignes = [Percent::new(0).expect("0 est dans les bornes"); CURVE_POINTS];
+            let mut refus = None;
+            for (place, brut) in consignes.iter_mut().zip(points) {
+                match Percent::new(brut) {
+                    Ok(valeur) => *place = valeur,
+                    Err(erreur) => {
+                        refus = Some(erreur.to_string());
+                        break;
+                    }
+                }
+            }
+            match refus {
+                Some(message) => vec![ResponseLine::Error { message }],
+                None => match peripheriques.poser_courbe(&channel, &consignes, activer) {
+                    Ok(()) => vec![ResponseLine::End],
+                    Err(erreur) => vec![ResponseLine::Error {
+                        message: erreur.to_string(),
+                    }],
+                },
             }
         }
 

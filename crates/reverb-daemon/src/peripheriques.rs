@@ -70,11 +70,11 @@ pub struct Peripheriques {
     /// Sans lui, « auto » écrivait `2` sur un tableau de zéros et arrêtait la
     /// régulation de la pompe, en silence (issue #97).
     ///
-    /// ⚠️ **Le démon n'a aucun verbe pour poser une courbe**, et ce carnet reste
-    /// donc vide toute sa vie : « auto » est refusé par le socket, et la fenêtre
-    /// n'affiche pas le bouton. Conséquence connue et assumée de #97 — un bouton
-    /// qui ne peut qu'arrêter la pompe vaut moins que pas de bouton —, suivie
-    /// par l'issue #104, qui ajoutera le verbe `curve`.
+    /// ⚠️ **C'est le verbe `curve` qui le remplit** (#104). Jusque-là il restait
+    /// vide toute sa vie, le démon n'ayant aucun moyen de poser une courbe :
+    /// « auto » était refusé par le socket, et la fenêtre n'affichait pas le
+    /// bouton. Conséquence connue et assumée de #97 — un bouton qui ne peut
+    /// qu'arrêter la pompe vaut moins que pas de bouton.
     courbes: CourbesPosees,
     /// Le fil qui tient l'écran du Kraken (#83). Absent si le Kraken n'est pas
     /// branché, ou si la règle udev manque — une machine sans lui doit continuer
@@ -386,6 +386,46 @@ impl Peripheriques {
     /// rien écrire.
     pub fn courbes_posees(&self) -> &CourbesPosees {
         &self.courbes
+    }
+
+    /// Pose une courbe firmware sur un canal, et la bascule si `activer` (#104).
+    ///
+    /// ⚠️ **Poser et activer tiennent dans un seul appel, et c'est tout l'objet
+    /// de l'issue.** Le carnet ne peut vivre que dans le processus qui écrit —
+    /// les fichiers `tempN_auto_pointM_pwm` sont en écriture seule —, donc deux
+    /// commandes séparées seraient deux carnets neufs, et la seconde refuserait.
+    ///
+    /// ⚠️ **La bascule vient après les quarante points, jamais avant.**
+    /// `set_curve` ne note le canal au carnet qu'une fois tout écrit ; basculer
+    /// d'abord ferait exécuter au pilote un tableau à moitié rempli, c'est-à-dire
+    /// des zéros — l'incident de #97, repris par l'autre bout.
+    ///
+    /// ⚠️ **Un échec de la bascule laisse la courbe posée**, et c'est voulu : les
+    /// quarante points sont réellement sur le matériel, et l'oublier du carnet
+    /// ferait refuser un « auto » désormais légitime.
+    pub fn poser_courbe(
+        &mut self,
+        canal: &str,
+        points: &[Percent; hwmon::CURVE_POINTS],
+        activer: bool,
+    ) -> io::Result<()> {
+        let cible = self
+            .canaux
+            .iter()
+            .find(|c| c.name == canal)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("canal « {canal} » inconnu"),
+                )
+            })?;
+        let courbe = hwmon::Curve::from_points(*points)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        hwmon::set_curve(cible, &courbe, &mut self.courbes)?;
+        if activer {
+            hwmon::set_mode(cible, Mode::HostCurve, &self.courbes)?;
+        }
+        Ok(())
     }
 
     /// Applique une consigne à un canal, ou le rend à son firmware.

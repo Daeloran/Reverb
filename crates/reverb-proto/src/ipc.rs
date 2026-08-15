@@ -63,6 +63,18 @@ use crate::screen::BRIGHTNESS_MAX as LUMINOSITE_MAX;
 /// diagnostic exactement l'allocation qu'on refusait à l'analyse.
 pub const MAX_LINE_LEN: usize = 1024;
 
+/// Combien de points porte une courbe matérielle.
+///
+/// C'est le nombre de fichiers `tempN_auto_pointM_pwm` qu'un canal expose, et il
+/// vient du pilote — ni le protocole ni l'utilisateur n'en décident.
+///
+/// ⚠️ **Il vit ici et `reverb-hw` le réexporte**, jamais l'inverse ni en double.
+/// `reverb-hw` dépend déjà de `reverb-proto` ; deux `40` écrits séparément
+/// dériveraient un jour, et le symptôme serait une courbe tronquée ou complétée
+/// en silence — exactement ce que le type `[u8; CURVE_POINTS]` rend
+/// irreprésentable.
+pub const CURVE_POINTS: usize = 40;
+
 /// Marque d'un champ absent, dans une ligne de réponse.
 const ABSENT: &str = "-";
 
@@ -99,6 +111,35 @@ pub enum Request {
     },
     /// `fan <canal> pwm <0-100>` ou `fan <canal> auto`.
     Fan { channel: String, action: FanAction },
+    /// `curve <canal> set|enable <p1>,…,<p40>` — pose une courbe firmware, et
+    /// la bascule dans le même souffle si `activer`.
+    ///
+    /// ⚠️ **Poser et activer doivent tenir dans un seul geste** (#104). Depuis
+    /// #97, `fan <canal> auto` refuse tant qu'aucune courbe n'a été téléversée
+    /// sur le canal, et ce carnet ne peut vivre que **dans le processus qui a
+    /// écrit** : les fichiers `tempN_auto_pointM_pwm` sont en écriture seule et
+    /// ne se relisent jamais. Deux commandes, c'est deux processus, donc deux
+    /// carnets neufs — et le flux qui marchait avant #97 refusait, même démon
+    /// arrêté.
+    ///
+    /// ⚠️ **Les quarante points sont un tableau de taille fixe, pas un `Vec`** :
+    /// une courbe incomplète devient irreprésentable au lieu d'être refusée à
+    /// l'exécution. C'est la règle de `SlotAddress` pour la RAM, appliquée au
+    /// seul autre endroit où une écriture partielle serait coûteuse — ici, c'est
+    /// la régulation de la pompe qui s'arrête.
+    ///
+    /// ⚠️ **`set` n'est jamais sous-entendu.** Un `enable` facultatif en fin de
+    /// ligne se lirait aussi bien comme un oubli que comme un choix, et c'est le
+    /// geste qui a mis la consigne de la pompe à 0 % (#97).
+    ///
+    /// ⚠️ **Le démon ne pourra jamais relire la courbe posée**, et rien ici ne
+    /// doit prétendre le contraire : il n'existe pas de ligne de réponse
+    /// `curve`.
+    Curve {
+        channel: String,
+        points: [u8; CURVE_POINTS],
+        activer: bool,
+    },
     /// `geometry` — lit la géométrie ; `geometry <position> clé=valeur…` la change.
     ///
     /// Même partage que pour `Animate` : le protocole transporte, le moteur
@@ -731,6 +772,59 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
             })
         }
 
+        "curve" => {
+            let (canal, mot, liste) = match arguments[..] {
+                [canal, mot, liste] => (canal, mot, liste),
+                [] => return Err(mauvais("attend un nom de canal")),
+                [_] | [_, _] => {
+                    return Err(mauvais(
+                        "attend « <canal> set <p1>,…,<p40> » ou « <canal> enable <p1>,…,<p40> »",
+                    ));
+                }
+                // ⚠️ Un jeton de plus est refusé plutôt qu'ignoré : les
+                // consignes tiennent en **un** jeton, donc un espace au milieu
+                // de la liste est une liste coupée en deux, pas une fioriture.
+                _ => {
+                    return Err(mauvais(
+                        "les quarante consignes tiennent en un seul jeton, séparées par des \
+                         virgules et sans espace",
+                    ));
+                }
+            };
+            let activer = match mot {
+                "set" => false,
+                "enable" => true,
+                autre => {
+                    return Err(mauvais(&format!(
+                        "« {autre} » n'est pas une action de courbe : attendu « set » pour poser, \
+                         « enable » pour poser et basculer"
+                    )));
+                }
+            };
+            let brut: Vec<&str> = liste.split(',').collect();
+            if brut.len() != CURVE_POINTS {
+                return Err(mauvais(&format!(
+                    "une courbe a {CURVE_POINTS} points, {} reçus — une courbe incomplète serait \
+                     complétée par des zéros, donc des ventilateurs à l'arrêt",
+                    brut.len()
+                )));
+            }
+            let mut points = [0u8; CURVE_POINTS];
+            for (rang, (place, valeur)) in points.iter_mut().zip(&brut).enumerate() {
+                // Le rang est **compté à partir de un**, comme les fichiers
+                // `tempN_auto_pointM_pwm` que ces consignes finissent par
+                // remplir : un message qui dirait « point 0 » n'aurait aucun
+                // fichier correspondant.
+                *place = consigne(valeur)
+                    .map_err(|raison| mauvais(&format!("point {} : {raison}", rang + 1)))?;
+            }
+            Ok(Request::Curve {
+                channel: canal.to_owned(),
+                points,
+                activer,
+            })
+        }
+
         "regule" => {
             // Sans argument, c'est une lecture — comme `geometry` seul.
             let [premier, suite @ ..] = arguments.as_slice() else {
@@ -796,6 +890,23 @@ pub fn encode_request(request: &Request) -> String {
             FanAction::Auto => format!("fan {channel} auto"),
             FanAction::Pwm(percent) => format!("fan {channel} pwm {percent}"),
         },
+        // Les quarante consignes sont **un seul jeton**, séparées par des
+        // virgules — comme la liste de couleurs de `paint`. La ligne garde ainsi
+        // quatre champs, quel que soit le nombre de points.
+        Request::Curve {
+            channel,
+            points,
+            activer,
+        } => format!(
+            "curve {} {} {}",
+            jeton(channel),
+            if *activer { "enable" } else { "set" },
+            points
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<String>>()
+                .join(",")
+        ),
         Request::Regule(action) => match action {
             ReguleAction::Etat => "regule".to_owned(),
             ReguleAction::Activer(canal) => format!("regule {} on", jeton(canal)),
