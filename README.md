@@ -380,6 +380,16 @@ comme pour le cadran de l'écran, qui imposait encore `kraken2023elite:coolant-t
 n'offre que les **quatre familles retenues** ; un cadran posé par le socket sur l'une des seize
 autres laisse donc le menu où il est, et c'est le bandeau « ÉCRAN — gauge:… » qui dit la vérité.
 
+**Chaque barre de consigne porte sa valeur en pourcentage**, contre la barre elle-même. Une barre
+sans repère chiffré rend une classe entière de défauts invisible : le bouton « auto » du Kraken a
+été cru sans effet alors qu'il mettait la consigne à **0 %**, et il a fallu lire sysfs à la main
+pour le voir. ⚠️ **Le nombre vient de la poignée** — celle qui décide déjà si une mesure a le droit
+de déplacer le curseur (#32) — et de nulle part ailleurs : branché sur la télémétrie brute, il
+afficherait 30 % pendant qu'on tire la barre à 80. Le régime en tr/min reste sur la ligne du dessus,
+gris et plus petit ; ce sont deux grandeurs, et les confondre ferait croire qu'une consigne à 50 %
+donne 50 % du régime maximal. Un canal qui ne répond pas écrit `-- %`, jamais la dernière valeur
+connue, et une consigne qu'on lui tire quand même garde son chiffre suivi d'un `?`.
+
 Le boîtier est dessiné **vu depuis le panneau latéral gauche, face à la carte mère** :
 l'arrière à gauche, l'avant à droite. C'est le point de vue depuis lequel la géométrie a été
 relevée, et celui depuis lequel on lit ses ventilateurs quand on se penche sur le bureau.

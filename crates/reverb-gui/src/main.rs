@@ -33,8 +33,8 @@ use reverb_gui::plan::{
 };
 use reverb_gui::reglages::{
     AFFICHAGES, ChoixDeComposition, ChoixDeProfil, EcranChoisi, Limiteur, Poignee, Reglage,
-    directions_offertes, eclairage_lu, requete_d_animation, requete_de_composition,
-    requete_de_profil, requetes_pour_la_couleur,
+    consigne_affichee, directions_offertes, eclairage_lu, requete_d_animation,
+    requete_de_composition, requete_de_profil, requetes_pour_la_couleur,
 };
 use reverb_gui::sondes::{
     Historique, ModelesNvme, Releve, SondeRetenue, modeles_nvme, sondes_retenues,
@@ -1996,6 +1996,11 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
                         rpm.map_or_else(|| "—".to_owned(), |tours| tours.to_string()),
                     ),
                     pwm: i32::from(poignee.affichee()),
+                    // Le texte et la barre lisent la **même** poignée : c'est ce
+                    // qui les garde d'accord pendant qu'on tire, sans attendre
+                    // le tour de télémétrie suivant. Le `pwm` brut ne sert qu'à
+                    // dire si le canal répond (#102).
+                    consigne: SharedString::from(consigne_affichee(poignee, *pwm)),
                     mode: SharedString::from(mode.clone()),
                     lisible: rpm.is_some(),
                     sait_faire_auto: *sait_faire_auto,
