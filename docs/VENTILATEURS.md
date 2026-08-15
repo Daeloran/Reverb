@@ -215,6 +215,31 @@ vérifier.
 pas le pilote. Le blocage a été observé transitoire à l'installation *puis* en régime établi, et il
 a cédé à un `fan nzxtsmart2:fan-3 pwm 70` posé à la main.
 
+#### Combien d'écritures ce pilote reçoit vraiment — issue #111 ✅
+
+La piste ci-dessus — « trois écritures coup sur coup se marcheraient dessus » — demande de savoir à
+quel rythme on écrit. Relevé le même jour, machine au repos, régulation en place depuis des heures :
+
+```
+15:51:10  fan-{1,2,3} à 46 %   (liquide 40.4 °C)
+15:51:48  fan-{1,2,3} à 45 %   (liquide 40.1 °C)
+15:52:28  fan-{1,2,3} à 46 %   (liquide 40.2 °C)
+```
+
+**Trente écritures en huit minutes pour 0,3 °C d'amplitude** — soit ~3 500 par jour et par canal, sur
+un contrôleur dont on soupçonne précisément les écritures rapprochées. Aucune n'apportait
+d'information : la sonde du liquide bruite de ±0,1 à 0,3 °C d'une lecture à l'autre, et la courbe
+faisant 3 %/°C sur ce segment, ce bruit vaut ±1 point de consigne.
+
+⚠️ **Le bruit de la sonde est lent, pas rapide.** Quarante secondes entre deux bascules, et non une
+seconde : ce n'est pas un frémissement de mesure qu'un lissage effacerait, c'est la quantification de
+la courbe qui rend visible une dérive minuscule. Le remède retenu est donc une **hystérésis de deux
+points de consigne** sur l'écart avec ce que le canal porte, et non un lissage de la température.
+
+Ce que ça change pour ce pilote : au repos, **une écriture à la prise en charge, puis plus rien**. Le
+soupçon d'écritures rapprochées n'est pas levé pour autant — il l'est seulement à l'échelle du repos,
+et un changement de palier envoie toujours les trois canaux dans le même tour.
+
 ### Conséquence sur `reverb fan --auto`
 
 L'option écrivait `pwm_enable = 0` et son aide annonçait « rend le canal à sa courbe firmware ».

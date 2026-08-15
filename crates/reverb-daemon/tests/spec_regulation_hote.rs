@@ -1054,7 +1054,7 @@ fn chaque_changement_de_palier_produit_une_ecriture_et_une_seule() {
     let defaut = Courbe::defaut();
 
     let mut derniere: Option<u8> = None;
-    let montee: Vec<i32> = (degres(20)..=degres(60)).step_by(250).collect();
+    let montee: Vec<i32> = (degres(20)..=degres(60)).step_by(1000).collect();
     let rampe: Vec<i32> = montee
         .iter()
         .copied()
@@ -1483,7 +1483,7 @@ fn tous_les_canaux_regules_recoivent_la_meme_consigne() {
     let defaut = Courbe::defaut();
 
     let mut derniere: Option<u8> = None;
-    for temperature in (degres(30)..=degres(55)).step_by(500) {
+    for temperature in (degres(30)..=degres(55)).step_by(1000) {
         let attendue = defaut.consigne(temperature);
         let faites = enregistreur.tour(&mut regulation, Some(temperature));
 

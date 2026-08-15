@@ -307,11 +307,12 @@ cohérentes. Tctl saute de 20 °C entre deux secondes sur un Zen 5 et demanderai
 les 250 ms au repos, un par image sous animation — et relit le liquide au plus une fois par seconde.
 Sans canal régulé, elle rend la main avant même de lire l'horloge : le démon reste au repos absolu.
 
-⚠️ **On n'écrit que ce que le canal ne porte pas** — et non ce qu'on a cru y écrire. Le tour relit
-chacun des canaux régulés, compare la consigne à ce que le matériel porte vraiment, et n'écrit que
-l'écart. Le silence reste celui du cache de LED — aucune de ces cibles n'a de watchdog, et le tour
-passe une fois par seconde, soit 86 400 trames par jour pour rien —, mais il est désormais vrai du
-matériel et non de nos intentions.
+⚠️ **On n'écrit que ce que le canal ne porte pas** — et non ce qu'on a cru y écrire —, **et
+seulement si l'écart vaut deux points**. Le tour relit chacun des canaux régulés, compare la
+consigne à ce que le matériel porte vraiment, et n'écrit que l'écart qui le mérite. Le silence reste
+celui du cache de LED — aucune de ces cibles n'a de watchdog, et le tour passe une fois par seconde,
+soit 86 400 trames par jour pour rien —, mais il est désormais vrai du matériel et non de nos
+intentions, et il n'est plus rompu par le bruit de la sonde.
 
 Parce que l'autre version était fausse, mesuré sur SHYNAEL le 2026-08-15 à 15:52, machine au repos :
 
@@ -332,9 +333,10 @@ Ce que la relecture achète, et ce qu'elle coûte :
 - une consigne qui n'a pas pris est **rejouée au tour suivant**, indéfiniment et sans intervention.
   Un plafond de tentatives recréerait le défaut qu'on corrige : un canal abandonné en silence à son
   duty d'allumage ;
-- **la comparaison est exacte**, sans tolérance : l'aller-retour pourcentage → duty → pourcentage
-  est l'identité sur les 101 valeurs — un point vaut 2,55 pas de duty, le pas est expansif. Un écart
-  relu est donc un écart réel, jamais un artefact d'arrondi ;
+- **la comparaison est exacte** : l'aller-retour pourcentage → duty → pourcentage est l'identité sur
+  les 101 valeurs — un point vaut 2,55 pas de duty, le pas est expansif. Un écart relu est donc un
+  écart réel, jamais un artefact d'arrondi. Le seuil ci-dessous ne le contredit pas : il décide de
+  la **taille** qu'un écart doit avoir pour valoir une trame, pas de la fiabilité de la mesure ;
 - **un canal qu'on ne sait pas relire n'est pas écrit.** Écrire là où on ne mesure pas, c'est refaire
   le défaut à l'identique — annoncer une consigne sans aucun moyen de savoir si elle a pris. La
   fenêtre l'affiche illisible (#100), et c'est plus honnête ;
@@ -355,10 +357,51 @@ rejouée à chaque tour, en silence, jusqu'à ce qu'elle prenne
 régulation : « nzxtsmart2:fan-3 » porte enfin sa consigne (50 %)
 ```
 
-⚠️ **L'écart d'un point n'est pas traité ici**, et c'est un choix : la sonde du liquide oscille de
-0,3 °C au repos, ce qui a produit trente écritures en huit minutes le 2026-08-15. C'est l'hystérésis
-de #111 qui s'en chargera, et elle porte sur le **seuil** ; #110 porte sur ce **sur quoi** la
-décision se prend.
+⚠️ **Un écart d'un point ne fait rien partir** — c'est du bruit de sonde, pas une information sur le
+circuit. Mesuré sur SHYNAEL le 2026-08-15, machine au repos, régulation en place depuis des heures :
+
+```
+15:51:10  fan-{1,2,3} à 46 %   (liquide 40.4 °C)
+15:51:48  fan-{1,2,3} à 45 %   (liquide 40.1 °C)
+15:52:28  fan-{1,2,3} à 46 %   (liquide 40.2 °C)
+```
+
+**Trente écritures en huit minutes pour 0,3 °C d'amplitude**, soit ~3 500 par jour et par canal. La
+règle de #99 y était respectée à la lettre et ratée en esprit : la consigne *changeait* vraiment —
+la sonde bruite de ±0,3 °C, la courbe fait 3 %/°C sur ce segment, donc ce bruit vaut ±1 point — et
+la régulation ne se taisait jamais pour autant.
+
+Le seuil est de **deux points de consigne**, et il est **atteint, pas dépassé** : on écrit dès que
+l'écart vaut deux. Un seuil « strictement supérieur » ferait de 2 un seuil de 3, et le chiffre ne
+voudrait plus dire ce qu'il dit. Deux points font taire le bruit relevé et laissent passer toute
+variation dépassant 0,7 °C de liquide — très en deçà d'une montée en charge, qui a mis quarante
+minutes à gagner quinze degrés le même jour. Plus large, l'hystérésis se mettrait à retarder cette
+montée-là au lieu de faire taire le bruit.
+
+⚠️ **Le seuil porte sur l'écart avec ce que le canal *porte*, jamais avec la dernière consigne
+calculée.** C'est la seule grandeur qui compose avec la relecture ci-dessus : un canal bloqué à 25 %
+pour une consigne de 46 % montre vingt et un points d'écart et reste réécrit à chaque tour. Mesurée
+contre l'intention, l'hystérésis le rendrait **muet dès le premier tour de bruit** — la consigne
+repasserait de 46 à 45 sans jamais s'écarter d'un point de la dernière écrite —, et un canal bloqué
+redeviendrait invisible.
+
+Trois écritures échappent au seuil, et trois seulement :
+
+- **un canal jamais écrit depuis son activation** part quoi qu'il porte. Rien ne survit au
+  redémarrage côté matériel : le laisser sous prétexte qu'il est à un point près, c'est le laisser à
+  son duty d'allumage ;
+- **les bornes de la courbe**, 0 % et 100 %, partent dès qu'elles diffèrent. C'est le sens même
+  d'une borne : « à fond » ne doit pas s'arrêter à 99 — le tableau ci-dessus promet 100 % au-delà de
+  50 °C —, ni « à l'arrêt » s'immobiliser à 1 %. En **quitter** une, en revanche, est une consigne
+  ordinaire : rester une seconde de plus à plein régime ne coûte rien, ne jamais y arriver si ;
+- **le repli d'une sonde muette** part quoi qu'il arrive. C'est la seule écriture du système qui
+  **signale une panne**, et l'amortir la rendrait indistincte d'un régime normal.
+
+⚠️ **Contrepartie assumée : sous le seuil, un bruit d'un point et une non-application d'un point
+deviennent indistinguables.** Un canal à qui on a écrit 46 et qui n'en porte que 45 n'est plus
+rejoué. Ce n'est pas un défaut de la règle, c'est sa définition — les deux situations produisent
+littéralement la même lecture, et rien dans ce que le démon relit ne permet de les séparer. Le prix
+est d'**un point de duty sur 255**.
 
 ⚠️ **Un liquide illisible fait retomber la consigne à 50 %, jamais à la dernière valeur connue.**
 C'est le mode de défaillance rassurant que le projet refuse partout ailleurs : une consigne figée à
