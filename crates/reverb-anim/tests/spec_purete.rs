@@ -48,6 +48,10 @@ fn rendre_toutes_les_images_du_catalogue_n_ouvre_aucun_descripteur() {
         // blanc pulsant faute de sonde — et un blanc pulsant n'ouvre pas plus de
         // descripteur qu'un gradient.
         sonde: None,
+        // Champ ajouté par #126. `None` est le comportement d'avant à l'octet
+        // près — un test d'intention de #126 le fige —, donc ce témoin observe
+        // exactement ce qu'il observait.
+        palette: None,
     };
 
     // Mesure à blanc d'abord : `read_dir` ouvre lui-même un descripteur, et c'est la **variation**

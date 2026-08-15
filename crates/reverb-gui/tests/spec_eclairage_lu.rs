@@ -176,6 +176,9 @@ fn reglage(animation: Option<&str>, couleur: Rgb, vitesse: u8, direction: Direct
         couleur,
         vitesse,
         direction: rang(direction),
+        // Champ ajouté par #126. `None` = « aucune palette », le comportement
+        // d'avant : ces témoins observent exactement ce qu'ils observaient.
+        palette: None,
     }
 }
 
@@ -197,6 +200,8 @@ fn venu(
         couleur,
         vitesse,
         direction: direction.map(rang),
+        // Champ ajouté par #126, voir ci-dessus.
+        palette: None,
     }
 }
 
@@ -875,6 +880,7 @@ fn arc_en_ciel_ne_rapporte_aucune_couleur_et_l_animation_reste_bien_presente() {
             vitesse: VITESSE_LUE,
             direction: DIRECTION_LUE,
             sonde: None,
+            palette: None,
         },
     );
     let ResponseLine::Anim { reglages, .. } = &ligne else {
@@ -930,6 +936,7 @@ fn ce_que_le_demon_ecrit_se_relit_pour_chaque_animation_du_catalogue() {
                     vitesse,
                     direction,
                     sonde: None,
+                    palette: None,
                 };
                 let lu = eclairage_lu(&reponse(&[ligne_du_demon(nom, &ecrits)]));
                 assert_eq!(
@@ -1053,6 +1060,7 @@ fn adopter_au_demarrage_une_animation_deja_en_cours_prend_son_nom_et_ses_reglage
             vitesse: VITESSE_LUE,
             direction: DIRECTION_LUE,
             sonde: None,
+            palette: None,
         },
     )]));
     assert!(
@@ -1118,6 +1126,7 @@ fn adopter_une_autre_animation_ecrit_ce_qui_est_rapporte_et_garde_le_reste() {
             vitesse: VITESSE_LUE,
             direction: DIRECTION_LUE,
             sonde: None,
+            palette: None,
         },
     )]));
     assert!(
@@ -1215,6 +1224,7 @@ fn apres_adoption_bouger_la_vitesse_envoie_la_couleur_et_la_direction_du_demon()
             vitesse: VITESSE_LUE,
             direction: DIRECTION_LUE,
             sonde: None,
+            palette: None,
         },
     )]));
     assert!(fenetre.adopter(&lu), "une animation tournait déjà");
@@ -1260,6 +1270,7 @@ fn apres_adoption_bouger_la_vitesse_envoie_la_couleur_et_la_direction_du_demon()
             vitesse: VITESSE_LUE,
             direction: DIRECTION_LUE,
             sonde: None,
+            palette: None,
         },
     )]));
     assert!(

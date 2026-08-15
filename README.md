@@ -172,8 +172,69 @@ commande **entière**, pas seulement la clé.
 | `pouls` | **une onde sphérique née à la pompe** | couleur, vitesse |
 | `scintillement` | **des LED s'allument au hasard** | couleur, vitesse |
 
+Partout où `couleur` figure, **`palette` la remplace** (voir ci-dessous).
+
 Huit directions : `bas-haut`, `haut-bas`, `avant-arriere`, `arriere-avant`, `horaire`,
 `antihoraire`, et les deux **locales** — `bords-centre`, `centre-bords`.
+
+#### Les palettes — douze dégradés, repris de WLED
+
+```bash
+echo 'animate vague palette=light-pink vitesse=4'
+echo 'animate braise palette=lava'
+echo 'animate pouls palette=atlantica'
+```
+
+Une palette est un **dégradé à arrêts** dont l'animation tire ses teintes, à la place de sa
+couleur unique. Douze sont livrées, reprises de WLED :
+
+| | | | |
+|---|---|---|---|
+| `light-pink` | `lava` | `ocean` | `paysage` |
+| `couchant` | `aurore` | `atlantica` | `sakura` |
+| `nuit-avril` | `glace` | `orange-teal` | `sorbet` |
+
+⚠️ **Ça ne coûte aucune pastille de plus, et c'est la raison d'être du choix.** Chaque famille
+calcule déjà une **position scalaire** par LED — la projection sur l'axe demandé, la distance à la
+pompe, l'angle sur l'anneau, la traversée du ventilateur. C'est exactement l'entrée d'une palette.
+Les douze **multiplient** donc les huit familles qui se colorent, au lieu d'en ajouter.
+
+⚠️ **L'index de palette est le scalaire qui place le motif ; la luminosité ne change pas.** C'est
+le modèle de WLED, et c'est ce qui garde à chaque famille son caractère : une vague ondule
+toujours, elle change seulement de teinte en chemin. Indexer sur la *luminosité* ferait de
+`balayage`, dont l'intensité ne vaut que 0 ou 1, un motif à deux couleurs — la palette y serait
+invisible.
+
+⚠️ **`couleur` et `palette` ensemble sont refusés**, et la commande entière avec. Ce n'est pas une
+clé de trop — les deux sont acceptées séparément — mais une **ambiguïté** : rien ne dirait laquelle
+décide de la teinte, et en choisir une en silence serait le réglage qui ment. La même exclusion
+vaut dans les fichiers d'état : `eclairage.conf` porte l'une **ou** l'autre, jamais les deux, sinon
+le démon refuserait au redémarrage suivant sa propre écriture — le défaut de #69.
+
+⚠️ **Sous palette, la couleur n'est pas conservée.** C'est la contrepartie de l'exclusion :
+revenir à « aucune palette » rend la couleur par défaut, pas celle d'avant. La persister quand même
+supposerait d'écrire les deux clés.
+
+⚠️ **Un réglage purement additif.** Une commande sans `palette` rend **exactement** l'image
+d'avant — un test d'intention le fige octet pour octet —, donc les profils et `eclairage.conf`
+écrits avant continuent de s'appliquer sans être réécrits. C'est l'inverse de ce qu'a coûté #119 sur
+`braise`.
+
+##### Provenance et licence
+
+Les douze dégradés viennent de **WLED** (`wled00/palettes.cpp`), qui les a lui-même importés de
+**cpt-city** (`seaviewsensing.com`) en leur appliquant sa correction gamma. Les valeurs sont
+recopiées **telles que WLED les porte** : ce sont celles qui produisent, sur une bande, l'aspect
+qu'on connaît. Les recalculer donnerait un autre rendu sous le même nom.
+
+⚠️ **WLED n'est plus sous MIT — il est passé en EUPL-1.2**, une licence copyleft. Reverb est sous
+**GPL-3.0-or-later**, et l'annexe de l'EUPL 1.2 liste GPL-3.0 parmi les licences compatibles : la
+reprise est donc licite, à condition d'attribuer et de rester GPL. C'est un heureux hasard — en
+MIT, Reverb aurait dû changer de licence pour une douzaine de dégradés.
+
+⚠️ **Seules les données sont reprises, jamais le code.** WLED interpole en C++ sur des
+`CRGBPalette16` de FastLED ; ici l'interpolation est réécrite, sur les arrêts eux-mêmes et sans
+quantifier à seize entrées.
 
 #### Les directions locales — le motif se répète sur chaque objet
 

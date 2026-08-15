@@ -131,6 +131,8 @@ fn reglage(animation: Option<&str>, vitesse: u8, direction: Direction) -> Reglag
         couleur: COULEUR,
         vitesse,
         direction: rang(direction),
+        // Champ ajouté par #126 : « aucune palette », le comportement d'avant.
+        palette: None,
     }
 }
 

@@ -36,8 +36,10 @@ use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
 use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
 
 pub mod geometrie;
+pub mod palette;
 
 pub use geometrie::{Geometrie, GeometrieInvalide, Orientation, OrientationInvalide, Point, Sens};
+pub use palette::{PALETTES, Palette, PaletteInconnue};
 
 /// Une image complète : les dix ventilateurs, puis les quatre barrettes.
 #[derive(Debug, Clone, PartialEq)]
@@ -218,6 +220,17 @@ pub struct Reglages {
     /// change à chaque image et passe en argument d'[`Animation::image_avec_mesure`]
     /// — ce crate est pur et ne lit aucune sonde.
     pub sonde: Option<String>,
+    /// Le dégradé dont l'animation tire ses teintes, à la place de `couleur`.
+    ///
+    /// ⚠️ **`None` est le comportement d'avant #126, à l'octet près.** C'est ce
+    /// qui rend le réglage purement additif : les profils et `eclairage.conf`
+    /// écrits avant continuent de s'appliquer sans être réécrits, et un test
+    /// d'intention fige les images produites sans palette.
+    ///
+    /// ⚠️ **Exclusive de `couleur`**, et le refus est dans `reglages` : les deux
+    /// ensemble ne sont pas une clé de trop mais une **ambiguïté**, rien ne
+    /// disant laquelle gagne.
+    pub palette: Option<Palette>,
 }
 
 impl Default for Reglages {
@@ -226,6 +239,7 @@ impl Default for Reglages {
             couleur: Rgb::new(0xff, 0x40, 0xff),
             vitesse: 3,
             sonde: None,
+            palette: None,
             // `horaire` et non `bas-haut` : c'est la seule direction où les dix
             // ventilateurs ont tous de l'épaisseur. Six d'entre eux sont
             // couchés — une onde verticale les traverse d'un bloc, et trois
@@ -333,14 +347,19 @@ pub const CATALOGUE: &[&str] = &[
 ];
 
 /// Les clés acceptées par une animation qui se colore.
-const AVEC_COULEUR: &[&str] = &["couleur", "vitesse", "direction"];
+///
+/// ⚠️ **`palette` accompagne toujours `couleur`, et jamais autrement** (#126) :
+/// une palette *remplace* la couleur, elle ne s'ajoute pas à elle. Une famille
+/// qui accepterait l'une sans l'autre laisserait un chemin où ni l'une ni
+/// l'autre ne décide de la teinte.
+const AVEC_COULEUR: &[&str] = &["couleur", "palette", "vitesse", "direction"];
 /// Les clés acceptées par une animation qui produit ses propres teintes.
 const SANS_COULEUR: &[&str] = &["vitesse", "direction"];
 /// Les clés d'une animation dont le motif ne suit **aucune** direction du
 /// boîtier : `rotation` suit le montage relevé de chaque anneau, `pouls` la
 /// distance à la pompe, `scintillement` le hasard, et `braise` la distance à la
 /// pompe croisée à l'angle de chaque anneau (#119).
-const SANS_DIRECTION: &[&str] = &["couleur", "vitesse"];
+const SANS_DIRECTION: &[&str] = &["couleur", "palette", "vitesse"];
 /// Les clés de `thermique` : ses couleurs viennent du gradient, et sa sonde est
 /// **exigée** — une animation qui ne pourrait jamais rien relever afficherait un
 /// blanc pulsant permanent que rien n'expliquerait.
@@ -433,15 +452,30 @@ impl Animation {
             vitesse,
             direction,
             sonde,
+            palette,
         } = reglages;
         let tous = [
             ("couleur", couleur_hexa(*couleur)),
+            (
+                "palette",
+                palette.map(|p| p.nom().to_owned()).unwrap_or_default(),
+            ),
             ("vitesse", vitesse.to_string()),
             ("direction", direction.slug().to_owned()),
             ("sonde", sonde.clone().unwrap_or_default()),
         ];
         tous.into_iter()
             .filter(|(cle, _)| self.parametres_acceptes().contains(cle))
+            // ⚠️ **`couleur` OU `palette`, jamais les deux** (#126). Écrire les
+            // deux produirait un `eclairage.conf` que le démon refuse au
+            // redémarrage suivant — le défaut de #69, un état persisté qui ne
+            // se relit pas. C'est la seule paire de clés du catalogue qui
+            // s'exclue, d'où le filtre ici plutôt qu'une règle générale.
+            .filter(|(cle, _)| match *cle {
+                "couleur" => palette.is_none(),
+                "palette" => palette.is_some(),
+                _ => true,
+            })
             .map(|(cle, valeur)| (cle.to_owned(), valeur))
             .collect()
     }
@@ -470,6 +504,10 @@ impl Animation {
             };
             match cle.as_str() {
                 "couleur" => reglages.couleur = couleur(valeur).map_err(refus)?,
+                "palette" => {
+                    reglages.palette =
+                        Some(Palette::par_nom(valeur).map_err(|e| refus(e.to_string()))?);
+                }
                 "vitesse" => reglages.vitesse = vitesse(valeur).map_err(refus)?,
                 "direction" => {
                     reglages.direction = Direction::depuis_slug(valeur).ok_or_else(|| {
@@ -495,6 +533,21 @@ impl Animation {
                 }
                 autre => unreachable!("« {autre} » est déclarée acceptée sans être décodée"),
             }
+        }
+
+        // ⚠️ **`couleur` et `palette` ensemble sont refusés** (#126). Ce n'est
+        // pas une clé de trop — les deux sont acceptées séparément — mais une
+        // ambiguïté : rien dans la commande ne dirait laquelle décide de la
+        // teinte. En choisir une en silence serait le réglage qui ment.
+        let donnees: Vec<&str> = paires.iter().map(|(cle, _)| cle.as_str()).collect();
+        if donnees.contains(&"couleur") && donnees.contains(&"palette") {
+            return Err(ReglageInvalide {
+                cle: "palette".to_owned(),
+                raison: "« couleur » et « palette » ne vont pas ensemble : une palette remplace \
+                         la couleur, elle ne s'y ajoute pas. Donne l'une ou l'autre"
+                    .to_owned(),
+                acceptees,
+            });
         }
 
         // ⚠️ **Exigée, pas seulement acceptée.** Sans sonde, `thermique`
@@ -699,10 +752,30 @@ impl Animation {
         } = *ou;
         let place = fraction(flux);
 
+        // La teinte de base : la couleur réglée, ou l'échantillon de la palette
+        // à cette place du motif (#126).
+        //
+        // ⚠️ **L'index de palette est le scalaire qui place déjà le motif, et la
+        // luminosité ne change pas.** C'est le modèle de WLED — l'index vient de
+        // la position, la brillance de l'effet — et c'est ce qui garde à chaque
+        // famille son caractère : une vague ondule toujours, elle change
+        // seulement de teinte en chemin. Indexer la palette sur la *luminosité*
+        // ferait de `balayage`, dont l'intensité ne vaut que 0 ou 1, un motif à
+        // deux couleurs : la palette y serait invisible.
+        let teinte_de = |place_du_motif: f32| -> Rgb {
+            match reglages.palette {
+                Some(palette) => palette.echantillon(fraction(place_du_motif) * 255.0),
+                None => reglages.couleur,
+            }
+        };
+
         match self.famille {
             // Une sinusoïde le long de la direction, et rien d'autre : le seul
             // motif du lot dont la couleur ne dépende que de la projection.
-            Famille::Vague => teinter(reglages.couleur, (1.0 + cycle(spatiale - temps)) / 2.0),
+            Famille::Vague => teinter(
+                teinte_de(spatiale - temps),
+                (1.0 + cycle(spatiale - temps)) / 2.0,
+            ),
 
             // Une tête vive suivie d'une traînée qui s'éteint. Le reste est
             // noir, ce que le cache de cibles inchangées du démon apprécie.
@@ -712,7 +785,7 @@ impl Animation {
                 if recul >= traineee {
                     Rgb::BLACK
                 } else {
-                    teinter(reglages.couleur, 1.0 - recul / traineee)
+                    teinter(teinte_de(recul / traineee), 1.0 - recul / traineee)
                 }
             }
 
@@ -720,7 +793,7 @@ impl Animation {
             // retard, la direction n'aurait aucun effet et le réglage mentirait.
             Famille::Respiration => {
                 let onde = (1.0 + cycle(temps - 0.2 * place)) / 2.0;
-                teinter(reglages.couleur, 0.15 + 0.85 * onde)
+                teinter(teinte_de(temps - 0.2 * place), 0.15 + 0.85 * onde)
             }
 
             // Le spectre déroulé le long de la direction. Seule famille à ne pas
@@ -739,7 +812,7 @@ impl Animation {
             Famille::Balayage => {
                 let recul = fraction(place - temps);
                 if recul < 0.15 {
-                    reglages.couleur
+                    teinte_de(recul / 0.15)
                 } else {
                     Rgb::BLACK
                 }
@@ -790,7 +863,9 @@ impl Animation {
                 let lente = cycle(3.0 * derive + 3.0 * rayon + fremissement);
                 let vive = cycle(-7.0 * derive + 5.0 * rayon - angle + fremissement);
                 let intensite = 0.5 + 0.35 * lente + 0.15 * vive;
-                teinter(reglages.couleur, intensite.clamp(0.0, 1.0))
+                // ⚠️ Ici le scalaire du motif **est** la chaleur : c'est ce
+                // qui fait qu'une palette de lave ressemble à de la lave.
+                teinter(teinte_de(intensite), intensite.clamp(0.0, 1.0))
             }
 
             // Chaque anneau tourne **sur lui-même**, à sa place dans le boîtier.
@@ -810,7 +885,7 @@ impl Animation {
             // LED dont plusieurs valent le même noir ne portent pas huit valeurs
             // distinctes — le motif serait bien là, mais la rotation
             // illisible : on ne voit tourner que ce qui a huit nuances.
-            Famille::Rotation => teinter(reglages.couleur, 1.0 - fraction(angle - temps)),
+            Famille::Rotation => teinter(teinte_de(angle - temps), 1.0 - fraction(angle - temps)),
 
             // La couleur suit une sonde, et rien d'autre — ni le temps, ni la
             // place. À température constante le boîtier est constant : c'est
@@ -842,7 +917,7 @@ impl Animation {
                 if front >= epaisseur {
                     Rgb::BLACK
                 } else {
-                    teinter(reglages.couleur, 1.0 - front / epaisseur)
+                    teinter(teinte_de(front / epaisseur), 1.0 - front / epaisseur)
                 }
             }
 
@@ -871,8 +946,11 @@ impl Animation {
                 if onde < SEUIL_SCINTILLEMENT {
                     Rgb::BLACK
                 } else {
+                    // ⚠️ La phase est propre à chaque LED : sous palette,
+                    // chacune garde donc SA teinte en pulsant, ce qui est le
+                    // rendu d'une guirlande plutôt que d'un stroboscope.
                     teinter(
-                        reglages.couleur,
+                        teinte_de(phase),
                         (onde - SEUIL_SCINTILLEMENT) / (1.0 - SEUIL_SCINTILLEMENT),
                     )
                 }

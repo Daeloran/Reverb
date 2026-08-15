@@ -215,6 +215,8 @@ fn reglage(animation: Option<&str>) -> Reglage {
         couleur: COULEUR,
         vitesse: VITESSE,
         direction: rang(DIRECTION),
+        // Champ ajouté par #126 : « aucune palette », le comportement d'avant.
+        palette: None,
     }
 }
 

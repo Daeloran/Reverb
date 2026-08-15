@@ -85,7 +85,15 @@ const TEMOIN_BIS: Rgb = Rgb::new(0x20, 0xff, 0x80);
 /// Le contrat fixe la liste par construction : `reglages` rend un `Reglages` à trois champs
 /// (`couleur`, `vitesse`, `direction`), donc une clé hors de cette liste n'aurait nulle part où
 /// atterrir. `sens` y figure parce que l'issue l'écrit dans son exemple de commande.
-const CLES_CONNUES: [&str; 5] = ["couleur", "vitesse", "direction", "sens", "sonde"];
+const CLES_CONNUES: [&str; 6] = [
+    "couleur",
+    "vitesse",
+    "direction",
+    "sens",
+    "sonde",
+    // Ajoutée par #126. Elle atterrit dans `Reglages::palette`.
+    "palette",
+];
 
 /// Le mot qui écrit une direction sur le socket.
 fn slug_direction(direction: Direction) -> &'static str {
@@ -595,6 +603,15 @@ fn un_parametre_inconnu_est_refuse_en_nommant_la_cle_fautive() {
                     "« {} » : `sonde={valeur}` doit atterrir dans le champ `sonde`",
                     animation.nom()
                 ),
+                // Ajoutée par #126, vérifiée comme les autres. Le champ porte
+                // une `Palette`, pas la chaîne : c'est son `nom()` qu'on
+                // recompare, l'aller-retour devant être l'identité.
+                "palette" => assert_eq!(
+                    reglages.palette.map(|p| p.nom()),
+                    Some(valeur.as_str()),
+                    "« {} » : `palette={valeur}` doit atterrir dans le champ `palette`",
+                    animation.nom()
+                ),
                 autre => unreachable!("« {autre} » n'est pas une clé connue de ce test"),
             }
 
@@ -798,9 +815,22 @@ fn sans_parametre_le_rendu_est_celui_des_valeurs_par_defaut_explicites() {
         );
 
         // Et la même chose écrite en toutes lettres, clé par clé, dans l'écriture du protocole.
+        //
+        // ⚠️ **`palette` en est écartée (#126), et l'intention reste intacte.**
+        // C'est la première clé du catalogue dont la valeur par défaut **ne
+        // s'écrit pas** : `Reglages::default().palette` vaut `None`, et
+        // « aucune palette » n'a pas de mot sur le socket — son écriture, c'est
+        // l'absence de la clé. Lui inventer un mot ici testerait une forme que
+        // le démon n'émet jamais.
+        //
+        // La propriété n'est pas perdue pour autant : `spec_126_palettes.rs`
+        // fige **octet pour octet** les images produites sans palette, ce qui
+        // est exactement « l'absence de la clé vaut son défaut », mesuré au
+        // pixel plutôt que déduit d'un aller-retour.
         let paires: Vec<(String, String)> = animation
             .parametres_acceptes()
             .iter()
+            .filter(|cle| **cle != "palette")
             .map(|cle| paire(cle, &valeur_par_defaut(cle, &defaut)))
             .collect();
         let explicites = animation.reglages(&paires).unwrap_or_else(|erreur| {
@@ -1106,6 +1136,8 @@ fn valeur_valide(cle: &str) -> String {
         // Ajoutée par #75. Un slug plausible suffit : ce crate est pur et ne vérifie pas qu'une
         // sonde existe — c'est le démon qui les découvre.
         "sonde" => "kraken2023elite:coolant-temp".to_owned(),
+        // Ajoutée par #126. Celle que Nico emploie sur ses bandes WLED.
+        "palette" => "light-pink".to_owned(),
         autre => panic!("« {autre} » n'est pas une clé connue de ce test"),
     }
 }
@@ -1137,6 +1169,11 @@ fn valeurs_distinctes(cle: &str) -> Vec<(&'static str, &'static str)> {
         // `sonde` doit faire est vérifié dans `spec_familles_nouvelles.rs` : le gradient suit la
         // mesure, et une sonde muette pulse en blanc.
         "sonde" => Vec::new(),
+        // Ajoutée par #126. Deux dégradés qu'aucune LED ne peut confondre : le
+        // premier va du violet au rose pâle, le second du noir au blanc en
+        // passant par le bleu. Deux palettes qui peindraient la même image à
+        // tous les pas rendraient l'une des deux inutile.
+        "palette" => vec![("light-pink", "glace")],
         autre => panic!("« {autre} » n'est pas une clé connue de ce test"),
     }
 }
@@ -1195,6 +1232,21 @@ fn valeurs_invalides(cle: &str) -> &'static [&'static str] {
         // condamnée au blanc pulsant permanent, que rien n'expliquerait. Un slug inexistant, lui,
         // n'est **pas** refusable ici — ce crate est pur et ne connaît aucune sonde.
         "sonde" => &["", " ", "   ", "\t"],
+        // Ajoutée par #126. Les douze noms sont en ASCII minuscule sans espace :
+        // une casse voisine, une graphie voisine, un nom de WLED non repris, et
+        // le vide.
+        "palette" => &[
+            "",
+            " ",
+            "Light-Pink",
+            "LIGHT-PINK",
+            "light pink",
+            "light_pink",
+            "lightpink",
+            "rose",
+            "party",
+            "0",
+        ],
         autre => panic!("« {autre} » n'est pas une clé connue de ce test"),
     }
 }

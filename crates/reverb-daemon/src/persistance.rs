@@ -410,3 +410,90 @@ pub(crate) fn ecrire(chemin: &Path, contenu: &str) -> io::Result<()> {
     fs::write(&provisoire, contenu)?;
     fs::rename(&provisoire, chemin)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reverb_anim::{Animation, Palette, Reglages};
+
+    /// Un éclairage qui porte une animation avec une palette (#126).
+    fn avec_palette(nom_palette: &str) -> Eclairage {
+        let mut eclairage = Eclairage::accueil();
+        let animation = Animation::par_nom("vague").expect("« vague » est au catalogue");
+        let reglages = Reglages {
+            palette: Some(Palette::par_nom(nom_palette).expect("palette du catalogue")),
+            vitesse: 7,
+            ..Reglages::default()
+        };
+        eclairage.animation = Some((animation, reglages));
+        eclairage
+    }
+
+    /// Promis dans les fixtures de `spec_eclairage.rs` et `spec_zones.rs`, qui
+    /// écartent `palette` parce qu'elle exclut `couleur` : l'aller-retour par le
+    /// fichier d'état se vérifie donc ici.
+    #[test]
+    fn une_palette_traverse_eclairage_conf_sans_perte() {
+        for nom in reverb_anim::PALETTES {
+            let pose = avec_palette(nom);
+            let relu = Eclairage::decoder(&pose.encoder())
+                .unwrap_or_else(|e| panic!("« {nom} » doit se relire : {e}"));
+            let (_, reglages) = relu.animation.as_ref().expect("une animation");
+            assert_eq!(
+                reglages.palette.map(|p| p.nom()),
+                Some(*nom),
+                "« {nom} » ne survit pas à eclairage.conf : {}",
+                pose.encoder()
+            );
+            assert_eq!(
+                relu, pose,
+                "« {nom} » : l'aller-retour doit être l'identité"
+            );
+        }
+    }
+
+    /// ⚠️ Le corollaire, et c'est lui qui protège le redémarrage : le fichier ne
+    /// doit **jamais** porter les deux clés à la fois. `Eclairage::decoder`
+    /// refuserait le couple, et le démon repartirait sur la couleur d'accueil en
+    /// ayant perdu l'ambiance — le défaut de #69, un état persisté qui ne se
+    /// relit pas.
+    #[test]
+    fn eclairage_conf_ne_porte_jamais_couleur_et_palette_ensemble() {
+        let texte = avec_palette("light-pink").encoder();
+        let ligne = texte
+            .lines()
+            .find(|l| l.starts_with("animation "))
+            .expect("une ligne d'animation");
+        assert!(
+            ligne.contains("palette=light-pink"),
+            "la palette doit être écrite : {ligne}"
+        );
+        assert!(
+            !ligne.contains("couleur="),
+            "la couleur ne doit pas accompagner la palette : {ligne}"
+        );
+    }
+
+    /// Et l'autre branche : sans palette, le fichier est **exactement** celui
+    /// d'avant #126. C'est ce qui rend le réglage purement additif — un
+    /// `eclairage.conf` écrit avant continue de s'appliquer sans être réécrit.
+    #[test]
+    fn sans_palette_le_fichier_porte_la_couleur_comme_avant() {
+        let mut eclairage = Eclairage::accueil();
+        let animation = Animation::par_nom("vague").expect("« vague » est au catalogue");
+        eclairage.animation = Some((animation, Reglages::default()));
+        let texte = eclairage.encoder();
+        let ligne = texte
+            .lines()
+            .find(|l| l.starts_with("animation "))
+            .expect("une ligne d'animation");
+        assert!(
+            ligne.contains("couleur="),
+            "la couleur doit être écrite : {ligne}"
+        );
+        assert!(
+            !ligne.contains("palette="),
+            "aucune palette ne doit apparaître : {ligne}"
+        );
+    }
+}

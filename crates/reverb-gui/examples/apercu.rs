@@ -237,6 +237,27 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             })
             .collect::<Vec<FamilleAnimation>>(),
     )));
+    // Les douze palettes de #126, précédées de « Aucune ». Sans ce modèle, le
+    // menu se rendrait **vide** dans l'image d'aperçu — soit exactement le
+    // genre de défaut que cette image existe pour attraper.
+    //
+    // `REVERB_PALETTE=<nom>` en choisit une : le menu à « Aucune » est le cas
+    // par défaut, et celui où une palette est posée ne se verrait sinon sur
+    // aucune image.
+    {
+        let mut noms = vec![SharedString::from("Aucune")];
+        noms.extend(
+            reverb_anim::PALETTES
+                .iter()
+                .map(|nom| SharedString::from(*nom)),
+        );
+        interface.set_palettes(ModelRc::new(VecModel::from(noms)));
+        if let Ok(choisie) = std::env::var("REVERB_PALETTE")
+            && let Some(rang) = reverb_anim::PALETTES.iter().position(|nom| *nom == choisie)
+        {
+            interface.set_palette_choisie(i32::try_from(rang + 1).unwrap_or(0));
+        }
+    }
     interface.set_directions(ModelRc::new(VecModel::from(
         Direction::ALL
             .into_iter()
