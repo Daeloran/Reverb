@@ -352,7 +352,13 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     interface.set_ancre_visee(SharedString::from("droite"));
 
     // `REVERB_TRACE=x0,y0,x1,y1` pose un geste de sélection **en cours**, en
-    // fractions de la maquette.
+    // fractions du **panneau** — la surface où le geste a lieu depuis #121, et
+    // non plus le carré de la maquette qui y est centré.
+    //
+    // ⚠️ **Le repère a changé, et l'image le montre** : sur la fenêtre de cet
+    // aperçu, `0,0,1,1` couvrait 276 à 824 px, le carré ; il couvre maintenant
+    // 262 à 838, le panneau — quatorze pixels de marge de chaque côté, où un
+    // geste ne traçait rien.
     //
     // ⚠️ **C'est ce qui manquait pour que #76 soit vérifiable.** Ce rectangle ne
     // vit que pendant un appui de souris : aucune des quatre autres variables ne
