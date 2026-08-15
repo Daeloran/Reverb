@@ -266,10 +266,18 @@ fn les_dix_familles_figurent_au_catalogue_et_acceptent_la_vitesse() {
             "« {nom} » doit rejoindre le catalogue"
         );
     }
-    assert_eq!(
-        CATALOGUE.len(),
-        ANCIENNES.len() + NOUVELLES.len(),
-        "le catalogue compte dix familles : {CATALOGUE:?}"
+    // ⚠️ **« Au moins », et non « exactement », depuis #127.** L'égalité protégeait
+    // #75 contre une famille glissée dans le catalogue sans figurer dans
+    // `NOUVELLES` — un risque propre à sa propre livraison. Elle disait du même
+    // coup que le catalogue était **clos**, ce que la documentation de
+    // `CATALOGUE` nie explicitement : « le protocole s'étend, il ne casse pas ».
+    //
+    // Ce que ce test doit garantir, et qu'il garantit toujours, c'est que les
+    // dix familles de #75 **restent** — les deux boucles ci-dessus le vérifient
+    // nom par nom. #127 en ajoute trois, elle n'en retire aucune.
+    assert!(
+        CATALOGUE.len() >= ANCIENNES.len() + NOUVELLES.len(),
+        "le catalogue a perdu des familles : {CATALOGUE:?}"
     );
 
     for nom in NOUVELLES {

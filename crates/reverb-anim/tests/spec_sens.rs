@@ -654,13 +654,25 @@ fn a_la_vitesse_un_le_motif_boucle_en_cent_vingt_pas_et_bouge_entre_temps() {
     // sens à mesurer — elle n'accepte plus de direction, donc [`dirigees`] ne la rend déjà plus aux
     // tests qui suivent.
     //
-    // Les huit autres bouclent bien en 120 pas, `thermique` comprise : faute de sonde, elle pulse
+    // ⚠️ **Les trois de #127 les rejoignent, et c'est la même raison, une troisième fois.**
+    // `bougie` fait vaciller chaque LED sur sa propre cadence, `nuee` déforme un champ de bruit sur
+    // une quatrième dimension, `artifice` date ses éclats : les trois lisent [`derive`], l'horloge
+    // de 1021 pas qui ne se replie pas sur le cycle. Leur demander de boucler en 120 pas serait leur
+    // demander de redevenir périodiques — c'est-à-dire de cesser d'être ce que l'issue décrit.
+    //
+    // Elles ne perdent rien non plus à ce départ : aucune n'accepte de direction, donc [`dirigees`]
+    // ne les rend déjà pas aux tests qui suivent.
+    //
+    // Les sept autres bouclent bien en 120 pas, `thermique` comprise : faute de sonde, elle pulse
     // en blanc sur le cycle ordinaire.
     let geometrie = boitier();
 
+    /// Les familles qui lisent [`derive`] plutôt que [`temps`], donc sans période de 120 pas.
+    const SANS_PERIODE: [&str; 5] = ["scintillement", "braise", "bougie", "nuee", "artifice"];
+
     for (nom, animation) in catalogue()
         .into_iter()
-        .filter(|(nom, _)| *nom != "scintillement" && *nom != "braise")
+        .filter(|(nom, _)| !SANS_PERIODE.contains(nom))
     {
         for axe in [Axe::Hauteur, Axe::Profondeur] {
             for direction in [axe.vers_les_petites(), axe.vers_les_grandes()] {
