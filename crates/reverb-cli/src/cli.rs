@@ -45,6 +45,15 @@ pub enum Command {
         /// c'est `Curve::interpolate` qui s'en charge.
         points: Vec<(usize, Percent)>,
         force: bool,
+        /// Basculer le canal sur cette courbe dans la foulée (#104).
+        ///
+        /// ⚠️ **Poser et activer doivent tenir dans un seul processus.** Le
+        /// carnet des courbes posées (#97) ne peut pas se relire sur le
+        /// matériel — les fichiers `tempN_auto_pointM_pwm` sont en écriture
+        /// seule —, donc `reverb curve` puis `reverb fan --curve` sont deux
+        /// carnets neufs, et le second refuse. Le flux en deux commandes qui
+        /// marchait avant #97 échouait ainsi **même démon arrêté**.
+        activer: bool,
     },
     /// Pilote l'écran du Kraken.
     Screen { action: ActionEcran },
@@ -465,10 +474,12 @@ fn parse_curve(mut args: std::vec::IntoIter<String>) -> Result<Command, String> 
     let mut canal: Option<String> = None;
     let mut points: Vec<(usize, Percent)> = Vec::new();
     let mut force = false;
+    let mut activer = false;
 
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--force" => force = true,
+            "--enable" => activer = true,
             "--channel" => {
                 canal = Some(
                     args.next()
@@ -494,6 +505,7 @@ fn parse_curve(mut args: std::vec::IntoIter<String>) -> Result<Command, String> 
         canal,
         points,
         force,
+        activer,
     })
 }
 

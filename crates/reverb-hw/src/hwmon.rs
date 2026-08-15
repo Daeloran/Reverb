@@ -534,7 +534,7 @@ pub fn discover() -> io::Result<Vec<FanChannel>> {
 }
 
 /// Nombre de points d'une courbe matérielle du Kraken.
-pub const CURVE_POINTS: usize = 40;
+pub use reverb_proto::ipc::CURVE_POINTS;
 
 /// Une courbe validée, prête à écrire : une consigne par point.
 ///
@@ -596,6 +596,34 @@ impl Curve {
         }
 
         Ok(Curve(valeurs))
+    }
+
+    /// Une courbe depuis ses [`CURVE_POINTS`] consignes déjà calculées.
+    ///
+    /// C'est la porte d'entrée du socket (#104), qui transporte les quarante
+    /// points tels quels : l'interpolation a eu lieu chez le client, et la
+    /// refaire ici changerait les valeurs qu'il a demandées.
+    ///
+    /// # Erreurs
+    ///
+    /// ⚠️ **Une courbe qui descend est refusée ici aussi**, et c'est le point qui
+    /// compte. Le socket est une porte de service pour la fenêtre, **jamais une
+    /// porte dérobée** : le garde-fou de [`Curve::interpolate`] vaut pour la même
+    /// raison quel que soit le chemin d'arrivée — une consigne qui baisse quand
+    /// la température monte est une faute de frappe ou un décalage d'indice, et
+    /// l'écriture seule la rend invisible jusqu'à la surchauffe, un canal ne
+    /// disant jamais quelle courbe il porte.
+    pub fn from_points(points: [Percent; CURVE_POINTS]) -> Result<Self, CurveError> {
+        for (rang, paire) in points.windows(2).enumerate() {
+            if paire[1] < paire[0] {
+                // Les index sont ceux des fichiers sysfs : comptés à partir de un.
+                return Err(CurveError::Decreasing {
+                    from: (rang + 1, paire[0]),
+                    to: (rang + 2, paire[1]),
+                });
+            }
+        }
+        Ok(Curve(points))
     }
 
     /// Les consignes, dans l'ordre des points.
@@ -732,6 +760,49 @@ mod tests {
     /// Vrai si le chemin porte ce nom de fichier.
     fn se_termine_par(chemin: &Path, nom: &str) -> bool {
         chemin.file_name() == Some(OsStr::new(nom))
+    }
+
+    /// Quarante consignes bâties depuis une fonction du rang.
+    fn quarante(f: impl Fn(usize) -> u8) -> [Percent; CURVE_POINTS] {
+        let mut points = [Percent(0); CURVE_POINTS];
+        for (rang, place) in points.iter_mut().enumerate() {
+            *place = Percent::new(f(rang)).expect("consigne dans les bornes");
+        }
+        points
+    }
+
+    #[test]
+    fn from_points_garde_les_consignes_telles_quelles() {
+        // Le socket transporte des points DÉJÀ interpolés (#104) : les
+        // recalculer changerait les valeurs demandées par le client.
+        let voulues = quarante(|rang| 30 + rang as u8);
+        let courbe = Curve::from_points(voulues).expect("une courbe qui monte");
+        assert_eq!(courbe.points(), &voulues);
+    }
+
+    #[test]
+    fn from_points_accepte_un_plateau() {
+        // Une courbe plate ne descend pas : elle doit passer. C'est le cas de la
+        // courbe la plus simple qu'on puisse poser.
+        assert!(Curve::from_points(quarante(|_| 50)).is_ok());
+    }
+
+    #[test]
+    fn from_points_refuse_une_courbe_qui_descend() {
+        // ⚠️ **Le garde-fou de `interpolate` vaut aussi par le socket.** Une
+        // consigne qui baisse quand la température monte est une faute de frappe
+        // ou un décalage d'indice, et l'écriture seule la rend invisible jusqu'à
+        // la surchauffe : un canal ne dit jamais quelle courbe il porte. Le
+        // socket est une porte de service, jamais une porte dérobée.
+        let mut points = quarante(|_| 50);
+        points[20] = Percent::new(40).expect("40 est dans les bornes");
+        let erreur = Curve::from_points(points).expect_err("une courbe qui descend");
+        // Les index sont ceux des fichiers sysfs : comptés à partir de un, donc
+        // le creux au rang 20 se dit « point 21 ».
+        assert!(
+            matches!(erreur, CurveError::Decreasing { from, to } if from.0 == 20 && to.0 == 21),
+            "attendu une chute annoncée du point 20 au 21, obtenu {erreur:?}"
+        );
     }
 
     #[test]

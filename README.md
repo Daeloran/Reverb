@@ -444,6 +444,47 @@ explication. C'est plus vrai depuis #110 qu'avant lui : la régulation ne compar
 écrit, mais à ce que le canal porte — donc une valeur posée à la main lui apparaît exactement comme
 une consigne qui n'a pas pris.
 
+#### La courbe firmware du Kraken — poser et activer d'un seul geste
+
+Rien à voir avec `regule`, qui est la boucle de l'hôte sur les `nzxtsmart2`. Ici, c'est la courbe
+que le **firmware du Kraken** exécute, sur ses deux canaux à lui :
+
+```bash
+sudo reverb curve --channel kraken2023elite:pump-speed --point 1:35 --point 25:60 --point 40:100
+sudo reverb curve --channel kraken2023elite:pump-speed --point 1:35 ... --enable   # pose ET bascule
+echo 'curve kraken2023elite:pump-speed enable 35,35,…,100' | socat - UNIX-CONNECT:/run/reverb/reverbd.sock
+```
+
+⚠️ **Poser et activer doivent tenir dans un seul processus, et c'est toute l'issue #104.** Depuis
+#97, `fan <canal> auto` refuse tant qu'aucune courbe n'a été téléversée sur le canal — et ce carnet
+ne peut vivre **que** dans le processus qui a écrit, les fichiers `tempN_auto_pointM_pwm` étant en
+écriture seule et ne se relisant jamais. Deux commandes, c'est deux carnets neufs : le flux en deux
+temps qui marchait avant #97 refusait ensuite, **même démon arrêté**.
+
+⚠️ **`set` n'est jamais sous-entendu sur le fil.** Un `enable` facultatif en fin de ligne se lirait
+aussi bien comme un oubli que comme un choix, et c'est le geste qui a mis la consigne de la pompe à
+0 %.
+
+⚠️ **Les quarante consignes sont un tableau de taille fixe, pas une liste.** Une courbe incomplète
+devient irreprésentable au lieu d'être refusée à l'exécution — la règle de `SlotAddress` pour la
+RAM, appliquée au seul autre endroit où une écriture partielle coûterait cher : ici, c'est la
+régulation de la pompe qui s'arrête.
+
+⚠️ **Une courbe qui descend est refusée sur les deux chemins.** Le socket est une porte de service
+pour la fenêtre, jamais une porte dérobée : une consigne qui baisse quand la température monte est
+une faute de frappe ou un décalage d'indice, et l'écriture seule la rend invisible jusqu'à la
+surchauffe — un canal ne dit jamais quelle courbe il porte. Le plancher de 20 % vaut lui aussi des
+deux côtés.
+
+⚠️ **Aucune ligne de réponse ne rend la courbe posée**, et rien ne doit prétendre le contraire. Le
+matériel ne la relit pas ; un `curve` qui répondrait par ce qu'il vient d'écrire dirait ce qu'on a
+*voulu*, jamais ce que le canal porte — le mode de défaillance rassurant que #110 a corrigé sur la
+régulation.
+
+`reverb curve` **passe par le démon quand il tourne**, comme `reverb screen` depuis #33 : quarante
+points tiennent sur une ligne de texte, contrairement au mégaoctet d'une image, donc le protocole
+n'a pas à être contourné. Démon arrêté, il écrit en direct comme avant.
+
 Les canaux régulés et la courbe vivent dans `/var/lib/reverb/regulation.conf`, relu au démarrage —
 et **ce qui a été écrit sur le bus n'y figure pas** : rien ne survit au redémarrage côté matériel,
 les canaux repartent à `pwm = 64`, et un démon qui se souviendrait d'avoir déjà écrit 33 % prendrait
@@ -851,11 +892,13 @@ sans elle il ne se verrait sur aucune image.
   ces trois canaux-là s'appelle [`regule`](#la-régulation--les-sept-ventilateurs-que-personne-ne-pilotait),
   et se pilote depuis #113 [par la fenêtre comme par le socket](#la-régulation-depuis-la-fenêtre) —
   sous un bouton « Réguler », à la place où « auto » ne peut pas s'afficher.
-  ⚠️ **Depuis #97, il ne s'affiche donc nulle part** : « auto » écrit `pwm_enable = 2`, qui fait
+  ⚠️ **De #97 à #104, il ne s'affichait nulle part** : « auto » écrit `pwm_enable = 2`, qui fait
   exécuter la courbe de l'**hôte** — zéro partout tant qu'aucune n'a été téléversée, ce qui arrête
   la régulation de la pompe au lieu de la rendre. Le démon n'ayant pas de verbe `curve` sur le
-  socket, son carnet de courbes posées reste vide, et les deux canaux du Kraken rejoignent les
-  autres. C'est l'issue #104 qui rouvrira le bouton, en donnant au démon de quoi poser la courbe.
+  socket, son carnet de courbes posées restait vide, et les deux canaux du Kraken rejoignaient les
+  autres. **#104 lui a donné le verbe** : une courbe posée par le socket remplit le carnet, et le
+  bouton réapparaît sur le canal concerné — sur celui-là seulement, et jusqu'au prochain
+  redémarrage du démon.
 - Une sonde qui cesse de répondre s'affiche **illisible**, et le reste de la fenêtre continue à
   pleine vitesse. Voir [ci-dessous](#une-sonde-muette-nemporte-pas-le-démon).
 - Un **canal de ventilation** muet s'affiche illisible lui aussi — à sa place dans la liste, sa

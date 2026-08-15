@@ -61,7 +61,8 @@ fn main() -> ExitCode {
             canal,
             points,
             force,
-        } => poser_courbe(&canal, &points, force),
+            activer,
+        } => poser_courbe(&canal, &points, force, activer),
         Command::Screen { action } => piloter_ecran(action),
         Command::Ram { action } => piloter_ram(action),
     };
@@ -109,7 +110,6 @@ fn ceder_le_pas(commande: &Command) -> Result<(), String> {
         Command::Set { .. }
             | Command::Paint { .. }
             | Command::Fan { .. }
-            | Command::Curve { .. }
             | Command::Ram { .. }
             // Les mires sont les seules commandes d'écran qui ne passent pas
             // par le socket : ce sont des outils de diagnostic, et elles n'ont
@@ -321,8 +321,49 @@ fn regler_ventilateur(cible: &CibleCanal, action: ActionVentilateur) -> Result<(
     Ok(())
 }
 
-/// Écrit une courbe sur un canal qui en a une.
-fn poser_courbe(nom: &str, points: &[(usize, Percent)], force: bool) -> Result<(), String> {
+/// Écrit une courbe sur un canal qui en a une, et la bascule si `activer`.
+///
+/// ⚠️ **Passe par le démon quand il tourne**, comme `screen` depuis #33 : une
+/// courbe fait quarante points et tient sur une ligne de texte, contrairement au
+/// mégaoctet d'une image, donc le protocole n'a pas à être contourné. Sans démon,
+/// elle écrit en direct comme avant.
+///
+/// ⚠️ **Le plancher et l'interpolation restent ici**, en amont du socket : ce
+/// sont les garde-fous de la ligne de commande, et les déplacer côté démon les
+/// imposerait aussi à la fenêtre, qui a les siens.
+fn poser_courbe(
+    nom: &str,
+    points: &[(usize, Percent)],
+    force: bool,
+    activer: bool,
+) -> Result<(), String> {
+    // Le démon d'abord : lui seul détient les bus quand il tourne. La découverte
+    // des canaux qui suit lit sysfs, ce qui n'écrit rien — mais l'interroger
+    // avant d'avoir cédé le pas ferait deux découvertes pour rien.
+    if let Some(courbe) = courbe_pour_le_socket(nom, points, force)? {
+        let requete = Request::Curve {
+            channel: nom.to_owned(),
+            points: courbe,
+            activer,
+        };
+        if let Some(lignes) = parler_au_demon(&requete)? {
+            for ligne in &lignes {
+                if let ResponseLine::Error { message } = ligne {
+                    return Err(message.clone());
+                }
+            }
+            println!(
+                "Courbe écrite sur « {nom} » par le démon.{}",
+                if activer {
+                    " Le canal l'exécute désormais."
+                } else {
+                    " Le canal garde son mode ; « --enable » l'y bascule."
+                }
+            );
+            return Ok(());
+        }
+    }
+
     let canaux = canaux_decouverts()?;
     let canal = canaux
         .iter()
@@ -345,30 +386,29 @@ fn poser_courbe(nom: &str, points: &[(usize, Percent)], force: bool) -> Result<(
         });
     }
 
-    // Le plancher s'applique point par point, comme la consigne fixe de #7.
-    let sous_plancher = points
-        .iter()
-        .find(|(_, consigne)| consigne.percent() < Percent::FLOOR);
-    if let (false, Some((point, consigne))) = (force, sous_plancher) {
-        return Err(format!(
-            "consigne de {} % au point {point}, sous le plancher de {} %. \
-             Utilisez « --force » si c'est voulu.",
-            consigne.percent(),
-            Percent::FLOOR
-        ));
-    }
-
     let courbe = hwmon::Curve::interpolate(points).map_err(|e| e.to_string())?;
     // Le carnet meurt avec le processus, et c'est voulu : il n'existe que pour
     // que « une courbe est partie » traverse `set_curve` plutôt que de se
     // décréter à côté (issue #97).
+    //
+    // ⚠️ **C'est ce carnet-là que #104 existe pour ne pas perdre.** Tant que la
+    // bascule tenait dans un second processus — `reverb fan --curve` —, elle
+    // repartait d'un carnet vide et se refusait elle-même. `--enable` l'exécute
+    // donc ici, sur le carnet que `set_curve` vient de remplir.
     let mut posees = hwmon::CourbesPosees::vide();
     hwmon::set_curve(canal, &courbe, &mut posees).map_err(|e| echec_ecriture(canal, &e))?;
+
+    if activer {
+        hwmon::set_mode(canal, hwmon::Mode::HostCurve, &posees)
+            .map_err(|e| echec_ecriture(canal, &e))?;
+        println!("Courbe écrite sur « {nom} », et le canal l'exécute désormais.");
+        return Ok(());
+    }
 
     // Écrire la courbe ne la met pas en service : le canal continue de suivre
     // le mode qu'il avait. Le dire, plutôt que de laisser croire à un effet.
     println!(
-        "Courbe écrite sur « {nom} ». Le canal reste en mode « {} ».",
+        "Courbe écrite sur « {nom} ». Le canal reste en mode « {} » ; « --enable » l'y bascule.",
         canal
             .mode()
             .map(|m| m.to_string())
@@ -376,6 +416,32 @@ fn poser_courbe(nom: &str, points: &[(usize, Percent)], force: bool) -> Result<(
     );
 
     Ok(())
+}
+
+/// Les quarante consignes prêtes pour le socket, plancher vérifié.
+///
+/// ⚠️ **Le plancher s'applique point par point**, comme la consigne fixe de #7,
+/// et il est vérifié **ici** — donc sur les deux chemins, socket comme direct.
+/// Le laisser au seul chemin direct ferait du démon une porte dérobée sur un
+/// garde-fou, ce que le projet refuse partout ailleurs.
+fn courbe_pour_le_socket(
+    nom: &str,
+    points: &[(usize, Percent)],
+    force: bool,
+) -> Result<Option<[u8; hwmon::CURVE_POINTS]>, String> {
+    let sous_plancher = points
+        .iter()
+        .find(|(_, consigne)| consigne.percent() < Percent::FLOOR);
+    if let (false, Some((point, consigne))) = (force, sous_plancher) {
+        return Err(format!(
+            "consigne de {} % au point {point}, sous le plancher de {} % pour « {nom} ». \
+             Utilisez « --force » si c'est voulu.",
+            consigne.percent(),
+            Percent::FLOOR
+        ));
+    }
+    let courbe = hwmon::Curve::interpolate(points).map_err(|e| e.to_string())?;
+    Ok(Some(courbe.points().map(|c| c.percent())))
 }
 
 /// Applique une consigne à un canal, garde-fous compris.
