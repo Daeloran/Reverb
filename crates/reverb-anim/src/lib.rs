@@ -21,9 +21,14 @@
 //! Ce nombre se calcule de deux façons, et le catalogue se partage entre elles.
 //! `vague` prend la **position réelle** le long de la direction : deux LED à la
 //! même hauteur reçoivent donc la même couleur d'une onde qui monte, quels que
-//! soient leur ventilateur et leur numéro d'ordre. Les cinq autres suivent
-//! l'**écoulement**, qui traverse chaque ventilateur d'un bord à l'autre même
-//! quand la direction l'aplatit — voir [`Geometrie::traversee`].
+//! soient leur ventilateur et leur numéro d'ordre. Les quatre autres familles
+//! dirigées suivent l'**écoulement**, qui traverse chaque ventilateur d'un bord
+//! à l'autre même quand la direction l'aplatit — voir [`Geometrie::traversee`].
+//!
+//! Les cinq dernières ne suivent aucune direction, et n'en acceptent aucune :
+//! `rotation` suit l'angle relevé de chaque anneau, `pouls` la distance à la
+//! pompe, `thermique` une sonde, `scintillement` rien du tout, et `braise`
+//! croise la distance à la pompe et l'angle (#119).
 
 use std::fmt;
 
@@ -333,7 +338,8 @@ const AVEC_COULEUR: &[&str] = &["couleur", "vitesse", "direction"];
 const SANS_COULEUR: &[&str] = &["vitesse", "direction"];
 /// Les clés d'une animation dont le motif ne suit **aucune** direction du
 /// boîtier : `rotation` suit le montage relevé de chaque anneau, `pouls` la
-/// distance à la pompe, `scintillement` le hasard.
+/// distance à la pompe, `scintillement` le hasard, et `braise` la distance à la
+/// pompe croisée à l'angle de chaque anneau (#119).
 const SANS_DIRECTION: &[&str] = &["couleur", "vitesse"];
 /// Les clés de `thermique` : ses couleurs viennent du gradient, et sa sonde est
 /// **exigée** — une animation qui ne pourrait jamais rien relever afficherait un
@@ -374,11 +380,21 @@ impl Animation {
             // direction : un boîtier qui affiche une température n'a pas de
             // sens de lecture.
             Famille::Thermique => SUIT_UNE_SONDE,
-            // Trois motifs qui ne se projettent sur aucun axe du boîtier :
+            // Quatre motifs qui ne se projettent sur aucun axe du boîtier :
             // l'anneau suit son montage relevé, l'onde suit la distance à la
-            // pompe, le scintillement ne suit rien. Accepter `direction` serait
-            // ranger un réglage puis l'oublier.
-            Famille::Rotation | Famille::Pouls | Famille::Scintillement => SANS_DIRECTION,
+            // pompe, le scintillement ne suit rien, et la braise croise la
+            // distance à la pompe et l'angle de chaque anneau. Accepter
+            // `direction` serait ranger un réglage puis l'oublier.
+            //
+            // ⚠️ **`braise` les a rejoints (#119), et c'est une rupture de
+            // compatibilité** : `animate braise direction=…` est désormais
+            // refusé, la commande entière avec, et un profil enregistré qui
+            // porte cette clé cesse de s'appliquer tant qu'il n'est pas
+            // réenregistré. Le prix est assumé — accepter la clé pour ne rien en
+            // faire serait le réglage qui ment que ce projet refuse partout.
+            Famille::Rotation | Famille::Pouls | Famille::Scintillement | Famille::Braise => {
+                SANS_DIRECTION
+            }
             _ => AVEC_COULEUR,
         }
     }
@@ -663,7 +679,13 @@ impl Animation {
     ///
     /// **`vague` s'en tient au `spatiale`**, seule du catalogue : elle est
     /// l'onde plane, et la démonstration que le boîtier et la RAM sont
-    /// synchronisés dans l'espace. Les cinq autres suivent l'écoulement.
+    /// synchronisés dans l'espace. Les quatre autres familles dirigées suivent
+    /// l'écoulement.
+    ///
+    /// ⚠️ **Les cinq familles restantes ne lisent ni l'une ni l'autre**, et
+    /// c'est ce qui les rend indifférentes à la direction. `braise` les a
+    /// rejointes en #119 : elle lisait `flux`, donc elle défilait le long de
+    /// l'axe demandé, et un lit de braises n'a pas d'axe.
     fn peindre(&self, reglages: &Reglages, ou: &Place) -> Rgb {
         let Place {
             spatiale,
@@ -723,13 +745,51 @@ impl Animation {
                 }
             }
 
-            // Deux ondes de périodes incommensurables : l'œil n'y voit pas de
-            // cycle, sans qu'aucun hasard n'entre dans un rendu qui doit rester
-            // reproductible à l'identique dans la fenêtre et dans le démon.
+            // Un lit de braises : des zones chaudes et froides qui respirent et
+            // se déplacent lentement, sans qu'aucun axe ne se lise.
+            //
+            // Deux ondes portées par les deux seules grandeurs spatiales que la
+            // direction demandée n'atteint pas — le `rayon`, distance à la
+            // pompe, et l'`angle` de la LED sur son organe. **Aucune des deux
+            // n'est un axe du boîtier** : la première est une distance, qui
+            // vaut autant dans les six sens ; la seconde tourne sur place et ne
+            // sort jamais de son anneau. Il n'existe donc aucune direction où
+            // ce motif défilerait, et c'est pourquoi `braise` n'en accepte plus
+            // (#119) : il n'y aurait rien à en faire.
+            //
+            // L'onde **lente** respire depuis la pompe et porte les sept
+            // dixièmes de l'amplitude ; l'onde **vive** tourne en sens inverse
+            // sur chaque anneau et porte le reste. Leurs cadences sont
+            // incommensurables, si bien qu'aucune des deux ne ramène jamais
+            // l'autre à son point de départ.
+            //
+            // ⚠️ **Sans axe, mais pas LED par LED.** Les deux ondes sont lentes
+            // dans l'espace, si bien que deux LED voisines restent liées : c'est
+            // ce qui sépare un feu du grésillement, et le grésillement est déjà
+            // `scintillement`. Le frémissement tiré de la `graine` ne rompt que
+            // la régularité résiduelle des deux ondes — voir [`FREMISSEMENT`].
+            //
+            // ⚠️ **Ni le seul rayon**, sans quoi deux LED à égale distance de la
+            // pompe s'allumeraient toujours ensemble : le boîtier porterait des
+            // coquilles concentriques, et ce serait `pouls`. C'est l'`angle`
+            // qui les sépare.
+            //
+            // ⚠️ **`derive` et non `temps`.** L'ancien commentaire promettait
+            // « deux ondes de périodes incommensurables : l'œil n'y voit pas de
+            // cycle ». C'était vrai **dans le temps d'un cycle** — 3 et 7 ne se
+            // referment pas l'une sur l'autre —, muet sur l'**espace**, qui est
+            // justement ce qu'on voit, et faux d'un cycle au suivant : `temps`
+            // se replie sur [`PERIODE`] et ne prend que quarante valeurs à la
+            // vitesse 3. [`derive`], elle, ne se replie pas sur le cycle.
+            //
+            // Aucun `rand`, aucune horloge, aucun état : le frémissement est un
+            // hachage du numéro de LED, et l'aperçu de la fenêtre montre donc
+            // exactement ce que le boîtier reçoit.
             Famille::Braise => {
-                let lente = cycle(3.0 * temps - place);
-                let vive = cycle(7.0 * temps + 3.0 * place);
-                let intensite = 0.5 + 0.3 * lente + 0.2 * vive;
+                let fremissement = FREMISSEMENT * (melange(graine) % 4096) as f32 / 4096.0;
+                let lente = cycle(3.0 * derive + 3.0 * rayon + fremissement);
+                let vive = cycle(-7.0 * derive + 5.0 * rayon - angle + fremissement);
+                let intensite = 0.5 + 0.35 * lente + 0.15 * vive;
                 teinter(reglages.couleur, intensite.clamp(0.0, 1.0))
             }
 
@@ -863,6 +923,15 @@ const BLANC_MIN: f32 = 90.0;
 /// Deux : un qui part, un qui achève sa course. Un seul rendrait le boîtier noir
 /// la plupart du temps, quatre en feraient des anneaux concentriques illisibles.
 const ETALEMENT: f32 = 2.0;
+
+/// Part de cycle dont la `graine` décale une LED de la braise.
+///
+/// Un quinzième. Assez pour rompre la régularité des deux ondes — sans lui, un
+/// anneau entier passerait par la même phase à un dixième près et le motif se
+/// lirait —, assez peu pour que deux LED voisines restent liées : c'est cette
+/// borne qui sépare un feu du grésillement de `scintillement`, dont chaque LED
+/// tire une phase sur un cycle entier.
+const FREMISSEMENT: f32 = 1.0 / 15.0;
 
 /// Au-dessus de ce seuil, une LED du scintillement s'allume.
 ///
