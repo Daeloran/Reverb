@@ -8,6 +8,13 @@
 //!
 //! Si l'un de ces tests échoue après implémentation, c'est le code qu'on corrige.
 //!
+//! ⚠️ **Une exception, et une seule : `braise`, retirée du domaine par l'issue #119.** Ce fichier
+//! la comptait parmi les six familles qui suivent une direction ; #119 tranche que ce n'était pas
+//! la bonne règle et lui retire l'axe, le réglage `direction` avec. Ce n'est donc pas un test plié
+//! à une implémentation, c'est une spécification remplacée par une autre — voir
+//! [`RETIREE_PAR_119`], qui porte le raisonnement. Le verdict de ce fichier sur les cinq autres
+//! familles est intact, et leurs trente empreintes n'ont pas bougé d'un bit.
+//!
 //! # L'API que ces tests supposent
 //!
 //! Rien de ce qui suit n'existe encore : c'est la phase rouge attendue.
@@ -125,6 +132,30 @@ const ANCIENNES_FAMILLES: [&str; 6] = [
     "braise",
 ];
 
+/// Celle des six que l'issue **#119** a retirée du domaine de ce fichier.
+///
+/// ⚠️ **C'est une spécification remplacée par une autre, et non un test plié à une
+/// implémentation.** Ce fichier dit « `braise` suit la direction demandée, comme les cinq
+/// autres » ; #119 tranche que ce n'était pas la bonne règle. Signalé devant le boîtier — « le
+/// *sens* de l'effet a un effet sur l'animation et du coup on voit clairement un pattern » —, et
+/// le code le disait : `braise` était littéralement deux ondes planes défilant le long de l'axe
+/// demandé. Un lit de braises n'a pas d'axe. Elle n'en suit donc plus aucun, et
+/// `parametres_acceptes` ne liste plus `direction` — la lui donner fait refuser l'`animate`
+/// entier.
+///
+/// Les quatre observables de ce fichier n'ont dès lors plus d'objet pour elle : une famille qui
+/// ignore la direction ne peut ni devenir symétrique **sous `bords-centre`**, ni y rendre quatre
+/// barrettes identiques, ni distinguer les deux directions locales l'une de l'autre, ni faire
+/// différer deux ventilateurs sous une globale. Les exiger d'elle serait exiger qu'elle suive un
+/// axe, c'est-à-dire exactement ce que #119 lui retire.
+///
+/// ⚠️ **Le verdict sur les cinq autres est intact.** #119 retire une famille du domaine ; il ne
+/// touche à aucun seuil, à aucune assertion, à aucune empreinte des cinq — et le premier test de
+/// ce fichier continue d'exiger qu'elle reste au catalogue. Ce que `braise` doit désormais tenir
+/// est figé par `spec_braise_sans_axe.rs`, qui lui en demande **davantage** : le même rendu sous
+/// les huit directions, LED par LED et instant par instant.
+const RETIREE_PAR_119: &str = "braise";
+
 /// Durée d'un cycle, en pas, à la vitesse 1 — figée par `spec_sens.rs` (issue #49).
 const PERIODE: u32 = 120;
 
@@ -145,10 +176,15 @@ const RETARD_MINIMAL: f64 = 0.5;
 // Aides
 // ---------------------------------------------------------------------------
 
-/// Les animations d'avant l'issue, ouvertes par leur nom.
-fn anciennes() -> Vec<Animation> {
+/// Les animations d'avant l'issue **qui suivent encore une direction**, ouvertes par leur nom.
+///
+/// Cinq depuis #119, qui en a retiré [`RETIREE_PAR_119`] : tout ce fichier mesure ce qu'une
+/// direction fait à un motif, et cette question ne se pose plus pour une famille qui n'en accepte
+/// aucune.
+fn anciennes_dirigees() -> Vec<Animation> {
     ANCIENNES_FAMILLES
         .iter()
+        .filter(|nom| **nom != RETIREE_PAR_119)
         .map(|nom| {
             Animation::par_nom(nom)
                 .unwrap_or_else(|erreur| panic!("« {nom} » est au catalogue : {erreur}"))
@@ -352,7 +388,7 @@ fn les_huit_directions_sont_acceptees_par_les_six_familles() {
 
     // Et chacune des huit est acceptée par chacune des six familles, et atterrit dans le champ
     // `direction` — une valeur rangée ailleurs serait un réglage qui ment.
-    for animation in anciennes() {
+    for animation in anciennes_dirigees() {
         for direction in Direction::ALL {
             let lus = animation
                 .reglages(&[paire("direction", direction.slug())])
@@ -382,7 +418,7 @@ fn une_neuvieme_direction_inventee_est_refusee_en_citant_les_huit() {
     // se corrige seul et un utilisateur qui va lire le code. Le refus d'aujourd'hui la donne déjà
     // (« Directions : bas-haut, haut-bas, … ») ; ce test exige qu'elle **s'allonge** avec le
     // domaine, faute de quoi les deux directions neuves resteraient introuvables.
-    for animation in anciennes() {
+    for animation in anciennes_dirigees() {
         for saisi in [
             "bords-milieu",
             "centre-milieu",
@@ -433,7 +469,7 @@ fn sous_les_directions_locales_une_barrette_est_symetrique() {
     //
     // Exigé aussi de `centre-bords` : c'est la même symétrie parcourue à l'envers.
     let geometrie = geometrie();
-    for animation in anciennes() {
+    for animation in anciennes_dirigees() {
         for direction in LOCALES {
             let reglages = reglages(direction, 1);
             for pas in 0..PERIODE {
@@ -463,7 +499,7 @@ fn sous_les_directions_locales_le_milieu_d_une_barrette_ne_suit_pas_ses_bords() 
     // barrette d'une seule couleur serait parfaitement symétrique, et parfaitement fausse. Il faut
     // donc que le milieu **diffère** des bords à un moment du cycle.
     let geometrie = geometrie();
-    for animation in anciennes() {
+    for animation in anciennes_dirigees() {
         for direction in LOCALES {
             let reglages = reglages(direction, 1);
             let differe = (0..PERIODE).any(|pas| {
@@ -524,11 +560,14 @@ fn sous_bords_centre_le_milieu_d_une_barrette_s_allume_en_dernier() {
     // Ce que `braise` doit à cette issue reste vérifié par les autres tests de ce fichier : sa
     // symétrie autour du milieu, l'identité de ses quatre barrettes, et le fait que son milieu se
     // distingue de ses bords.
+    //
+    // ⚠️ **#119 l'a depuis retirée du domaine entier de ce fichier**, et le filtre nommé qui vivait
+    // ici est devenu redondant : [`anciennes_dirigees`] ne la rend plus. Le relevé ci-dessus est
+    // conservé — il dit pourquoi elle était déjà illisible sur cet appareil-là, dix-sept jours avant
+    // qu'on ne sache pourquoi elle l'était partout. Le dernier paragraphe, lui, ne vaut plus : ces
+    // trois observables ne s'appliquent plus à elle. Voir [`RETIREE_PAR_119`].
     let geometrie = geometrie();
-    for animation in anciennes()
-        .into_iter()
-        .filter(|animation| animation.nom() != "braise")
-    {
+    for animation in anciennes_dirigees() {
         for (direction, attendu) in [
             (Direction::BordsCentre, 1.0),
             (Direction::CentreBords, -1.0),
@@ -578,7 +617,7 @@ fn bords_centre_et_centre_bords_ne_sont_pas_la_meme_animation() {
     // Garde-fou minimal, complémentaire du test précédent : il ne dépend d'aucune mesure de phase,
     // et attrape le cas grossier où les deux directions seraient le même code.
     let geometrie = geometrie();
-    for animation in anciennes() {
+    for animation in anciennes_dirigees() {
         let aller = reglages(Direction::BordsCentre, 3);
         let retour = reglages(Direction::CentreBords, 3);
         let differe = (0..PERIODE).any(|pas| {
@@ -603,7 +642,7 @@ fn sous_les_directions_locales_les_quatre_barrettes_affichent_la_meme_image() {
     // quatre barrettes affichent **la même image**, quelle que soit leur place dans le boîtier —
     // c'est ce qui distingue une direction locale d'une onde plane ».
     let geometrie = geometrie();
-    for animation in anciennes() {
+    for animation in anciennes_dirigees() {
         for direction in LOCALES {
             let reglages = reglages(direction, 1);
             for pas in 0..PERIODE {
@@ -635,7 +674,7 @@ fn sous_les_directions_locales_deux_ventilateurs_de_meme_montage_affichent_la_me
     // seule une projection **globale** les distingue, puisqu'elle les lit à leur place dans le
     // boîtier. C'est donc exactement le défaut visé, sans rien exiger de plus.
     let geometrie = geometrie();
-    for animation in anciennes() {
+    for animation in anciennes_dirigees() {
         for direction in LOCALES {
             let reglages = reglages(direction, 1);
             for pas in 0..PERIODE {
@@ -679,7 +718,7 @@ fn sous_une_direction_globale_les_quatre_barrettes_different() {
     // Sans ce contrôle, une implémentation qui rendrait **tout** local passerait les trois tests
     // précédents et serait fausse.
     let geometrie = geometrie();
-    for animation in anciennes() {
+    for animation in anciennes_dirigees() {
         let reglages = reglages(Direction::AvantArriere, 1);
         let differe = (0..PERIODE).any(|pas| {
             let image = animation.image(&geometrie, &reglages, pas);
@@ -705,7 +744,7 @@ fn sous_une_direction_globale_deux_ventilateurs_de_meme_montage_different() {
     // alignés d'avant en arrière (seule la profondeur les sépare). Écrire une direction en dur
     // rendrait le contrôle vide pour deux groupes sur trois.
     let geometrie = geometrie();
-    for animation in anciennes() {
+    for animation in anciennes_dirigees() {
         for (etiquette, membres) in groupes_de_meme_montage() {
             let separe = GLOBALES.iter().any(|direction| {
                 let reglages = reglages(*direction, 1);
@@ -792,11 +831,18 @@ fn empreinte_couple(animation: &Animation, direction: Direction) -> u64 {
     valeur
 }
 
-/// Ce que les six familles rendaient sous les six directions **avant** l'issue #75.
+/// Ce que les familles dirigées rendaient sous les six directions **avant** l'issue #75.
 ///
 /// Relevé le 2026-08-02 sur `feature/75-animations`, avant toute modification, en appelant
 /// `Animation::image` — l'API publique.
-const EMPREINTES: [(&str, &str, u64); 36] = [
+///
+/// ⚠️ **Les six lignes de `braise` en ont été retirées par #119**, qui lui refait entièrement son
+/// rendu et lui retire la direction : ses empreintes d'alors décrivent le défaut que l'issue
+/// corrige, et les garder reviendrait à exiger qu'il persiste. Voir [`RETIREE_PAR_119`] — c'est le
+/// seul cas prévu par le paragraphe ci-dessus, « Nico décide, en connaissance de cause, que le
+/// rendu doit changer ». **Aucune des trente autres ne bouge d'un bit**, et c'est ce qui prouve que
+/// #119 n'a touché qu'elle.
+const EMPREINTES: [(&str, &str, u64); 30] = [
     ("vague", "bas-haut", 0xc699_f733_4a54_c523),
     ("vague", "haut-bas", 0xd85b_b0e4_ac0e_e055),
     ("vague", "avant-arriere", 0xf5fa_c281_d1bf_d0c5),
@@ -827,12 +873,6 @@ const EMPREINTES: [(&str, &str, u64); 36] = [
     ("balayage", "arriere-avant", 0xdb16_45a1_580c_dfa1),
     ("balayage", "horaire", 0xf6fd_4fda_69c6_9ec1),
     ("balayage", "antihoraire", 0xb4e8_7b87_0c15_9f7d),
-    ("braise", "bas-haut", 0x3665_fd4c_c375_e755),
-    ("braise", "haut-bas", 0x1bdb_4aed_f3fb_4701),
-    ("braise", "avant-arriere", 0x2c81_662a_d88c_1ce1),
-    ("braise", "arriere-avant", 0x5793_5bd1_a1d0_548b),
-    ("braise", "horaire", 0x76ae_d47d_ae8e_ab47),
-    ("braise", "antihoraire", 0xa621_e65b_646e_6b2d),
 ];
 
 #[test]
@@ -846,10 +886,14 @@ fn les_six_familles_sous_les_six_directions_rendent_exactement_les_memes_images(
     // personne ne le voie. Six familles × six directions × 216 images : 7 776 images comparées.
     //
     // ⚠️ Si une empreinte bouge, c'est le code qu'on corrige, jamais la table.
+    //
+    // ⚠️ **Cinq familles depuis #119**, qui a retiré `braise` du domaine — voir
+    // [`RETIREE_PAR_119`]. La règle ci-dessus tient pour les cinq qui restent : c'est une famille
+    // qui sort de la table, jamais une empreinte qu'on recalcule pour la faire passer.
     assert_eq!(
         EMPREINTES.len(),
-        ANCIENNES_FAMILLES.len() * GLOBALES.len(),
-        "la table doit couvrir les six familles sous les six directions"
+        anciennes_dirigees().len() * GLOBALES.len(),
+        "la table doit couvrir les cinq familles dirigées sous les six directions"
     );
     for (nom, slug, attendue) in EMPREINTES {
         let animation = Animation::par_nom(nom)

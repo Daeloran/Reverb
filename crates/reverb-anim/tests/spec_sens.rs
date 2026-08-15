@@ -52,11 +52,17 @@
 //! exactement une période, et donc du rang 1 le fondamental de l'animation. À une vitesse
 //! supérieure la fenêtre couvrirait plusieurs cycles et le retard deviendrait ambigu.
 //!
-//! ## `braise`, qui superpose deux ondes
+//! ## `braise`, qui superposait deux ondes
 //!
-//! Son sens de défilement est réel mais bruité : sur certains couples de sondes, la cohérence
-//! tombe à 0,15 et le retard mesuré n'a plus de sens. Ce fichier ne la traite pas à part, il
-//! l'**encadre** :
+//! ⚠️ **Retirée du domaine de ce fichier par l'issue #119**, qui refait son rendu et lui retire le
+//! réglage `direction` : une famille qui n'accepte aucune direction n'a aucun sens de défilement à
+//! mesurer, et [`dirigees`] la laisse partir sans qu'une assertion change. Ce qui suit décrit donc
+//! ce qu'elle était — et reste le premier relevé montrant que son motif n'était pas ce qu'on
+//! croyait. Le verdict sur les cinq familles qui restent est intact.
+//!
+//! Son sens de défilement était réel mais bruité : sur certains couples de sondes, la cohérence
+//! tombait à 0,15 et le retard mesuré n'avait plus de sens. Ce fichier ne la traitait pas à part,
+//! il l'**encadrait** :
 //!
 //! - un couple de sondes dont la cohérence passe sous [`COHERENCE_MINIMALE`] est déclaré
 //!   **inexploitable pour cette famille**, et ne sert à rien conclure ;
@@ -528,8 +534,15 @@ fn catalogue() -> Vec<(&'static str, Animation)> {
 /// `thermique` une sonde. Leur demander de défiler dans le sens d'une direction qu'elles
 /// n'acceptent pas n'aurait aucun sens : la question ne se pose pas pour elles.
 ///
+/// ⚠️ **#119 en retire une cinquième, et celle-là en revient : `braise`.** Elle défilait bel et bien
+/// le long de la direction demandée — deux ondes planes superposées —, et c'est justement le défaut
+/// que l'issue corrige : « un lit de braises n'a pas d'axe ». Elle ne l'accepte donc plus, et ce
+/// filtre la laisse partir sans qu'une ligne change ici. C'est une **spécification remplacée par une
+/// autre**, décidée dans l'issue, et non un test plié à une implémentation.
+///
 /// Le filtre lit `parametres_acceptes`, seule source de vérité : une famille qui gagnerait un jour
-/// le réglage `direction` rejoindrait ces tests d'elle-même.
+/// le réglage `direction` rejoindrait ces tests d'elle-même, et celle qui le perd en sort de même —
+/// ce que #119 vient de démontrer.
 fn dirigees() -> Vec<&'static str> {
     CATALOGUE
         .iter()
@@ -630,13 +643,24 @@ fn a_la_vitesse_un_le_motif_boucle_en_cent_vingt_pas_et_bouge_entre_temps() {
     // à toutes les vitesses — précisément pour qu'aucun cycle ne s'y installe. Lui demander de
     // boucler en 120 pas serait lui demander de ne plus scintiller.
     //
-    // Les neuf autres bouclent bien en 120 pas, `thermique` comprise : faute de sonde, elle pulse
+    // ⚠️ **`braise` l'a rejointe (#119), et pour la même raison.** Elle promettait déjà « deux ondes
+    // de périodes incommensurables : l'œil n'y voit pas de cycle », et la promesse était fausse d'un
+    // cycle au suivant — elle défilait sur `temps`, qui se replie sur cent vingt pas, donc elle se
+    // refermait exactement ici. Elle défile désormais sur la même horloge que `scintillement`, celle
+    // qui ne se replie pas, et `spec_braise_sans_axe.rs` l'**exige** plutôt que de le tolérer :
+    // vingt instants séparés d'une période exacte doivent rendre dix images distinctes au moins.
+    //
+    // Ce test ne perd rien à son départ : il appareille une mesure de sens, et `braise` n'a plus de
+    // sens à mesurer — elle n'accepte plus de direction, donc [`dirigees`] ne la rend déjà plus aux
+    // tests qui suivent.
+    //
+    // Les huit autres bouclent bien en 120 pas, `thermique` comprise : faute de sonde, elle pulse
     // en blanc sur le cycle ordinaire.
     let geometrie = boitier();
 
     for (nom, animation) in catalogue()
         .into_iter()
-        .filter(|(nom, _)| *nom != "scintillement")
+        .filter(|(nom, _)| *nom != "scintillement" && *nom != "braise")
     {
         for axe in [Axe::Hauteur, Axe::Profondeur] {
             for direction in [axe.vers_les_petites(), axe.vers_les_grandes()] {
@@ -881,12 +905,16 @@ fn bas_haut_monte_du_plancher_et_haut_bas_descend_du_plafond() {
     // ⚠️ `arc-en-ciel` en est **exclue**, et elle seule : elle est à contresens sur l'axe vertical
     // aussi, donc l'inclure ici ferait de ce garde-fou un rouge de plus et lui ôterait sa fonction.
     // Elle est couverte par le test suivant, qui la nomme.
-    let cinq: Vec<&str> = dirigees()
+    //
+    // ⚠️ Elles étaient cinq jusqu'à #119, qui a retiré `braise` de [`dirigees`] — voir là-bas. La
+    // variable ne porte donc plus un compte, seulement ce qu'elle retire : un nom qui compte se
+    // met à mentir dès qu'une famille bouge, et deux l'ont fait en deux issues.
+    let sans_arc_en_ciel: Vec<&str> = dirigees()
         .into_iter()
         .filter(|nom| *nom != "arc-en-ciel")
         .collect();
     assert_eq!(
-        cinq.len(),
+        sans_arc_en_ciel.len(),
         dirigees().len() - 1,
         "« arc-en-ciel » doit être au catalogue pour en être exclue ici"
     );
@@ -895,13 +923,13 @@ fn bas_haut_monte_du_plancher_et_haut_bas_descend_du_plafond() {
         Axe::Hauteur,
         Direction::BasHaut,
         Parcours::VersLesGrandes,
-        &cinq,
+        &sans_arc_en_ciel,
     );
     exige_le_sens(
         Axe::Hauteur,
         Direction::HautBas,
         Parcours::VersLesPetites,
-        &cinq,
+        &sans_arc_en_ciel,
     );
 }
 
