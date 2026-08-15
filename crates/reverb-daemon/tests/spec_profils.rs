@@ -241,7 +241,13 @@ fn zones_temoins() -> Zones {
     zones.poser("colonne", &leds("fan:arriere"));
     zones.eclairer("colonne", ROUGE_DE_ZONE);
     zones.poser("barre", &leds("slot:1"));
-    zones.animer("barre", Some((animation("braise"), reglages_de_zone())));
+    // ⚠️ **`comete` et non `braise` depuis #119.** Ce témoin sert à prouver qu'un aller-retour ne
+    // perd aucun des trois réglages d'une zone, `direction` comprise — voir [`reglages_de_zone`].
+    // #119 retire `direction` à `braise`, qui ne suit plus aucun axe : `reglages_ecrits` cesse donc
+    // de l'écrire pour elle, et le témoin ne prouverait plus rien de la troisième. C'est le domaine
+    // du test qui change, pas son verdict — il lui faut une famille qui porte encore une direction,
+    // et distincte de la `vague` de la couche globale.
+    zones.animer("barre", Some((animation("comete"), reglages_de_zone())));
     zones.poser("tranche", &leds("fan:haut-milieu"));
     zones
 }
@@ -839,9 +845,13 @@ fn une_entree_repetee_est_refusee_en_la_nommant() {
             None,
         ),
         (
+            // ⚠️ Le couple suivait le témoin, et il a suivi #119 : la zone porte `comete` depuis
+            // que `braise` a perdu sa direction. La variante doit rester une animation **valide**,
+            // sans quoi le refus attendu — deux animations pour la même zone — serait remplacé par
+            // un refus de réglage, et ce test mesurerait autre chose que ce qu'il annonce.
             "deux animations pour la même zone",
             "barre".to_owned(),
-            Some(("braise", "comete")),
+            Some(("comete", "balayage")),
         ),
     ] {
         for rang in rangs_portant(&valide, &jeton) {
@@ -889,7 +899,9 @@ fn une_animation_inconnue_est_refusee_en_la_nommant_sans_emporter_le_reste() {
     // Le cas se produit vraiment : un profil enregistré aujourd'hui, une animation retirée du
     // catalogue demain, et le fichier reste. Ce qui compte alors est que le message dise *quelle*
     // animation et *où*, pour qu'on puisse corriger la ligne au lieu de jeter l'ambiance.
-    for connue in ["vague", "braise"] {
+    // Les deux animations que le témoin porte : celle de la couche globale et celle de la zone.
+    // La seconde était `braise` jusqu'à #119 — voir [`zones_temoins`].
+    for connue in ["vague", "comete"] {
         let valide = profil_temoin().encoder();
         let rang = rang_unique(&valide, connue);
         let mut abimee = lignes(&valide);

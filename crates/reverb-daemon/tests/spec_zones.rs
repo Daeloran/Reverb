@@ -180,7 +180,15 @@ fn zones_temoins() -> Zones {
     zones.poser("colonne", &zone_de_nico());
     assert!(zones.eclairer("colonne", ROUGE_DE_ZONE));
     zones.poser("radiateur", &zone_du_radiateur());
-    assert!(zones.animer("radiateur", Some((animation("braise"), reglages_temoins()))));
+    // ⚠️ **`respiration` et non `braise` depuis #119.** L'aller-retour d'une zone animée doit
+    // rendre les trois réglages de [`reglages_temoins`], `direction` comprise. #119 retire
+    // `direction` à `braise` — elle ne suit plus aucun axe —, si bien que `reglages_ecrits` cesse
+    // de l'écrire pour elle et que le témoin ne prouverait plus rien de la troisième. Le domaine du
+    // test change, son verdict non : il lui faut une famille qui porte encore une direction.
+    assert!(zones.animer(
+        "radiateur",
+        Some((animation("respiration"), reglages_temoins()))
+    ));
     zones.poser(
         "libre",
         &[Led::Ventilateur {
