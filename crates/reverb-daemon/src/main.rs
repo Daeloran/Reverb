@@ -4,7 +4,7 @@
 //! principal détient seul les périphériques**. Aucun verrou sur le matériel :
 //! ce qui n'est pas partagé ne peut pas entrer en collision.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, channel};
@@ -17,7 +17,7 @@ use reverb_daemon::ecran;
 use reverb_daemon::peripheriques::{Consigne, Peripheriques, SOURCE_DU_KRAKEN};
 use reverb_daemon::persistance::{self, Eclairage};
 use reverb_daemon::profils::{self, Ecriture, Profil};
-use reverb_daemon::quarantaine::{Quarantaine, Releve};
+use reverb_daemon::quarantaine::{Quarantaine, Releve, ReleveMotive};
 use reverb_daemon::regulation::{self, Courbe, Regulation};
 use reverb_daemon::reparation::{Constat, EtatSource, TENTATIVES_MAXIMALES};
 use reverb_daemon::serveur::{self, Ordre};
@@ -359,6 +359,18 @@ struct Etat {
     prochaine_mesure: Duration,
     /// Les canaux de ventilation que le démon régule lui-même (#99).
     regulation: Regulation,
+    /// Les canaux régulés qui **ne portent pas** ce qu'on leur a écrit (#110).
+    ///
+    /// ⚠️ **C'est une mémoire de journal, et rien d'autre.** La décision d'écrire
+    /// appartient tout entière à [`Regulation::tour`], qui la prend sur la
+    /// relecture ; ce jeu-là ne sert qu'à n'imprimer qu'une ligne à l'entrée dans
+    /// l'épisode et une à la sortie. Une consigne non appliquée repart à chaque
+    /// tour, soit 86 400 fois par jour : la journaliser à chaque fois rendrait le
+    /// journal inutilisable au moment précis où il servirait.
+    ///
+    /// C'est le même partage que pour la quarantaine, dont le `signaler` vit
+    /// dans [`crate::quarantaine`] et la phrase dans l'appelant.
+    non_appliques: HashSet<String>,
     /// Quand relire le liquide pour eux.
     ///
     /// ⚠️ **Ce n'est pas un réveil, c'est une échéance.** La boucle tourne déjà
@@ -419,6 +431,8 @@ impl Etat {
             // Celle d'un premier démarrage : aucun canal régulé.
             // `avec_regulation` pose ensuite celle qu'on vient de relire.
             regulation: Regulation::nouvelle(Courbe::defaut()),
+            // Aucun épisode en cours : rien n'a encore été écrit nulle part.
+            non_appliques: HashSet::new(),
             // Zéro : les canaux régulés sont écrits au tout premier tour. Rien
             // ne survit au redémarrage côté matériel, et `nzxtsmart2` repart de
             // son défaut d'allumage — 25 %, le défaut que #99 corrige.
@@ -663,6 +677,13 @@ impl Etat {
     /// sur un périphérique muet bloque cinq secondes en sommeil non
     /// interruptible, dans le fil qui sert aussi le socket. Une sonde écartée
     /// rend `None`, donc le repli — jamais la dernière valeur connue.
+    ///
+    /// ⚠️ **Ce que les canaux régulés portent est relu ici, et eux seuls** (#110).
+    /// Relire tous les canaux ferait payer chaque seconde une lecture du Kraken —
+    /// le périphérique même dont on sait qu'il se tait —, dans ce même fil. La
+    /// lecture passe par la **même quarantaine et sous la même clef** que celle
+    /// de `status` (#88) : un canal muet est écarté une fois pour les deux
+    /// chemins, et non deux fois pour cinq secondes chacune.
     fn tour_de_regulation(&mut self, peripheriques: &Peripheriques) {
         if self.regulation.canaux().is_empty() {
             return;
@@ -692,7 +713,17 @@ impl Etat {
             None => None,
         };
 
-        for regulation::Ecriture { canal, consigne } in self.regulation.tour(liquide) {
+        let regules = self.regulation.canaux();
+        let portees = self.relire_les_canaux(peripheriques, &regules, maintenant);
+
+        let mut rejoues: HashSet<String> = HashSet::new();
+        let mut neuves: HashSet<String> = HashSet::new();
+        for regulation::Ecriture {
+            canal,
+            consigne,
+            motif,
+        } in self.regulation.tour(liquide, &portees)
+        {
             let ecrite = Percent::new(consigne)
                 .map_err(|erreur| erreur.to_string())
                 .and_then(|percent| {
@@ -700,21 +731,132 @@ impl Etat {
                         .consigner(&canal, Consigne::Pwm(percent))
                         .map_err(|erreur| erreur.to_string())
                 });
-            match ecrite {
-                // Une consigne qui change se dit : sept ventilateurs sur dix en
-                // dépendent, et c'est la trace qui manquait pendant les
-                // soixante-douze minutes mesurées le 2026-08-15.
-                Ok(()) => println!(
-                    "régulation : {canal} à {consigne} %{}",
-                    match liquide {
-                        Some(millidegres) =>
-                            format!(" (liquide {:.1} °C)", f64::from(millidegres) / 1000.0),
-                        None => " (liquide illisible — repli)".to_owned(),
+            let Err(message) = ecrite else {
+                match motif {
+                    // Une consigne qui change se dit : sept ventilateurs sur dix
+                    // en dépendent, et c'est la trace qui manquait pendant les
+                    // soixante-douze minutes mesurées le 2026-08-15.
+                    regulation::Motif::Consigne => {
+                        neuves.insert(canal.clone());
+                        println!(
+                            "régulation : {canal} à {consigne} %{}",
+                            match liquide {
+                                Some(millidegres) =>
+                                    format!(" (liquide {:.1} °C)", f64::from(millidegres) / 1000.0),
+                                None => " (liquide illisible — repli)".to_owned(),
+                            }
+                        );
                     }
-                ),
-                Err(message) => eprintln!("attention : régulation de {canal} : {message}"),
-            }
+                    // ⚠️ **Une seule ligne par épisode.** Cette écriture-ci repart
+                    // à chaque tour tant que le canal n'applique pas, soit 86 400
+                    // par jour — le chiffre même que #99 invoquait pour justifier
+                    // son cache. Un journal qui les imprimerait toutes serait
+                    // illisible au moment précis où il servirait.
+                    regulation::Motif::NonAppliquee { porte } => {
+                        rejoues.insert(canal.clone());
+                        if self.non_appliques.insert(canal.clone()) {
+                            eprintln!(
+                                "attention : régulation : « {canal} » porte {} alors qu'il a reçu \
+                                 {consigne} % — la consigne est rejouée à chaque tour, en silence, \
+                                 jusqu'à ce qu'elle prenne",
+                                match porte {
+                                    Some(pourcent) => format!("{pourcent} %"),
+                                    None => "autre chose".to_owned(),
+                                }
+                            );
+                        }
+                    }
+                }
+                continue;
+            };
+            eprintln!("attention : régulation de {canal} : {message}");
         }
+
+        self.clore_les_episodes(&regules, &portees, &rejoues, &neuves);
+    }
+
+    /// Ce que les canaux régulés portent vraiment, relu par la quarantaine (#110).
+    ///
+    /// ⚠️ **`tour_motive` et non `tour`**, alors que seul le pourcentage est
+    /// gardé : la quarantaine est partagée avec `status`, et c'est elle qui
+    /// retient la raison d'un silence pour la redire tour après tour. Perdre la
+    /// raison ici, c'est faire répondre `unreadable <canal>` sans diagnostic à la
+    /// fenêtre — or « Connection timed out (os error 110) » est très exactement
+    /// ce qui a permis d'écrire #88.
+    ///
+    /// ⚠️ **Un canal absent du matériel rend `None`**, comme un illisible : entre
+    /// une redécouverte (#98) et un débranchement, la régulation ne peut rien
+    /// faire de la différence — dans les deux cas elle ne sait pas ce qu'il porte.
+    fn relire_les_canaux(
+        &mut self,
+        peripheriques: &Peripheriques,
+        regules: &[String],
+        maintenant: Duration,
+    ) -> BTreeMap<String, Option<u8>> {
+        let mut portees = BTreeMap::new();
+        for nom in regules {
+            let Some(canal) = peripheriques.canaux().iter().find(|c| &c.name == nom) else {
+                portees.insert(nom.clone(), None);
+                continue;
+            };
+            let verdict = self.quarantaine.tour_motive(nom, maintenant, || {
+                telemetrie::lire_le_canal(canal, peripheriques.courbes_posees())
+            });
+            let porte = match verdict {
+                ReleveMotive::Valeur(lu) => lu.pwm,
+                // L'écartement se dit une fois, comme dans `telemetrie::releve` —
+                // et il faut le dire ici aussi : sans fenêtre ouverte, aucun
+                // `status` ne passe, et l'épisode ne serait signalé nulle part.
+                ReleveMotive::Muette { signaler, raison } => {
+                    if signaler {
+                        eprintln!(
+                            "attention : canal « {nom} » écarté : {raison} — retenté plus tard, \
+                             de plus en plus espacé"
+                        );
+                    }
+                    None
+                }
+            };
+            portees.insert(nom.clone(), porte);
+        }
+        portees
+    }
+
+    /// Dit, une fois, qu'un canal s'est remis à porter sa consigne (#110).
+    ///
+    /// ⚠️ **La sortie d'épisode compte autant que l'entrée.** Sans elle le journal
+    /// laisse le lecteur sur un incident sans fin : une ligne « fan-3 porte 25 %
+    /// au lieu de 50 % », et plus rien, y compris le jour où le canal obéit de
+    /// nouveau.
+    ///
+    /// Un canal lisible sur lequel rien n'est parti porte **forcément** sa
+    /// consigne — c'est la règle de [`Regulation::tour`] —, d'où un message qui
+    /// affirme un fait mesuré et non une espérance. Les trois autres sorties se
+    /// taisent, et chacune pour sa raison : un canal coupé ne nous regarde plus,
+    /// une consigne neuve vient de s'imprimer d'elle-même, et un canal devenu
+    /// illisible n'a rien dit du tout — son épisode reste donc ouvert.
+    fn clore_les_episodes(
+        &mut self,
+        regules: &[String],
+        portees: &BTreeMap<String, Option<u8>>,
+        rejoues: &HashSet<String>,
+        neuves: &HashSet<String>,
+    ) {
+        self.non_appliques.retain(|canal| {
+            if rejoues.contains(canal) {
+                return true;
+            }
+            if !regules.contains(canal) || neuves.contains(canal) {
+                return false;
+            }
+            match portees.get(canal) {
+                Some(Some(porte)) => {
+                    println!("régulation : « {canal} » porte enfin sa consigne ({porte} %)");
+                    false
+                }
+                _ => true,
+            }
+        });
     }
 }
 
