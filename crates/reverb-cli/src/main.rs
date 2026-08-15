@@ -272,6 +272,15 @@ fn regler_ventilateur(cible: &CibleCanal, action: ActionVentilateur) -> Result<(
         ],
     };
 
+    // ⚠️ **Un carnet neuf, et il le restera** : chaque invocation de `reverb`
+    // est un processus, donc un démarrage, et le carnet des courbes posées ne
+    // survit jamais à un démarrage — les fichiers de courbe étant en écriture
+    // seule, rien ne se relit sur le matériel (issue #97). `--auto` et
+    // `--curve`, qui écrivent tous deux `2`, sont donc refusés ici tant que la
+    // courbe n'est pas posée dans le même souffle. Même conséquence que côté
+    // démon, et pour la même raison ; suivie par l'issue #104.
+    let posees = hwmon::CourbesPosees::vide();
+
     for canal in vises {
         match action {
             // ⚠️ `HostCurve` (2) et non `PleinRegime` (0). `0` n'a jamais rendu
@@ -279,7 +288,14 @@ fn regler_ventilateur(cible: &CibleCanal, action: ActionVentilateur) -> Result<(
             // cyclique de 255 et cesse de piloter — 100 %, la barre lâchée. Et
             // sur `nzxt-smart2` il est refusé, ce contrôleur n'ayant aucun mode
             // automatique (issue #50).
-            ActionVentilateur::Auto => hwmon::set_mode(canal, hwmon::Mode::HostCurve)
+            //
+            // ⚠️ **Mais `2` ne rend pas non plus la main au profil d'usine**,
+            // contrairement à ce que « auto » laisse croire : il fait exécuter
+            // la courbe de l'**hôte**, celle que le pilote détient — zéro
+            // partout tant que personne ne l'a posée. Mesuré sur SHYNAEL le
+            // 2026-08-15 : pompe à 0 % de consigne, 1910 tr/min, sans une
+            // erreur (issue #97).
+            ActionVentilateur::Auto => hwmon::set_mode(canal, hwmon::Mode::HostCurve, &posees)
                 .map_err(|e| echec_ecriture(canal, &e))?,
             ActionVentilateur::Curve => {
                 // Mettre en service une courbe qui n'existe pas laisserait le
@@ -290,7 +306,7 @@ fn regler_ventilateur(cible: &CibleCanal, action: ActionVentilateur) -> Result<(
                         canal.name
                     ));
                 }
-                hwmon::set_mode(canal, hwmon::Mode::HostCurve)
+                hwmon::set_mode(canal, hwmon::Mode::HostCurve, &posees)
                     .map_err(|e| echec_ecriture(canal, &e))?;
             }
             ActionVentilateur::Consigne {
@@ -342,7 +358,11 @@ fn poser_courbe(nom: &str, points: &[(usize, Percent)], force: bool) -> Result<(
     }
 
     let courbe = hwmon::Curve::interpolate(points).map_err(|e| e.to_string())?;
-    hwmon::set_curve(canal, &courbe).map_err(|e| echec_ecriture(canal, &e))?;
+    // Le carnet meurt avec le processus, et c'est voulu : il n'existe que pour
+    // que « une courbe est partie » traverse `set_curve` plutôt que de se
+    // décréter à côté (issue #97).
+    let mut posees = hwmon::CourbesPosees::vide();
+    hwmon::set_curve(canal, &courbe, &mut posees).map_err(|e| echec_ecriture(canal, &e))?;
 
     // Écrire la courbe ne la met pas en service : le canal continue de suivre
     // le mode qu'il avait. Le dire, plutôt que de laisser croire à un effet.
@@ -403,15 +423,21 @@ fn consigner(
     // Le comportement est identique à celui d'avant, à dessein — #101 corrige
     // un libellé, pas une politique.
     //
-    // ⚠️ **Mais le raisonnement du bloc ci-dessus est désormais faux, et le
-    // correctif appartient à #97.** « Un canal en `0` n'a rien à perdre » ne
-    // vaut que si `0` voulait dire 100 %. Or un `0` lu est le plus souvent un
-    // canal sur sa courbe d'usine, en pleine régulation : sur SHYNAEL le
-    // 2026-08-15, la pompe y suivait le liquide de 35 à 60 %. Lui imposer une
-    // consigne fixe la sort de cette régulation **sans rien demander**, ce qui
-    // est exactement ce que le garde prétend empêcher.
+    // ⚠️ **Mais le raisonnement du bloc ci-dessus reste faux, et #97 ne l'a pas
+    // corrigé** — cette issue ferme le trou d'« auto », pas celui-ci. « Un canal
+    // en `0` n'a rien à perdre » ne vaut que si `0` voulait dire 100 %. Or un
+    // `0` lu est le plus souvent un canal sur sa courbe d'usine, en pleine
+    // régulation : sur SHYNAEL le 2026-08-15, la pompe y suivait le liquide de
+    // 35 à 60 %. Lui imposer une consigne fixe la sort de cette régulation
+    // **sans rien demander**, ce qui est exactement ce que le garde prétend
+    // empêcher — et #97 rend le retour plus cher encore, « auto » réclamant
+    // désormais une courbe.
+    //
+    // Le carnet ne sert à rien ici — seul `HostCurve` le consulte — mais la
+    // signature le réclame, et un carnet vide est ce qu'un processus neuf a.
     if matches!(mode, hwmon::Mode::HostCurve | hwmon::Mode::NonPilote) {
-        hwmon::set_mode(canal, hwmon::Mode::Manual).map_err(|e| echec_ecriture(canal, &e))?;
+        hwmon::set_mode(canal, hwmon::Mode::Manual, &hwmon::CourbesPosees::vide())
+            .map_err(|e| echec_ecriture(canal, &e))?;
     }
 
     hwmon::set_pwm(canal, percent).map_err(|e| echec_ecriture(canal, &e))

@@ -8,7 +8,7 @@
 //! Écrire la même chose en HID brut donnerait **deux écrivains** sur le même
 //! registre, chacun réémettant sa consigne périodiquement.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -94,6 +94,62 @@ impl FanChannel {
 /// Une entrée de plus se gagne en lisant le pilote concerné, pas en essayant.
 const PILOTES_AUTOMATIQUES: [&str; 1] = ["kraken2023elite"];
 
+/// Les canaux sur lesquels une courbe a été téléversée depuis le démarrage.
+///
+/// ⚠️ **Cet état ne peut pas se relire sur le matériel.** Les fichiers
+/// `tempN_auto_pointM_pwm` sont en **écriture seule** (`0200`,
+/// `docs/VENTILATEURS.md`) : leur simple présence ne dit rien de leur contenu,
+/// et une implémentation qui la prendrait pour une preuve relancerait
+/// exactement l'incident du 2026-08-15. Le carnet vit donc côté hôte, et il
+/// **repart vide à chaque démarrage** — on ne peut rien savoir de ce qu'un autre
+/// outil a écrit avant nous (issue #97).
+///
+/// Il ne se remplit que par [`set_curve`], jamais à côté : « une courbe est
+/// partie » devient ainsi structurel plutôt que disciplinaire. Un carnet qu'on
+/// remplirait à la main se réoublierait au premier chemin de code ajouté — et le
+/// défaut qu'il corrige est justement un défaut silencieux.
+///
+/// L'instance est détenue par le démon (`peripheriques.rs`) ; le type est
+/// déclaré ici, là où part le refus, sinon `reverb-hw` dépendrait de
+/// `reverb-daemon`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CourbesPosees {
+    /// Les noms complets des canaux ayant reçu une courbe — jamais un index de
+    /// `pwmN` : deux contrôleurs ont tous les deux un canal 1.
+    canaux: BTreeSet<String>,
+}
+
+impl CourbesPosees {
+    /// Un carnet vide : un démon qui démarre ne sait rien de ce qu'un autre
+    /// outil a écrit avant lui.
+    pub fn vide() -> Self {
+        CourbesPosees {
+            canaux: BTreeSet::new(),
+        }
+    }
+
+    /// Ce canal peut-il passer en automatique **maintenant** ?
+    ///
+    /// Deux conditions, et c'est un **et** : son pilote sait exécuter une courbe
+    /// (issue #50) **et** une courbe y a été posée depuis le démarrage
+    /// (issue #97). C'est la même question que celle du refus de [`set_mode`],
+    /// posée sans rien écrire — la fenêtre la lit à chaque `status`, une fois
+    /// par seconde, et une question qui coûterait une tentative allumerait les
+    /// ventilateurs à fond dans le cas où elle réussit.
+    pub fn autorise_auto(&self, canal: &FanChannel) -> bool {
+        canal.sait_faire_auto() && self.canaux.contains(&canal.name)
+    }
+
+    /// Retient qu'une courbe **est partie** sur ce canal.
+    ///
+    /// Volontairement privée au module : seul [`set_curve`] l'appelle, et
+    /// seulement après que les quarante points ont été écrits. Le carnet ne
+    /// retient jamais ce qui a été *tenté*.
+    fn retenir(&mut self, canal: &FanChannel) {
+        self.canaux.insert(canal.name.clone());
+    }
+}
+
 /// Ce que le canal fait de sa consigne, lu dans `pwmN_enable`.
 ///
 /// ⚠️ **`0` n'a pas le même sens selon qu'on le lit ou qu'on l'écrit**, et c'est
@@ -142,7 +198,25 @@ pub enum Mode {
     ///
     /// La fenêtre ne le propose nulle part, et « auto » vise [`Mode::HostCurve`].
     PleinRegime,
-    /// `2` — le firmware exécute la courbe téléversée par l'hôte.
+    /// `2` — le firmware exécute la courbe téléversée par **l'hôte**.
+    ///
+    /// ⚠️ **Ce n'est pas « la courbe du périphérique », ni un retour au profil
+    /// d'usine.** `nzxt-kraken3` en fait
+    /// `kraken3_write_curve(priv, priv->channel_info[channel].pwm_points, channel)` :
+    /// il pousse le tableau de points **détenu par le pilote**. Si aucune courbe
+    /// n'y a jamais été téléversée, ce tableau est celui du `kzalloc` — **zéro
+    /// partout** —, et le canal cesse de réguler.
+    ///
+    /// Mesuré sur SHYNAEL le 2026-08-15, après un « auto » posé sans courbe :
+    /// `pwm1 = 0`, `pwm1_enable = 2`, pompe à 1910 tr/min, son plancher
+    /// matériel. Aucune erreur rendue, le mode relu exactement celui demandé, et
+    /// le refroidissement arrêté jusqu'au prochain arrêt complet (issue #97).
+    ///
+    /// Il n'existe **aucune** valeur de `pwmN_enable` qui rende le Kraken à son
+    /// profil d'usine : seule une coupure d'alimentation le fait.
+    ///
+    /// D'où le refus de [`set_mode`] tant qu'aucune courbe n'a été posée, et le
+    /// carnet [`CourbesPosees`] qui en tient la mémoire.
     HostCurve,
     /// Une autre valeur, dont on ne sait rien. On la lit, on ne la réécrit pas.
     Unknown(u8),
@@ -365,18 +439,23 @@ pub fn set_pwm(channel: &FanChannel, percent: Percent) -> io::Result<()> {
 /// # Erreurs
 ///
 /// Si le canal n'expose pas `pwmN_enable`, si le mode demandé est
-/// [`Mode::Unknown`] — on ne réémet pas une valeur qu'on n'a pas comprise —, ou
-/// si l'on demande [`Mode::HostCurve`] à un canal qui ne sait pas faire auto.
+/// [`Mode::Unknown`] — on ne réémet pas une valeur qu'on n'a pas comprise —, si
+/// l'on demande [`Mode::HostCurve`] à un canal qui ne sait pas faire auto, ou si
+/// on le demande à un canal qui n'a **reçu aucune courbe** depuis le démarrage.
 /// Dans tous les cas, **rien n'est écrit**.
 ///
-/// Ce dernier refus est produit ici et non laissé au noyau : `nzxt-smart2` rend
-/// `-EOPNOTSUPP`, que l'utilisateur lisait jusqu'ici sous la forme
-/// « Operation not supported (os error 95) ». Un errno nu n'explique rien
-/// (issue #50).
-pub fn set_mode(channel: &FanChannel, mode: Mode) -> io::Result<()> {
+/// Les deux refus d'`HostCurve` sont produits ici et non laissés au noyau, qui
+/// n'a rien à en dire : `nzxt-smart2` rend `-EOPNOTSUPP`, que l'utilisateur
+/// lisait sous la forme « Operation not supported (os error 95) » (issue #50), et
+/// `nzxt-kraken3` **accepte sans broncher** un `2` sans courbe, en arrêtant la
+/// régulation (issue #97). Un errno nu n'explique rien ; un succès qui casse le
+/// refroidissement explique encore moins.
+pub fn set_mode(channel: &FanChannel, mode: Mode, posees: &CourbesPosees) -> io::Result<()> {
     // ⚠️ Avant le `match`, et donc avant toute écriture — y compris quand le
     // fichier porte déjà `2`. Un no-op silencieux dans ce cas ferait dépendre le
-    // refus de l'état courant, alors qu'il dépend du matériel.
+    // refus de l'état courant, alors qu'il dépend du matériel. Et l'état
+    // dangereux — un canal trouvé en `2` sans courbe — serait justement le seul
+    // que le court-circuit rendrait irréparable.
     if mode == Mode::HostCurve && !channel.sait_faire_auto() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -384,6 +463,22 @@ pub fn set_mode(channel: &FanChannel, mode: Mode) -> io::Result<()> {
                 "le contrôleur « {} » n'a pas de mode automatique : le canal « {} » garde la \
                  consigne que l'hôte lui écrit",
                 channel.source, channel.name
+            ),
+        ));
+    }
+
+    // ⚠️ **Après le refus du pilote, jamais avant.** Les deux conditions sont un
+    // « et » (voir [`CourbesPosees::autorise_auto`]), et c'est le pilote qui
+    // l'emporte : envoyer poser une courbe sur un canal qui n'exécutera jamais
+    // de `2` serait un faux diagnostic.
+    if mode == Mode::HostCurve && !posees.autorise_auto(channel) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "aucune courbe n'a été téléversée sur le canal « {} » depuis le démarrage : « 2 » \
+                 y pousserait le tableau du pilote, à zéro partout, et arrêterait la régulation. \
+                 Posez-la d'abord — « reverb curve --channel {} --point … ».",
+                channel.name, channel.name
             ),
         ));
     }
@@ -580,10 +675,20 @@ impl std::error::Error for CurveError {}
 /// au passage d'une écriture de courbe serait exactement l'effet de bord que le
 /// projet s'interdit.
 ///
+/// Le carnet `posees` **retient ce qui est parti**, et lui seul ouvre ensuite
+/// [`Mode::HostCurve`] sur ce canal (issue #97). Il traverse cette fonction
+/// plutôt que de se remplir à côté : on ne peut donc pas écrire une courbe sans
+/// que le carnet l'apprenne, ni lui faire croire qu'une courbe est partie alors
+/// qu'elle a échoué.
+///
 /// # Erreurs
 ///
 /// Si le canal n'a pas de courbe matérielle — rien n'est alors écrit.
-pub fn set_curve(channel: &FanChannel, curve: &Curve) -> io::Result<()> {
+pub fn set_curve(
+    channel: &FanChannel,
+    curve: &Curve,
+    posees: &mut CourbesPosees,
+) -> io::Result<()> {
     if channel.curve.len() != CURVE_POINTS {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -599,6 +704,10 @@ pub fn set_curve(channel: &FanChannel, curve: &Curve) -> io::Result<()> {
         fs::write(chemin, consigne.raw().to_string())?;
     }
 
+    // Après l'écriture seulement : une courbe qui n'est pas partie ne doit pas
+    // ouvrir « auto », sinon une tentative ratée rouvrirait la porte que #97
+    // ferme.
+    posees.retenir(channel);
     Ok(())
 }
 
@@ -646,7 +755,8 @@ mod tests {
             enable: Some(PathBuf::from("/inexistant/pwm1_enable")),
             curve: Vec::new(),
         };
-        let erreur = set_mode(&canal, Mode::Unknown(2)).expect_err("doit refuser");
+        let erreur =
+            set_mode(&canal, Mode::Unknown(2), &CourbesPosees::vide()).expect_err("doit refuser");
         assert_eq!(erreur.kind(), io::ErrorKind::InvalidInput);
     }
 

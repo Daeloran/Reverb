@@ -809,7 +809,7 @@ mod ecriture {
         CURVE_POINTS, arborescence_de_reference, canal, courbe, ecarts, lire, photographie, point,
         relatif,
     };
-    use reverb_hw::hwmon::set_curve;
+    use reverb_hw::hwmon::{CourbesPosees, set_curve};
 
     /// Les 40 chemins de courbe d'un canal, relatifs à la racine, triés.
     fn chemins_attendus(
@@ -834,7 +834,7 @@ mod ecriture {
         let c = canal(&canaux, "kraken2023elite:pump-speed");
         let demande = courbe(&[point(1, 20), point(CURVE_POINTS, 100)]);
 
-        set_curve(c, &demande).expect("écriture de la courbe");
+        set_curve(c, &demande, &mut CourbesPosees::vide()).expect("écriture de la courbe");
 
         for (n, chemin) in c.curve.iter().enumerate() {
             let attendu = demande.points()[n].raw().to_string();
@@ -869,7 +869,7 @@ mod ecriture {
         let c = canal(&canaux, "kraken2023elite:pump-speed");
         let demande = courbe(&[point(1, 20), point(CURVE_POINTS, 100)]);
 
-        set_curve(c, &demande).expect("écriture de la courbe");
+        set_curve(c, &demande, &mut CourbesPosees::vide()).expect("écriture de la courbe");
 
         let premier = &c.curve[0];
         let dernier = &c.curve[CURVE_POINTS - 1];
@@ -920,7 +920,7 @@ mod ecriture {
         let demande = courbe(&[point(1, 20), point(CURVE_POINTS, 100)]);
 
         assert_eq!(c.curve.len(), CURVE_POINTS);
-        set_curve(c, &demande).expect("écriture de la courbe");
+        set_curve(c, &demande, &mut CourbesPosees::vide()).expect("écriture de la courbe");
 
         for (n, chemin) in c.curve.iter().enumerate() {
             assert_ne!(
@@ -949,7 +949,7 @@ mod ecriture {
         let demande = courbe(&[point(1, 20), point(CURVE_POINTS, 100)]);
 
         let avant = photographie(sysfs.racine());
-        set_curve(c, &demande).expect("écriture de la courbe");
+        set_curve(c, &demande, &mut CourbesPosees::vide()).expect("écriture de la courbe");
         let apres = photographie(sysfs.racine());
 
         assert_eq!(ecarts(&avant, &apres), chemins_attendus(sysfs.racine(), c));
@@ -978,7 +978,8 @@ mod ecriture {
         let ventilateur = canal(&canaux, "kraken2023elite:fan-speed");
         let demande = courbe(&[point(1, 20), point(CURVE_POINTS, 100)]);
 
-        set_curve(pompe, &demande).expect("écriture de la courbe de la pompe");
+        set_curve(pompe, &demande, &mut CourbesPosees::vide())
+            .expect("écriture de la courbe de la pompe");
 
         for (n, chemin) in ventilateur.curve.iter().enumerate() {
             assert_eq!(
@@ -1015,7 +1016,7 @@ mod ecriture {
             let c = canal(&canaux, nom);
             assert!(c.curve.is_empty(), "{nom} n'a pas de courbe");
 
-            let erreur = set_curve(c, &demande)
+            let erreur = set_curve(c, &demande, &mut CourbesPosees::vide())
                 .expect_err("un canal sans courbe ne peut pas en recevoir une");
             let message = erreur.to_string().to_lowercase();
             assert!(

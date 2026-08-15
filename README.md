@@ -466,9 +466,14 @@ constante changera et la fenêtre suivra.
   liquide, GPU, et un disque NVMe par SSD — sous des noms qui se lisent. Le démon, lui, continue de
   toutes les découvrir et de toutes les rendre : le tri est un choix d'affichage, pas un filtre de
   relevé.
-- Le bouton **« auto » n'apparaît que sur les deux canaux du Kraken**. Le pilote `nzxt-smart2` n'a
-  aucun mode automatique — sa vitesse est celle que l'hôte écrit —, et montrer un bouton qui ne
-  peut qu'échouer vaut moins que ne pas le montrer.
+- Le bouton **« auto » n'apparaît que sur un canal qui peut l'exécuter maintenant**. Le pilote
+  `nzxt-smart2` n'a aucun mode automatique — sa vitesse est celle que l'hôte écrit —, et montrer un
+  bouton qui ne peut qu'échouer vaut moins que ne pas le montrer.
+  ⚠️ **Depuis #97, il ne s'affiche donc nulle part** : « auto » écrit `pwm_enable = 2`, qui fait
+  exécuter la courbe de l'**hôte** — zéro partout tant qu'aucune n'a été téléversée, ce qui arrête
+  la régulation de la pompe au lieu de la rendre. Le démon n'ayant pas de verbe `curve` sur le
+  socket, son carnet de courbes posées reste vide, et les deux canaux du Kraken rejoignent les
+  autres. C'est l'issue #104 qui rouvrira le bouton, en donnant au démon de quoi poser la courbe.
 - Une sonde qui cesse de répondre s'affiche **illisible**, et le reste de la fenêtre continue à
   pleine vitesse. Voir [ci-dessous](#une-sonde-muette-nemporte-pas-le-démon).
 - Une LED peinte à la main (`paint`) **ne survit pas à un redémarrage** : `eclairage.conf` garde

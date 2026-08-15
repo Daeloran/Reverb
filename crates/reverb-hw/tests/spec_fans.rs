@@ -1033,7 +1033,7 @@ mod modes {
 
 mod ecriture {
     use super::{arborescence_de_reference, canal, ecarts, lire, mode, photographie};
-    use reverb_hw::hwmon::{Mode, Percent, set_mode, set_pwm};
+    use reverb_hw::hwmon::{CourbesPosees, Mode, Percent, set_mode, set_pwm};
 
     /// La consigne `p`, qui doit être acceptée.
     fn consigne(p: u8) -> Percent {
@@ -1120,7 +1120,7 @@ mod ecriture {
         let enable = c.enable.as_ref().expect("le Kraken expose `pwm1_enable`");
 
         assert_eq!(lire(enable), "0", "le canal part de sa courbe firmware");
-        set_mode(c, Mode::Manual).expect("bascule explicite en manuel");
+        set_mode(c, Mode::Manual, &CourbesPosees::vide()).expect("bascule explicite en manuel");
         assert_eq!(lire(enable), "1");
         assert!(
             matches!(mode(c), Mode::Manual),
@@ -1144,7 +1144,8 @@ mod ecriture {
             .expect("`nzxtsmart2` expose `pwm1_enable`");
 
         assert_eq!(lire(enable), "1", "le canal part du mode manuel");
-        set_mode(c, Mode::PleinRegime).expect("retour à la courbe firmware");
+        set_mode(c, Mode::PleinRegime, &CourbesPosees::vide())
+            .expect("retour à la courbe firmware");
         assert_eq!(lire(enable), "0");
     }
 
@@ -1158,7 +1159,8 @@ mod ecriture {
         let c = canal(&canaux, "nzxtsmart2:fan-1");
 
         let avant = photographie(sysfs.racine());
-        set_mode(c, Mode::PleinRegime).expect("retour à la courbe firmware");
+        set_mode(c, Mode::PleinRegime, &CourbesPosees::vide())
+            .expect("retour à la courbe firmware");
         let apres = photographie(sysfs.racine());
 
         assert_eq!(
@@ -1184,7 +1186,7 @@ mod ecriture {
         let avant = photographie(sysfs.racine());
         for demande in [Mode::Manual, Mode::PleinRegime] {
             assert!(
-                set_mode(c, demande).is_err(),
+                set_mode(c, demande, &CourbesPosees::vide()).is_err(),
                 "{demande:?} sur un canal sans `pwmN_enable`"
             );
         }
@@ -1212,7 +1214,7 @@ mod ecriture {
         let avant = photographie(sysfs.racine());
         for valeur in [0u8, 2, 5, 255] {
             assert!(
-                set_mode(c, Mode::Unknown(valeur)).is_err(),
+                set_mode(c, Mode::Unknown(valeur), &CourbesPosees::vide()).is_err(),
                 "`Mode::Unknown({valeur})` n'est pas réémis"
             );
         }
@@ -1239,7 +1241,7 @@ mod ecriture {
 
         let avant = photographie(sysfs.racine());
         assert!(
-            set_mode(c, Mode::Unsupported).is_err(),
+            set_mode(c, Mode::Unsupported, &CourbesPosees::vide()).is_err(),
             "« non supporté » n'est pas une consigne de mode"
         );
         let apres = photographie(sysfs.racine());
@@ -1268,7 +1270,8 @@ mod ecriture {
 
         let avant = photographie(sysfs.racine());
         set_pwm(vise, consigne(80)).expect("écriture de la consigne");
-        set_mode(bascule, Mode::Manual).expect("bascule explicite en manuel");
+        set_mode(bascule, Mode::Manual, &CourbesPosees::vide())
+            .expect("bascule explicite en manuel");
         let apres = photographie(sysfs.racine());
 
         assert_eq!(
