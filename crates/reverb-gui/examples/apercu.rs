@@ -26,6 +26,7 @@ use reverb_gui::reglages::{
     Poignee, TRACE_ASPECT, TRACE_CHAUD, TRACE_FROID, commandes_de_trace, consigne_affichee,
     degres_lisibles,
 };
+use reverb_gui::sondes::{COURBE_ASPECT, Historique, MEMOIRE, Releve, commandes_de_courbe};
 use reverb_gui::{
     AncreEcran, FamilleAnimation, Fenetre, LigneProfil, LigneTemperature, LigneVentilateur,
     LigneZone, PalierCourbe, PointHalo, PointLed,
@@ -530,6 +531,7 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     // image montrerait le tracé écrasé dans un carré — c'est **sur elle** que le
     // défaut a été mesuré le 2026-08-15. Voir `TRACE_ASPECT`.
     interface.set_trace_aspect(TRACE_ASPECT);
+    interface.set_courbe_aspect(COURBE_ASPECT);
     interface.set_paliers(ModelRc::new(VecModel::from(
         paliers
             .iter()
@@ -551,35 +553,46 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             interface.set_refus_courbe(SharedString::from(erreur.raison));
         }
     }
-    // Les cinq sondes retenues, avec une courbe dessinée à la main : de quoi
-    // regarder la carte sans machine ni démon. Les libellés sont ceux que la
-    // fenêtre produit vraiment, modèles de disques compris (issue #51).
-    interface.set_temperatures(ModelRc::new(VecModel::from(
-        [
-            ("CPU", "61.8 °C", 0.30, true),
-            ("Liquide", "34.2 °C", 0.55, true),
-            ("GPU", "51.0 °C", 0.70, true),
-            ("NVMe CT2000T705SSD5", "36.9 °C", 0.20, true),
-            ("NVMe CT4000P3SSD8", "illisible", 0.0, false),
-        ]
-        .into_iter()
-        .map(|(libelle, valeur, base, lisible)| LigneTemperature {
-            libelle: SharedString::from(libelle),
-            valeur: SharedString::from(valeur),
-            courbe: SharedString::from(if lisible {
-                (0..40_i32)
-                    .map(|rang| {
-                        let x = rang as f32 / 39.0;
-                        let y = 0.5 + (x * 9.0 + base * 6.0).sin() * 0.35 * (0.4 + base);
-                        format!("{} {x:.3} {y:.3} ", if rang == 0 { "M" } else { "L" })
-                    })
-                    .collect::<String>()
+    // Les cinq sondes retenues. Les libellés sont ceux que la fenêtre produit
+    // vraiment, modèles de disques compris (issue #51).
+    //
+    // ⚠️ **Les relevés sont inventés, le tracé non** : on garnit un vrai
+    // `Historique` et c'est `commandes_de_courbe` qui dessine, la fonction même
+    // que la fenêtre appelle. Cet aperçu fabriquait ses commandes à la main dans
+    // le carré unité, si bien qu'il a montré le `viewbox` corrigé de #118
+    // par-dessus des coordonnées qui ne l'étaient pas — un tracé **plus** écrasé
+    // qu'avant, et une image qui démentait le correctif. Une seconde
+    // implémentation n'a aucune raison d'être la bonne (#113).
+    let mut historique = Historique::nouvel();
+    let sondes = [
+        ("CPU", "61.8 °C", 0.30_f32, true),
+        ("Liquide", "34.2 °C", 0.55, true),
+        ("GPU", "51.0 °C", 0.70, true),
+        ("NVMe CT2000T705SSD5", "36.9 °C", 0.20, true),
+        ("NVMe CT4000P3SSD8", "illisible", 0.0, false),
+    ];
+    for (libelle, _, base, lisible) in sondes {
+        for rang in 0..MEMOIRE {
+            let avance = rang as f32 / (MEMOIRE - 1) as f32;
+            let releve = if lisible {
+                let onde = (avance * 9.0 + base * 6.0).sin() * 0.35 * (0.4 + base);
+                Releve::Valeur((40_000.0 + onde * 20_000.0) as i32)
             } else {
-                String::new()
-            }),
-            lisible,
-        })
-        .collect::<Vec<LigneTemperature>>(),
+                Releve::Illisible
+            };
+            historique.noter(libelle, releve);
+        }
+    }
+    interface.set_temperatures(ModelRc::new(VecModel::from(
+        sondes
+            .into_iter()
+            .map(|(libelle, valeur, _, lisible)| LigneTemperature {
+                libelle: SharedString::from(libelle),
+                valeur: SharedString::from(valeur),
+                courbe: SharedString::from(commandes_de_courbe(&historique, libelle)),
+                lisible,
+            })
+            .collect::<Vec<LigneTemperature>>(),
     )));
     interface.set_zones(ModelRc::new(VecModel::from(vec![
         LigneZone {

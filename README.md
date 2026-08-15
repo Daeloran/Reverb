@@ -885,6 +885,26 @@ justement l'écrêtage aux bornes qu'on ne voyait plus. Et ne corriger que le `v
 aussi. Le tracé est donc émis sur `TRACE_ASPECT` × 1, et le cadre tient ce même rapport ; la
 constante vit dans le Rust et sert deux fois côté fenêtre, pour n'exister qu'une seule fois.
 
+⚠️ **Le même défaut vivait sur les courbes du panneau SONDES, et il y a survécu deux mois** (#118) :
+elles aussi étaient émises dans le carré unité, et n'occupaient que **74 %** de leur tuile — 67 %
+sur celle qu'un libellé de NVMe élargit. Elles ont leur propre constante, `COURBE_ASPECT`, **et
+c'est délibéré** : une tuile de sonde et le cadre de la courbe de régulation n'ont pas la même
+forme, et leur donner un rapport commun remettrait le défaut sur l'un des deux.
+
+⚠️ **Sa valeur a été trouvée en balayant, pas en la déduisant, et c'est la leçon de #118.** Le
+calcul « largeur du cadre ÷ hauteur du cadre » donnait 1,4 et laissait 16 % de vide : le rendu de
+Slint ne s'y ramène pas exactement. Une dérivation géométrique aurait été plus convaincante que
+juste. Mesuré : 74 % à 1,0, 84 % à 1,4, 90 % à 1,7, **98 % à 2,0**, puis le tracé cesse de gagner en
+largeur et se met à perdre en hauteur. **2,0 est le genou**, donc le rapport qui dessine la plus
+grande courbe — et non le plus grand nombre.
+
+⚠️ **L'aperçu fabriquait ses propres commandes de sparkline**, dans le carré unité, au lieu
+d'appeler la fonction de la fenêtre. Il a donc montré le `viewbox` corrigé par-dessus des
+coordonnées qui ne l'étaient pas — un tracé **plus** écrasé qu'avant, et une image qui démentait son
+propre correctif. Il garnit désormais un vrai `Historique` et laisse `commandes_de_courbe` dessiner.
+C'est la règle de la maquette et celle du tracé de régulation, appliquées à un troisième endroit :
+**une seconde implémentation n'a aucune raison d'être la bonne.**
+
 ```bash
 REVERB_ONGLET=ventilos                          apercu ventilos.ppm  # la liste et la courbe
 REVERB_ONGLET=ventilos REVERB_COURBE=invalide   apercu refus.ppm     # le refus, sans tracé
