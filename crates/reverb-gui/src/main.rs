@@ -30,6 +30,7 @@ use reverb_anim::{Animation, CATALOGUE};
 use reverb_gui::client::{Abonnement, Client, chemin_du_socket};
 use reverb_gui::plan::{
     Cible, Place, Plan, Vue, halo, nom_de_zone, places_des_ancres, rayon_du_disque,
+    trace_dans_la_maquette,
 };
 use reverb_gui::reglages::{
     AFFICHAGES, ChoixDeComposition, ChoixDeProfil, CourbeEditee, EcranChoisi, Limiteur, Poignee,
@@ -1159,6 +1160,19 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
             };
             let plan = pupitre.plan.borrow();
             let detail = pupitre.detail.get();
+            // Le geste porte sur tout le panneau, la maquette vit dans le carré
+            // qui y est centré : les deux coins passent donc d'un repère à
+            // l'autre avant toute décision (#121). Rien n'est écrêté — un geste
+            // parti d'une marge arrive ici hors de `0..1`, et c'est ce qu'il
+            // doit rester pour que `dans` n'y attrape rien.
+            let (x1, y1, x2, y2) = trace_dans_la_maquette(
+                fenetre.get_panneau_largeur(),
+                fenetre.get_panneau_hauteur(),
+                x1,
+                y1,
+                x2,
+                y2,
+            );
             let debut = Place { x: x1, y: y1 };
             let fin = Place { x: x2, y: y2 };
 

@@ -418,21 +418,41 @@ export component Fenetre inherits Window {
     // Lequel des trois onglets du panneau de droite est ouvert.
     in-out property <int> onglet: 0;
 
-    // Le trace en cours, en **fractions** de la maquette — jamais en pixels.
+    // Le trace en cours, en **fractions du panneau** — jamais en pixels, et
+    // depuis #121 plus en fractions du carre.
     //
     // Il vit sur `root` et non dans la `TouchArea` pour une raison qui n'est pas
     // esthetique : #76 avait cru rendre le rectangle visible en montant son
     // opacite, et personne n'a pu constater qu'il restait large de zero. Pose
     // ici, `apercu` sait le dessiner sans souris ni session graphique.
+    //
+    // ⚠️ **Le repere est celui du panneau, celui ou le geste a lieu.** Le
+    // rectangle se dessine donc sur toute la surface sensible, marges comprises ;
+    // en fractions de carre, un geste parti d'une marge serait trace rogne a son
+    // bord — exactement ce que #121 corrige, montre a l'envers.
     in-out property <bool> trace;
     in-out property <float> trace-x0;
     in-out property <float> trace-y0;
     in-out property <float> trace-x1;
     in-out property <float> trace-y1;
 
+    // La taille du panneau de la maquette, en pixels logiques.
+    //
+    // Elle sort d'ici parce que la conversion panneau → carre vit dans
+    // `plan::trace_dans_la_maquette`, et nulle part ailleurs : ce qui est du
+    // calcul se teste, ce qui est du dessin se regarde. Le `.slint` transmet les
+    // dimensions et les fractions du geste ; le Rust convertit et decide.
+    out property <float> panneau-largeur: panneau.width / 1px;
+    out property <float> panneau-hauteur: panneau.height / 1px;
+
     // Le geste sur la maquette : deux coins et « faut-il ajouter a la selection ».
     // Un clic est un rectangle de cote nul — c'est le meme geste, et les
     // distinguer dans le Slint dupliquerait la regle des deux cotes.
+    //
+    // Les deux coins sont en **fractions du panneau** (#121), a ramener dans le
+    // repere du carre par `plan::trace_dans_la_maquette` avec `panneau-largeur`
+    // et `panneau-hauteur`. Ils sortent de `0..1` des que le geste touche une
+    // marge, et rien ici ne les ecrete.
     callback geste-maquette(float, float, float, float, bool);
     callback basculer-detail();
     callback basculer-vue();
@@ -711,7 +731,10 @@ export component Fenetre inherits Window {
                             }
                         }
 
-                        Rectangle {
+                        // Le panneau « LE BOÎTIER » en entier. Le dessin tient
+                        // dans le carre ci-dessous ; le **geste**, lui, porte
+                        // sur tout le panneau (#121).
+                        panneau := Rectangle {
                             vertical-stretch: 1;
                             carre := Rectangle {
                                 width: min(parent.width, parent.height);
@@ -831,83 +854,102 @@ export component Fenetre inherits Window {
                                     border-color: #ffffff;
                                 }
 
-                                // Le rectangle en cours de tracé. Il ne vit que pendant
-                                // le geste : ce qu'il attrape n'est décidé qu'au
-                                // relâchement, par `plan.rs`.
-                                //
-                                // ⚠️ **Le coin mobile est `mouse-x`, jamais `pressed-x`.**
-                                // En Slint, `pressed-x` est la position de l'APPUI ;
-                                // c'est `mouse-x` qui suit le curseur. Et `depart-x`
-                                // est justement capte a l'appui, depuis `mouse-x` :
-                                // les deux coins etaient donc le meme point, et le
-                                // rectangle avait une largeur nulle pendant tout le
-                                // geste. #76 avait deja tente de le rendre visible en
-                                // montant l'opacite et en ajoutant des poignees — sans
-                                // effet, forcement : aucune couleur ne rend visible un
-                                // rectangle de largeur zero.
-                                if root.trace: Rectangle {
-                                    x: min(root.trace-x0, root.trace-x1) * parent.width;
-                                    y: min(root.trace-y0, root.trace-y1) * parent.height;
-                                    width: abs(root.trace-x1 - root.trace-x0) * parent.width;
-                                    height: abs(root.trace-y1 - root.trace-y0) * parent.height;
-                                    background: #4d7cff38;
-                                    border-width: 2px;
-                                    border-color: #8fb0ff;
-                                    // Quatre poignees aux coins : elles disent
-                                    // « rectangle » la ou un cadre seul se
-                                    // confond avec les aretes du boitier.
-                                    for coin in [{ h: 0.0, v: 0.0 }, { h: 1.0, v: 0.0 },
-                                                 { h: 0.0, v: 1.0 }, { h: 1.0, v: 1.0 }]: Rectangle {
-                                        width: 7px;
-                                        height: 7px;
-                                        border-radius: 3.5px;
-                                        background: #ffffff;
-                                        x: coin.h * parent.width - self.width / 2;
-                                        y: coin.v * parent.height - self.height / 2;
-                                    }
+                            }
+
+                            // Le rectangle en cours de tracé. Il ne vit que pendant
+                            // le geste : ce qu'il attrape n'est décidé qu'au
+                            // relâchement, par `plan.rs`.
+                            //
+                            // ⚠️ **Il est frere du carre, et non son enfant** (#121).
+                            // Ses quatre nombres sont des fractions de PANNEAU : le
+                            // rectangle couvre donc toute la surface ou le geste a
+                            // lieu, marges comprises. Dessine dans le carre, un
+                            // geste parti d'une marge serait rogne a son bord.
+                            //
+                            // ⚠️ **Le coin mobile est `mouse-x`, jamais `pressed-x`.**
+                            // En Slint, `pressed-x` est la position de l'APPUI ;
+                            // c'est `mouse-x` qui suit le curseur. Et `depart-x`
+                            // est justement capte a l'appui, depuis `mouse-x` :
+                            // les deux coins etaient donc le meme point, et le
+                            // rectangle avait une largeur nulle pendant tout le
+                            // geste. #76 avait deja tente de le rendre visible en
+                            // montant l'opacite et en ajoutant des poignees — sans
+                            // effet, forcement : aucune couleur ne rend visible un
+                            // rectangle de largeur zero.
+                            if root.trace: Rectangle {
+                                x: min(root.trace-x0, root.trace-x1) * parent.width;
+                                y: min(root.trace-y0, root.trace-y1) * parent.height;
+                                width: abs(root.trace-x1 - root.trace-x0) * parent.width;
+                                height: abs(root.trace-y1 - root.trace-y0) * parent.height;
+                                background: #4d7cff38;
+                                border-width: 2px;
+                                border-color: #8fb0ff;
+                                // Quatre poignees aux coins : elles disent
+                                // « rectangle » la ou un cadre seul se
+                                // confond avec les aretes du boitier.
+                                for coin in [{ h: 0.0, v: 0.0 }, { h: 1.0, v: 0.0 },
+                                             { h: 0.0, v: 1.0 }, { h: 1.0, v: 1.0 }]: Rectangle {
+                                    width: 7px;
+                                    height: 7px;
+                                    border-radius: 3.5px;
+                                    background: #ffffff;
+                                    x: coin.h * parent.width - self.width / 2;
+                                    y: coin.v * parent.height - self.height / 2;
+                                }
+                            }
+
+                            // ⚠️ **Le `FocusScope` suit la `TouchArea` au panneau.**
+                            // C'est lui qui capte `Ctrl` pour ajouter a la
+                            // selection : le laisser dans le carre ferait perdre
+                            // l'ajout depuis les marges, celles-la memes que #121
+                            // vient de rendre cliquables.
+                            clavier := FocusScope {
+                                key-pressed(evenement) => {
+                                    if (evenement.text == Key.Control) { root.ajout = true; }
+                                    return EventResult.reject;
+                                }
+                                key-released(evenement) => {
+                                    if (evenement.text == Key.Control) { root.ajout = false; }
+                                    return EventResult.reject;
                                 }
 
-                                clavier := FocusScope {
-                                    key-pressed(evenement) => {
-                                        if (evenement.text == Key.Control) { root.ajout = true; }
-                                        return EventResult.reject;
-                                    }
-                                    key-released(evenement) => {
-                                        if (evenement.text == Key.Control) { root.ajout = false; }
-                                        return EventResult.reject;
-                                    }
-
-                                    zone := TouchArea {
-                                        moved => {
-                                            // Le coin mobile, a chaque deplacement.
-                                            // C'est la seule chose qui rende le
-                                            // rectangle vivant : `pressed-x` ne bouge
-                                            // pas d'un pixel pendant le geste.
-                                            if (root.trace) {
-                                                root.trace-x1 = self.mouse-x / self.width;
-                                                root.trace-y1 = self.mouse-y / self.height;
-                                            }
+                                // Elle couvre le panneau entier, et ses fractions
+                                // sont donc celles du panneau : les bords du carre
+                                // tombent pres des extremites des ventilateurs, et
+                                // une marge qui ne se clique pas se lit comme une
+                                // maquette qui ne repond pas (#121). La conversion
+                                // vers le repere du carre se fait en Rust, dans
+                                // `plan::trace_dans_la_maquette`.
+                                zone := TouchArea {
+                                    moved => {
+                                        // Le coin mobile, a chaque deplacement.
+                                        // C'est la seule chose qui rende le
+                                        // rectangle vivant : `pressed-x` ne bouge
+                                        // pas d'un pixel pendant le geste.
+                                        if (root.trace) {
+                                            root.trace-x1 = self.mouse-x / self.width;
+                                            root.trace-y1 = self.mouse-y / self.height;
                                         }
+                                    }
 
-                                        pointer-event(evenement) => {
-                                            clavier.focus();
-                                            if (evenement.kind == PointerEventKind.down) {
-                                                root.trace-x0 = self.mouse-x / self.width;
-                                                root.trace-y0 = self.mouse-y / self.height;
-                                                root.trace-x1 = root.trace-x0;
-                                                root.trace-y1 = root.trace-y0;
-                                                root.trace = true;
-                                            }
-                                            if (evenement.kind == PointerEventKind.up) {
-                                                root.trace = false;
-                                                root.geste-maquette(
-                                                    root.trace-x0,
-                                                    root.trace-y0,
-                                                    self.mouse-x / self.width,
-                                                    self.mouse-y / self.height,
-                                                    root.ajout
-                                                );
-                                            }
+                                    pointer-event(evenement) => {
+                                        clavier.focus();
+                                        if (evenement.kind == PointerEventKind.down) {
+                                            root.trace-x0 = self.mouse-x / self.width;
+                                            root.trace-y0 = self.mouse-y / self.height;
+                                            root.trace-x1 = root.trace-x0;
+                                            root.trace-y1 = root.trace-y0;
+                                            root.trace = true;
+                                        }
+                                        if (evenement.kind == PointerEventKind.up) {
+                                            root.trace = false;
+                                            root.geste-maquette(
+                                                root.trace-x0,
+                                                root.trace-y0,
+                                                self.mouse-x / self.width,
+                                                self.mouse-y / self.height,
+                                                root.ajout
+                                            );
                                         }
                                     }
                                 }

@@ -80,6 +80,14 @@
 //! — et vérifie que la composer avec `dans` et `sous` désigne le même matériel qu'aujourd'hui.
 //! Il ne redéfinit aucune de ces quatre propriétés ; il les invoque.
 
+// Les bancs de ce fichier associent un libellé à un panneau, à un tracé et à deux drapeaux — un
+// `[(&str, (f32, f32), Trace, bool, bool); N]` que clippy compte comme un type trop complexe. Le
+// même `allow` est déjà posé pour la même raison dans `reverb-cli/tests/spec_refus_de_consigne.rs`
+// (#112), et par le commit d'implémentation : il ne touche à aucune assertion, aucun vecteur et
+// aucune valeur attendue, il lève seulement un refus de style sur une forme que ces tests ont
+// choisie exprès — nommer chaque cas plutôt que le compter.
+#![allow(clippy::type_complexity)]
+
 use reverb_anim::Geometrie;
 use reverb_gui::plan::{Cible, Place, Plan, trace_dans_la_maquette};
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};

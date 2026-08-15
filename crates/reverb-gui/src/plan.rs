@@ -578,6 +578,82 @@ impl Plan {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Du panneau au carré (issue #121)
+// ---------------------------------------------------------------------------
+
+/// Le rectangle du panneau, ramené au repère du carré de la maquette.
+///
+/// `panneau_largeur` et `panneau_hauteur` sont en pixels logiques ; les quatre
+/// coordonnées sont des **fractions du panneau**, et le résultat des
+/// **fractions du carré** — celles que [`Plan::dans`] et [`Plan::sous`]
+/// attendent.
+///
+/// # Pourquoi cette conversion existe
+///
+/// La maquette vit dans un **carré** de côté `min(largeur, hauteur)`, centré
+/// dans le panneau : ses tracés sont des `Path` en `viewbox` carré, que Slint
+/// met à l'échelle uniformément. Le **geste**, lui, porte sur tout le panneau
+/// (#121) — les bords du carré tombent près des extrémités des ventilateurs, et
+/// une marge qui ne se clique pas se lit comme une maquette qui ne répond pas.
+/// Les deux repères diffèrent donc d'une **moitié de marge** sur l'axe le plus
+/// long, et c'est ici, en Rust, que la différence se calcule : dans le `.slint`
+/// elle ne se testerait pas.
+///
+/// ```text
+/// côté  = min(largeur, hauteur)
+/// marge = (largeur − côté) / 2          en pixels, à gauche comme à droite
+/// sx    = (x · largeur − marge) / côté
+/// ```
+///
+/// et le symétrique sur l'ordonnée, avec `(hauteur − côté) / 2`.
+///
+/// # Rien n'est écrêté
+///
+/// Les coordonnées rendues **sortent de `0..1`** dès que le geste touche une
+/// marge, et c'est voulu. Écrêter replierait un rectangle parti de la marge sur
+/// le bord du carré, où il attraperait la première rangée de LED : la zone morte
+/// d'hier deviendrait une sélection au hasard. [`Plan::dans`] et [`Plan::sous`]
+/// acceptent déjà le débordement — l'un ne retient rien, l'autre rend `None`.
+///
+/// La conversion est **point par point**, jamais rectangle par rectangle : les
+/// deux coins ne sont pas réordonnés, un geste tiré de droite à gauche le reste.
+/// C'est ce qui la laisse composer avec un clic simple, où les deux coins sont
+/// confondus.
+///
+/// # Un panneau sans surface
+///
+/// Avant la première mise en page, le panneau n'a ni largeur ni hauteur : il n'y
+/// a pas de carré où viser, et la conversion diviserait par zéro. Elle rend
+/// alors un point franchement **hors** du carré, plutôt que le tracé inchangé
+/// « à défaut de mieux » — ce qui ferait retenir les cent vingt-quatre LED d'un
+/// geste sur un panneau qui n'existe pas encore.
+pub fn trace_dans_la_maquette(
+    panneau_largeur: f32,
+    panneau_hauteur: f32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+) -> (f32, f32, f32, f32) {
+    let cote = panneau_largeur.min(panneau_hauteur);
+    if !cote.is_finite() || cote <= 0.0 {
+        return (HORS_DU_CARRE, HORS_DU_CARRE, HORS_DU_CARRE, HORS_DU_CARRE);
+    }
+    let marge_x = (panneau_largeur - cote) / 2.0;
+    let marge_y = (panneau_hauteur - cote) / 2.0;
+    let sur_x = |x: f32| (x * panneau_largeur - marge_x) / cote;
+    let sur_y = |y: f32| (y * panneau_hauteur - marge_y) / cote;
+    (sur_x(x0), sur_y(y0), sur_x(x1), sur_y(y1))
+}
+
+/// Où tombe un geste quand le panneau n'a pas de surface.
+///
+/// Un point, et franchement hors du cadre : [`Plan::dans`] n'y retient rien et
+/// [`Plan::sous`] y rend `None`. Le tracé est ainsi sans effet, sans qu'aucune
+/// coordonnée cesse d'être un nombre.
+const HORS_DU_CARRE: f32 = -1.0;
+
 /// L'origine, pour initialiser les tableaux avant de les remplir.
 const ZERO: Place = Place { x: 0.0, y: 0.0 };
 
