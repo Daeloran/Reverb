@@ -1215,6 +1215,21 @@ fn le_retour_du_liquide_reprend_la_courbe_sans_redemarrage() {
     // C'est la moitié qu'on oublie : un repli qui s'installe pour de bon transformerait chaque
     // hoquet du Kraken — et il en a — en 50 % définitif jusqu'au prochain `systemctl restart`.
     // Le cycle est joué deux fois, pour qu'aucun état à un coup ne puisse le faire passer.
+    //
+    // ⚠️ **Le 4ᵉ tour était à `TIEDE` à la première écriture de ce fichier, et le test était alors
+    // intenable.** Le cycle étant joué deux fois, ce 4ᵉ tour et le 1ᵉʳ du passage suivant sont le
+    // MÊME tour — `Some(TIEDE)` deux fois d'affilée — et tous deux étaient exigés écrivants. Or
+    // `une_temperature_inchangee_ne_produit_aucune_ecriture` interdit exactement cela, et
+    // `un_repli_egal_a_ce_qui_est_deja_ecrit_ne_reecrit_rien` ferme la seule échappatoire en
+    // interdisant de retenir autre chose que la valeur écrite.
+    //
+    // La contradiction était donc **interne à ce fichier**, entre trois de ses propres tests, et
+    // non entre la spec et une implémentation. C'est le cas que le workflow prévoit : un test
+    // d'intention intenable signale un critère mal posé, jamais un code à plier.
+    //
+    // Corrigé au plus petit : le 4ᵉ tour passe à `MEDIAN`. Aucune assertion n'est perdue — « et
+    // elle continue de suivre » reste vérifié, sur une troisième valeur plutôt qu'une deuxième —
+    // et le passage suivant repart bien d'une consigne différente de celle qu'il vient d'écrire.
     let mut regulation = regulation_sur(&[CANAL_1, CANAL_2]);
     let mut enregistreur = Enregistreur::neuf();
 
@@ -1236,8 +1251,8 @@ fn le_retour_du_liquide_reprend_la_courbe_sans_redemarrage() {
              la valeur du moment, pas sur celle d'avant la panne"
         );
         assert_eq!(
-            enregistreur.tour(&mut regulation, Some(TIEDE)),
-            ecritures(&[(CANAL_1, CONSIGNE_TIEDE), (CANAL_2, CONSIGNE_TIEDE)]),
+            enregistreur.tour(&mut regulation, Some(MEDIAN)),
+            ecritures(&[(CANAL_1, CONSIGNE_MEDIANE), (CANAL_2, CONSIGNE_MEDIANE)]),
             "passage n° {passage} : et elle continue de suivre"
         );
     }
