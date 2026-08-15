@@ -22,12 +22,16 @@ use std::rc::Rc;
 
 use reverb_anim::{Animation, CATALOGUE, Direction, Geometrie};
 use reverb_gui::plan::{Plan, halo, places_des_ancres, rayon_du_disque};
-use reverb_gui::reglages::{Poignee, consigne_affichee};
+use reverb_gui::reglages::{
+    Poignee, TRACE_ASPECT, TRACE_CHAUD, TRACE_FROID, commandes_de_trace, consigne_affichee,
+    degres_lisibles,
+};
 use reverb_gui::{
     AncreEcran, FamilleAnimation, Fenetre, LigneProfil, LigneTemperature, LigneVentilateur,
-    LigneZone, PointHalo, PointLed,
+    LigneZone, PalierCourbe, PointHalo, PointLed,
 };
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
+use reverb_proto::regulation::Courbe;
 use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
@@ -389,13 +393,19 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     let ouvert = std::env::var("REVERB_VERROU").as_deref() == Ok("ouvert");
     interface.set_ventilateurs(ModelRc::new(VecModel::from(vec![
         // Un canal de chaque espèce : celui qui n'a pas de mode automatique et
-        // n'affiche donc pas de bouton « auto », celui qui régule seul sur une
-        // courbe, celui qui régule seul sur le profil d'usine du périphérique
-        // (#112) — c'est le mode des deux canaux du Kraken sur SHYNAEL, et donc
-        // le cadenas qu'on verra vraiment —, et celui qui est en quarantaine
-        // (#100, #102). Sans ces lignes, ni le grisé d'un canal muet, ni ce
-        // qu'il écrit à côté de sa barre, ni le cadenas ne se vérifieraient
-        // autrement qu'en débranchant un Kraken.
+        // n'affiche donc pas de bouton « auto », celui que le démon régule
+        // (#113), celui qui régule seul sur une courbe, celui qui régule seul
+        // sur le profil d'usine du périphérique (#112) — c'est le mode des deux
+        // canaux du Kraken sur SHYNAEL, et donc le cadenas qu'on verra vraiment
+        // —, et celui qui est en quarantaine (#100, #102). Sans ces lignes, ni
+        // le grisé d'un canal muet, ni ce qu'il écrit à côté de sa barre, ni le
+        // cadenas ne se vérifieraient autrement qu'en débranchant un Kraken.
+        //
+        // ⚠️ **Le régulé, le verrouillé et l'ordinaire sont sur LA MÊME image**,
+        // et c'est la seule façon de vérifier ce que l'issue #113 exige : les
+        // deux premiers grisent une barre pour des raisons opposées, et
+        // l'interface doit les distinguer. Les regarder sur deux captures
+        // successives ne le dirait pas.
         LigneVentilateur {
             canal: SharedString::from("nzxtsmart2:fan-1"),
             position: SharedString::from("radiateur haut"),
@@ -407,6 +417,30 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             sait_faire_auto: false,
             regule_seul: false,
             deverrouille: false,
+            // Régulable et libre : sa barre se tire, et son bouton propose de
+            // le prendre en charge.
+            regulable: true,
+            sous_regulation: false,
+        },
+        LigneVentilateur {
+            canal: SharedString::from("nzxtsmart2:fan-2"),
+            position: SharedString::from("radiateur milieu"),
+            rpm: SharedString::from("1042"),
+            // 33 %, ce que la courbe par défaut calcule à 36 °C de liquide : la
+            // consigne d'un canal régulé est celle que le démon vient d'écrire,
+            // et sa ligne `chan` la republie.
+            pwm: 33,
+            consigne: consigne(Some(33)),
+            mode: SharedString::from("manuel"),
+            lisible: true,
+            sait_faire_auto: false,
+            // ⚠️ Il ne régule pas seul — c'est le démon qui le régule. Sa barre
+            // est grisée comme celle du canal verrouillé plus bas, et rien
+            // d'autre que le témoin et le libellé du bouton ne les sépare.
+            regule_seul: false,
+            deverrouille: false,
+            regulable: true,
+            sous_regulation: true,
         },
         LigneVentilateur {
             canal: SharedString::from("kraken2023elite:pump-speed"),
@@ -419,6 +453,10 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             sait_faire_auto: false,
             regule_seul: true,
             deverrouille: ouvert,
+            // Son firmware régule déjà, et #99 le met hors scope : aucun bouton
+            // de régulation, donc aucune confusion possible avec le cadenas.
+            regulable: false,
+            sous_regulation: false,
         },
         LigneVentilateur {
             canal: SharedString::from("kraken2023elite:fan-speed"),
@@ -431,6 +469,8 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             sait_faire_auto: true,
             regule_seul: true,
             deverrouille: ouvert,
+            regulable: false,
+            sous_regulation: false,
         },
         LigneVentilateur {
             canal: SharedString::from("nct6687:sys-fan-1"),
@@ -454,8 +494,57 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             // inerte pour l'autre raison, celle de #100.
             regule_seul: false,
             deverrouille: false,
+            // ⚠️ `regulable` est gardé d'un tour où le canal répondait : c'est
+            // une capacité du pilote, pas une mesure. Son bouton reste donc
+            // visible et **inerte**, comme « auto » — une commande qui
+            // disparaît à chaque hoquet du contrôleur fait bouger la ligne sous
+            // les doigts.
+            regulable: true,
+            sous_regulation: false,
         },
     ])));
+
+    // La courbe de régulation (#113). Les paliers sont ceux de #99, et le tracé
+    // vient de `trace_de_courbe` — la fonction que le démon exécute : c'est
+    // aussi ce qui rend l'écrêtage vérifiable à l'œil, la plage débordant des
+    // deux côtés des paliers.
+    //
+    // `REVERB_COURBE=invalide` montre l'autre face : une courbe dont les paliers
+    // ne montent pas, refusée **en le disant** et sans tracé. Sans cette
+    // variable, le refus ne se verrait sur aucune image — il ne vit que le
+    // temps d'un réglage de travers.
+    let paliers: Vec<(i32, u8)> = if std::env::var("REVERB_COURBE").as_deref() == Ok("invalide") {
+        vec![(35_000, 30), (50_000, 100), (45_000, 60)]
+    } else {
+        Courbe::defaut().paliers().to_vec()
+    };
+    interface.set_borne_froide(SharedString::from(degres_lisibles(TRACE_FROID)));
+    interface.set_borne_chaude(SharedString::from(degres_lisibles(TRACE_CHAUD)));
+    // Le même rapport que la fenêtre, et pour la même raison : sans lui, cette
+    // image montrerait le tracé écrasé dans un carré — c'est **sur elle** que le
+    // défaut a été mesuré le 2026-08-15. Voir `TRACE_ASPECT`.
+    interface.set_trace_aspect(TRACE_ASPECT);
+    interface.set_paliers(ModelRc::new(VecModel::from(
+        paliers
+            .iter()
+            .map(|(milli, pourcent)| PalierCourbe {
+                temperature: SharedString::from(degres_lisibles(*milli)),
+                consigne: SharedString::from(format!("{pourcent} %")),
+                degres: milli.div_euclid(1_000),
+                pourcent: i32::from(*pourcent),
+            })
+            .collect::<Vec<PalierCourbe>>(),
+    )));
+    match Courbe::depuis(&paliers) {
+        Ok(courbe) => {
+            interface.set_trace_courbe(SharedString::from(commandes_de_trace(&courbe)));
+            interface.set_refus_courbe(SharedString::new());
+        }
+        Err(erreur) => {
+            interface.set_trace_courbe(SharedString::new());
+            interface.set_refus_courbe(SharedString::from(erreur.raison));
+        }
+    }
     // Les cinq sondes retenues, avec une courbe dessinée à la main : de quoi
     // regarder la carte sans machine ni démon. Les libellés sont ceux que la
     // fenêtre produit vraiment, modèles de disques compris (issue #51).
