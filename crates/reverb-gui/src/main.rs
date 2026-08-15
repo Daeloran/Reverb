@@ -462,6 +462,8 @@ impl Pupitre {
                 couleur: Rgb::new(0xff, 0x40, 0xff),
                 vitesse: 3,
                 direction: 0,
+                // Aucune palette au départ : la couleur décide, comme avant #126.
+                palette: None,
             }),
             couleur: Cell::new(Rgb::new(0xff, 0x40, 0xff).en_tsl()),
             poignees: RefCell::new(HashMap::new()),
@@ -586,6 +588,7 @@ fn main() -> ExitCode {
     fenetre.set_animations(noms_du_menu());
     fenetre.set_animations_lisibles(noms_lisibles_du_menu());
     fenetre.set_directions(noms_des_directions());
+    fenetre.set_palettes(noms_des_palettes());
     fenetre.set_affichages(noms_des_affichages());
     fenetre.set_affichages_lisibles(noms_lisibles_des_affichages());
     fenetre.set_aides_des_modes(aides_des_modes());
@@ -1960,6 +1963,30 @@ fn relever(fenetre: &Fenetre, pupitre: &Pupitre, reglage: &mut Reglage) {
     reglage.couleur = pupitre.rgb();
     reglage.vitesse = u8::try_from(fenetre.get_vitesse().clamp(0, 255)).unwrap_or(3);
     reglage.direction = usize::try_from(fenetre.get_direction()).unwrap_or(0);
+    // ⚠️ **Le rang 0 du menu vaut « aucune palette »**, et non la première :
+    // c'est ce qui laisse la couleur reprendre la main sans une case à cocher de
+    // plus. Une palette et une couleur ne coexistent jamais — le démon refuse le
+    // couple, et la commande entière avec (#126).
+    reglage.palette = match fenetre.get_palette_choisie() {
+        rang if rang >= 1 => usize::try_from(rang - 1).ok(),
+        _ => None,
+    };
+}
+
+/// Les douze palettes du catalogue, précédées de « Aucune » (#126).
+///
+/// ⚠️ **Les noms partent tels quels**, sans être rendus « lisibles » comme les
+/// directions : ce sont des noms propres — « light-pink », « atlantica » —, et
+/// les traduire les rendrait introuvables pour qui a lu le README ou tapé la
+/// commande. C'est le même choix que pour le catalogue d'animations.
+fn noms_des_palettes() -> ModelRc<SharedString> {
+    let mut noms = vec![SharedString::from("Aucune")];
+    noms.extend(
+        reverb_anim::PALETTES
+            .iter()
+            .map(|nom| SharedString::from(*nom)),
+    );
+    ModelRc::new(VecModel::from(noms))
 }
 
 /// Les commandes qui donnent cette couleur à la sélection, organe par organe.
@@ -2081,6 +2108,17 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
             // sélecteur — régler la vitesse repeindrait le boîtier.
             fenetre.set_vitesse(i32::from(reglage.vitesse));
             fenetre.set_direction(i32::try_from(reglage.direction).unwrap_or(0));
+            // ⚠️ Rang 0 = « Aucune » : une animation que le démon rapporte sans
+            // palette remet donc le menu à zéro, jamais sur celle d'avant. Un
+            // menu qui garderait « light-pink » devant un boîtier qui affiche
+            // une couleur unie mentirait — et c'est justement ce qu'on regarde
+            // pour s'y retrouver, comme la pastille du profil rappelé.
+            fenetre.set_palette_choisie(
+                reglage
+                    .palette
+                    .and_then(|rang| i32::try_from(rang + 1).ok())
+                    .unwrap_or(0),
+            );
             pupitre.couleur.set(reglage.couleur.en_tsl());
             poser_couleur(fenetre, pupitre);
             false

@@ -33,7 +33,7 @@
 
 use std::time::Duration;
 
-use reverb_anim::{Animation, CATALOGUE, Direction, ReglageInvalide, Reglages};
+use reverb_anim::{Animation, CATALOGUE, Direction, PALETTES, Palette, ReglageInvalide, Reglages};
 use reverb_proto::composition::{Ancre, Fond, Source};
 use reverb_proto::ipc::{ProfilAction, Request, ResponseLine, ScreenAction};
 use reverb_proto::regulation::Courbe;
@@ -57,6 +57,12 @@ pub struct Reglage {
     pub vitesse: u8,
     /// Rang dans `reverb_anim::Direction::ALL`.
     pub direction: usize,
+    /// Rang dans [`reverb_anim::PALETTES`], ou `None` pour « aucune » (#126).
+    ///
+    /// ⚠️ **Un rang, pas une `Palette`** : c'est ce que le menu de la fenêtre
+    /// manipule — `current-index` d'un `ComboBox` —, et convertir au bord évite
+    /// de porter deux représentations du même choix.
+    pub palette: Option<usize>,
 }
 
 impl Reglage {
@@ -74,8 +80,21 @@ impl Reglage {
         let animation = Animation::par_nom(nom).ok()?;
         let acceptees = animation.parametres_acceptes();
         let mut reglages = Vec::new();
-        if acceptees.contains(&"couleur") {
-            reglages.push(("couleur".to_owned(), hexa(self.couleur)));
+        // ⚠️ **`palette` chasse `couleur`, jamais les deux ensemble** : le démon
+        // refuse le couple, et la commande **entière** avec (#126).
+        match self.palette.and_then(|rang| PALETTES.get(rang)) {
+            Some(palette) if acceptees.contains(&"palette") => {
+                reglages.push(("palette".to_owned(), (*palette).to_owned()));
+            }
+            // Un rang hors des douze n'envoie **rien** plutôt qu'une palette de
+            // repli, pour la même raison qu'une direction hors des huit : une
+            // teinte que personne n'a demandée, et sans un mot.
+            Some(_) => {}
+            None => {
+                if acceptees.contains(&"couleur") {
+                    reglages.push(("couleur".to_owned(), hexa(self.couleur)));
+                }
+            }
         }
         if acceptees.contains(&"vitesse") {
             reglages.push(("vitesse".to_owned(), self.vitesse.to_string()));
@@ -126,6 +145,13 @@ impl Reglage {
         if let Some(direction) = venu.direction {
             self.direction = direction;
         }
+        // ⚠️ **Affecté même absent**, contrairement aux trois autres. Une
+        // animation rapportée sans `palette` en est une qui n'en a pas : garder
+        // celle d'avant afficherait un menu qui ment sur ce que le boîtier
+        // montre. Les autres réglages, eux, ne sont *pas rapportés* quand
+        // l'animation ne les accepte pas — absence d'information, pas
+        // information d'absence.
+        self.palette = venu.palette;
         true
     }
 }
@@ -147,6 +173,8 @@ pub struct Eclairage {
     pub vitesse: Option<u8>,
     /// Rang dans [`Direction::ALL`].
     pub direction: Option<usize>,
+    /// Rang dans [`reverb_anim::PALETTES`] (#126).
+    pub palette: Option<usize>,
 }
 
 /// Lit une réponse à `lighting`.
@@ -180,6 +208,7 @@ pub fn eclairage_lu(lignes: &[ResponseLine]) -> Eclairage {
                 "couleur" => lu.couleur = couleur_lue(valeur),
                 "vitesse" => lu.vitesse = vitesse_lue(valeur),
                 "direction" => lu.direction = direction_lue(valeur),
+                "palette" => lu.palette = palette_lue(valeur),
                 // Une clé inconnue est ignorée, et elle seule : c'est ce qui
                 // permet à cette fenêtre de rester lisible devant un démon plus
                 // récent qu'elle. Refuser la ligne entière n'appartient qu'au
@@ -201,6 +230,15 @@ fn couleur_lue(brut: &str) -> Option<Rgb> {
         return None;
     }
     Rgb::from_hex(brut).ok()
+}
+
+/// Le rang d'une palette du catalogue, par son nom (#126).
+///
+/// Un nom inconnu rend `None` : une fenêtre plus ancienne que le démon doit
+/// rester lisible devant une palette qu'elle ne connaît pas, et le bandeau de
+/// l'animation dit de toute façon la vérité.
+fn palette_lue(brut: &str) -> Option<usize> {
+    PALETTES.iter().position(|nom| *nom == brut)
 }
 
 /// Une vitesse du catalogue, de 1 à 10.
@@ -686,6 +724,12 @@ pub fn requete_d_animation(
         vitesse: reglage.vitesse,
         direction,
         sonde: sonde.map(str::to_owned),
+        // ⚠️ `reglages_ecrits` écrit `couleur` **ou** `palette`, jamais les deux
+        // (#126) : c'est lui qui tranche, pas cet appelant.
+        palette: reglage
+            .palette
+            .and_then(|rang| PALETTES.get(rang))
+            .and_then(|nom| Palette::par_nom(nom).ok()),
     });
     // Relu par le juge d'en face avant de partir : c'est lui qui nomme la sonde
     // manquante, et le dire ici épargne un aller-retour pour l'apprendre.
