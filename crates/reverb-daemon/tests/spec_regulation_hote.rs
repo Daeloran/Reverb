@@ -72,6 +72,8 @@
 //! pub struct Ecriture {
 //!     pub canal: String,
 //!     pub consigne: u8,
+//!     /// Ajouté par #110 : pourquoi cette écriture part. Aucun test de ce fichier ne l'observe.
+//!     pub motif: Motif,
 //! }
 //!
 //! #[derive(Debug)]
@@ -87,7 +89,16 @@
 //!
 //!     /// Un tour de télémétrie : `liquide` en millidegrés, `None` si la sonde est illisible.
 //!     /// Rend ce qu'il faut écrire, et **seulement** ce qu'il faut écrire.
-//!     pub fn tour(&mut self, liquide: Option<i32>) -> Vec<Ecriture>;
+//!     ///
+//!     /// ⚠️ **`portees` a été ajouté par #110** — ce que chaque canal **porte réellement**, en
+//!     /// pourcentage, relu par le démon avant le tour. La décision se prend dessus, et non plus
+//!     /// sur ce qu'on a cru écrire. Aucune assertion de ce fichier n'en dépend : le banc
+//!     /// ci-dessous modélise un matériel obéissant, l'hypothèse implicite de tous ses scénarios.
+//!     pub fn tour(
+//!         &mut self,
+//!         liquide: Option<i32>,
+//!         portees: &BTreeMap<String, Option<u8>>,
+//!     ) -> Vec<Ecriture>;
 //!
 //!     pub fn encoder(&self) -> String;
 //!     pub fn decoder(texte: &str) -> Result<Regulation, RegulationInvalide>;
@@ -178,7 +189,7 @@
 //! - **Une courbe par canal**, l'édition depuis la fenêtre, les canaux du Kraken : hors scope de
 //!   l'issue.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -296,6 +307,21 @@ fn exige_entre(courbe: &Courbe, temperature: i32, bas: u8, haut: u8, contexte: &
 #[derive(Default)]
 struct Enregistreur {
     faites: Vec<(String, u8)>,
+    /// Ce que chaque canal **porte**, tel que le démon le relit avant chaque tour (#110).
+    ///
+    /// ⚠️ **Ajouté mécaniquement par #110, et aucune assertion de ce fichier n'a changé.**
+    /// `Regulation::tour` prend désormais la relecture en argument et décide dessus. Le matériel
+    /// modélisé ici est donc **obéissant** — ce qu'on lui écrit, il le porte —, ce qui est
+    /// exactement l'hypothèse implicite de tous les scénarios de #99 : ils comptent des écritures
+    /// sur un matériel dont personne ne doutait qu'il appliquât. Un matériel qui encaisse sans
+    /// bouger est le sujet de `spec_relecture_consigne.rs`, et de lui seul.
+    ///
+    /// Sous cette hypothèse les deux règles coïncident, et pas seulement en pratique : un canal
+    /// jamais écrit est écrit quoi qu'il porte, et un canal déjà écrit porte exactement sa dernière
+    /// consigne — « ce qu'il porte diffère » et « ce qu'on a écrit diffère » y sont la même
+    /// condition. La valeur de départ ci-dessous est donc **inobservable**, et c'est vérifié : les
+    /// trente-neuf tests passent à l'identique de 0 % à 100 %.
+    portees: BTreeMap<String, Option<u8>>,
 }
 
 impl Enregistreur {
@@ -308,10 +334,18 @@ impl Enregistreur {
     /// Rend les écritures de **ce** tour, triées par canal — l'ordre dans lequel `tour` les rend
     /// n'est pas un contrat, et un test qui l'exigerait figerait un détail d'implémentation.
     fn tour(&mut self, regulation: &mut Regulation, liquide: Option<i32>) -> Vec<(String, u8)> {
+        // Un canal dont on n'a encore rien vu porte le duty d'allumage des `nzxtsmart2` : `pwm =
+        // 64`, soit 25 % — la valeur unique des 863 relevés du 2026-08-15.
+        for canal in regulation.canaux() {
+            self.portees.entry(canal).or_insert(Some(DUTY_SUBI));
+        }
+
         let mut ce_tour: Vec<(String, u8)> = regulation
-            .tour(liquide)
+            .tour(liquide, &self.portees)
             .into_iter()
-            .map(|Ecriture { canal, consigne }| (canal, consigne))
+            // Le motif ajouté par #110 est le sujet de son fichier ; ici on ne compte que ce qui
+            // part sur le bus, comme avant lui.
+            .map(|ecriture: Ecriture| (ecriture.canal, ecriture.consigne))
             .collect();
         ce_tour.sort();
 
@@ -323,6 +357,11 @@ impl Enregistreur {
                 vus.insert(canal.as_str()),
                 "« {canal} » est écrit deux fois dans le même tour : {ce_tour:?}"
             );
+        }
+
+        // Le matériel obéit : ce qu'on lui écrit, il le porte au tour suivant.
+        for (canal, consigne) in &ce_tour {
+            self.portees.insert(canal.clone(), Some(*consigne));
         }
 
         self.faites.extend(ce_tour.iter().cloned());
