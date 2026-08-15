@@ -26,7 +26,7 @@ use std::io;
 use std::path::PathBuf;
 
 use reverb_hw::hidraw::{self, OpenController};
-use reverb_hw::hwmon::{self, FanChannel, Mode, Percent};
+use reverb_hw::hwmon::{self, CourbesPosees, FanChannel, Mode, Percent};
 use reverb_hw::i2c;
 use reverb_hw::usbfs;
 use reverb_proto::ram::{self, SlotAddress};
@@ -51,6 +51,20 @@ pub struct Peripheriques {
     /// machine sans elle doit continuer de piloter ses ventilateurs.
     bus: Option<i2c::Bus>,
     canaux: Vec<FanChannel>,
+    /// Les canaux ayant reçu une courbe **depuis le démarrage de ce démon**.
+    ///
+    /// ⚠️ **Il repart vide à chaque démarrage, et c'est correct** : les fichiers
+    /// de courbe sont en écriture seule, donc rien ne se relit sur le matériel,
+    /// et on ne peut rien savoir de ce qu'un autre outil a écrit avant nous.
+    /// Sans lui, « auto » écrivait `2` sur un tableau de zéros et arrêtait la
+    /// régulation de la pompe, en silence (issue #97).
+    ///
+    /// ⚠️ **Le démon n'a aucun verbe pour poser une courbe**, et ce carnet reste
+    /// donc vide toute sa vie : « auto » est refusé par le socket, et la fenêtre
+    /// n'affiche pas le bouton. Conséquence connue et assumée de #97 — un bouton
+    /// qui ne peut qu'arrêter la pompe vaut moins que pas de bouton —, suivie
+    /// par l'issue #104, qui ajoutera le verbe `curve`.
+    courbes: CourbesPosees,
     /// Le fil qui tient l'écran du Kraken (#83). Absent si le Kraken n'est pas
     /// branché, ou si la règle udev manque — une machine sans lui doit continuer
     /// de s'éclairer, et aucun fil n'est alors démarré.
@@ -151,6 +165,7 @@ impl Peripheriques {
                 controleurs,
                 bus,
                 canaux,
+                courbes: CourbesPosees::vide(),
                 ecran,
                 dernier: Dernier::default(),
             },
@@ -277,6 +292,15 @@ impl Peripheriques {
         &self.canaux
     }
 
+    /// Le carnet des courbes posées depuis le démarrage (issue #97).
+    ///
+    /// C'est lui qui décide du booléen « auto » de chaque ligne `chan`, donc du
+    /// bouton de la fenêtre : la même question que celle du refus, posée sans
+    /// rien écrire.
+    pub fn courbes_posees(&self) -> &CourbesPosees {
+        &self.courbes
+    }
+
     /// Applique une consigne à un canal, ou le rend à son firmware.
     ///
     /// Les garde-fous de la ligne de commande — plancher de 20 %, `--manual`
@@ -297,16 +321,28 @@ impl Peripheriques {
             })?;
 
         match action {
-            // ⚠️ `HostCurve` (2) et non `PleinRegime` (0) : c'est `2` qui rend la
-            // main à la courbe du périphérique. `0` envoie le canal à 100 % et
-            // lâche la barre — sur la pompe, en silence (issue #50). Un canal
-            // dont le pilote n'a aucun mode automatique se voit refuser ici,
-            // avant toute écriture, avec un message qui le nomme.
-            Consigne::Auto => hwmon::set_mode(canal, Mode::HostCurve),
+            // ⚠️ `HostCurve` (2) et non `PleinRegime` (0), et **ce n'est pas un
+            // retour à la courbe du périphérique** — comme ce commentaire l'a
+            // prétendu jusqu'au 2026-08-15. `2` rend la main à la courbe de
+            // l'**hôte** : `nzxt-kraken3` pousse le tableau de points que le
+            // pilote détient, lequel est à zéro partout tant que personne n'y a
+            // téléversé de courbe. « auto » arrêtait donc la régulation de la
+            // pompe au lieu de la rendre (issue #97). Aucune valeur de
+            // `pwmN_enable` ne rend le Kraken à son profil d'usine ; seule une
+            // coupure d'alimentation le fait.
+            //
+            // `0`, lui, envoie le canal à 100 % et lâche la barre — sur la
+            // pompe, en silence (issue #50).
+            //
+            // Deux refus tombent ici, avant toute écriture, chacun en nommant le
+            // canal : un pilote sans mode automatique, et un canal sans courbe
+            // posée. Le second est **toujours** vrai côté démon tant que le
+            // socket n'a pas de verbe `curve` (issue #104).
+            Consigne::Auto => hwmon::set_mode(canal, Mode::HostCurve, &self.courbes),
             Consigne::Pwm(percent) => {
                 // Un canal laissé sur une courbe ignorerait la consigne en
                 // silence : le passer en manuel fait partie de l'ordre.
-                hwmon::set_mode(canal, Mode::Manual)?;
+                hwmon::set_mode(canal, Mode::Manual, &self.courbes)?;
                 hwmon::set_pwm(canal, percent)
             }
         }

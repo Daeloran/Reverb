@@ -467,7 +467,7 @@ mod lecture_de_zero {
 
 mod ecriture_de_zero {
     use super::{FauxSysfs, canal, ecarts, libelle, lire, mode, photographie, pose_canal};
-    use reverb_hw::hwmon::set_mode;
+    use reverb_hw::hwmon::{CourbesPosees, set_mode};
 
     /// Deux canaux d'un même Kraken : le premier à `0`, le second à `1`.
     ///
@@ -506,7 +506,8 @@ mod ecriture_de_zero {
             .expect("le Kraken expose `pwm2_enable`");
 
         assert_eq!(lire(enable), "1", "la cible part du mode manuel");
-        set_mode(cible, mode(source)).expect("le mode d'un canal non piloté reste écrivable");
+        set_mode(cible, mode(source), &CourbesPosees::vide())
+            .expect("le mode d'un canal non piloté reste écrivable");
         assert_eq!(
             lire(enable),
             "0",
@@ -530,7 +531,8 @@ mod ecriture_de_zero {
         let cible = canal(&canaux, "kraken2023elite:fan-speed");
 
         let attendu = libelle(source);
-        set_mode(cible, mode(source)).expect("le mode d'un canal non piloté reste écrivable");
+        set_mode(cible, mode(source), &CourbesPosees::vide())
+            .expect("le mode d'un canal non piloté reste écrivable");
         assert_eq!(
             libelle(cible),
             attendu,
@@ -550,7 +552,8 @@ mod ecriture_de_zero {
         let cible = canal(&canaux, "kraken2023elite:fan-speed");
 
         let avant = photographie(sysfs.racine());
-        set_mode(cible, mode(source)).expect("le mode d'un canal non piloté reste écrivable");
+        set_mode(cible, mode(source), &CourbesPosees::vide())
+            .expect("le mode d'un canal non piloté reste écrivable");
         let apres = photographie(sysfs.racine());
 
         // `hwmon6` est le répertoire du Kraken ; sysfs n'existe que sous Linux,
@@ -582,7 +585,7 @@ mod autres_valeurs {
         CANAUX_A_ZERO, arborescence_de_reference, canal, ecarts, libelle, mode, photographie,
         un_seul_jeton,
     };
-    use reverb_hw::hwmon::{Mode, set_mode};
+    use reverb_hw::hwmon::{CourbesPosees, Mode, set_mode};
 
     #[test]
     fn un_enable_a_un_reste_le_mode_manuel() {
@@ -634,7 +637,7 @@ mod autres_valeurs {
 
         let avant = photographie(sysfs.racine());
         assert!(
-            set_mode(c, Mode::Unknown(7)).is_err(),
+            set_mode(c, Mode::Unknown(7), &CourbesPosees::vide()).is_err(),
             "une valeur incomprise n'est pas réémise"
         );
         let apres = photographie(sysfs.racine());

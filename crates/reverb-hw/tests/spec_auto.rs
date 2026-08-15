@@ -230,6 +230,15 @@ fn arborescence_de_reference(nom_du_test: &str) -> FauxSysfs {
         ecrire(&kraken.join(format!("pwm{n}_enable")), "0");
         ecrire(&kraken.join(format!("fan{n}_input")), "2380");
         ecrire(&kraken.join(format!("fan{n}_label")), libelle);
+        // ⚠️ **Ajoutés par #97**, qui exige qu'une courbe soit *posée* avant
+        // qu'« auto » ne soit accepté : sans ces fichiers, il n'y a nulle part
+        // où l'écrire. Ils sont là dans le relevé du matériel — `kraken2023elite`
+        // expose `temp[1-2]_auto_point[1-40]_pwm` (docs/VENTILATEURS.md) —, et
+        // leur présence ne change aucune attente de #50 : elle ne crée aucun
+        // canal, et les tests de refus comparent deux photographies.
+        for m in 1..=40 {
+            ecrire(&kraken.join(format!("temp{n}_auto_point{m}_pwm")), "0");
+        }
     }
 
     // Une source qui n'expose aucun `pwm*_enable` (spec_fans.rs, #7).
@@ -463,7 +472,7 @@ mod refus {
         CANAUX_SANS_AUTO, FauxSysfs, arborescence_de_reference, canal, canal_complet, ecarts, lire,
         photographie,
     };
-    use reverb_hw::hwmon::{Mode, set_mode};
+    use reverb_hw::hwmon::{CourbesPosees, Mode, set_mode};
 
     #[test]
     fn l_automatique_sur_un_canal_qui_ne_sait_pas_est_refuse_sans_aucune_ecriture() {
@@ -478,7 +487,7 @@ mod refus {
         for nom in CANAUX_SANS_AUTO {
             let c = canal(&canaux, nom);
             assert!(
-                set_mode(c, Mode::HostCurve).is_err(),
+                set_mode(c, Mode::HostCurve, &CourbesPosees::vide()).is_err(),
                 "{nom} : « auto » doit être refusé, son pilote n'en a pas"
             );
         }
@@ -518,9 +527,13 @@ mod refus {
         let sysfs = arborescence_de_reference("refus_explicite");
         let canaux = sysfs.canaux();
 
-        let message = set_mode(canal(&canaux, "nzxtsmart2:fan-1"), Mode::HostCurve)
-            .expect_err("« auto » est refusé sur `nzxtsmart2`")
-            .to_string();
+        let message = set_mode(
+            canal(&canaux, "nzxtsmart2:fan-1"),
+            Mode::HostCurve,
+            &CourbesPosees::vide(),
+        )
+        .expect_err("« auto » est refusé sur `nzxtsmart2`")
+        .to_string();
 
         let minuscules = message.to_lowercase();
         assert!(
@@ -553,7 +566,7 @@ mod refus {
 
         let avant = photographie(sysfs.racine());
         assert!(
-            set_mode(c, Mode::HostCurve).is_err(),
+            set_mode(c, Mode::HostCurve, &CourbesPosees::vide()).is_err(),
             "« auto » reste refusé, même si le fichier porte déjà « 2 »"
         );
         let apres = photographie(sysfs.racine());
@@ -565,11 +578,44 @@ mod refus {
 // 3 — l'automatique écrit exactement 2
 // ---------------------------------------------------------------------------
 
+/// ⚠️ **Les trois tests de ce module ont vu leur prémisse remplacée par #97.**
+///
+/// Ils posaient « auto » sur un Kraken **sans courbe** et l'attendaient réussi,
+/// ce que #97 interdit désormais : `pwm_enable = 2` fait exécuter le tableau de
+/// points **du pilote**, à zéro partout tant que personne ne l'a téléversé, et
+/// arrête donc la régulation au lieu de la rendre. Mesuré sur SHYNAEL le
+/// 2026-08-15 : `pwm1 = 0`, `pwm1_enable = 2`, pompe à son plancher de
+/// 1910 tr/min, sans une erreur.
+///
+/// Ce n'est pas un test plié au code : l'intention de #50 — « auto » écrit
+/// **exactement** `2`, se relit comme tel, et ne touche que le `pwmN_enable` du
+/// canal visé — est **inchangée**, à la virgule près. Seule la mise en scène
+/// gagne l'étape que #97 rend obligatoire : la courbe est posée d'abord.
+///
+/// Même geste que le commit 13c4229, qui a remplacé la prémisse de trois tests
+/// de #7 et #50 en le disant en tête de chacun.
 mod ecriture {
     use super::{
         CANAUX_DU_KRAKEN, arborescence_de_reference, canal, ecarts, lire, mode, photographie,
     };
-    use reverb_hw::hwmon::{Mode, set_mode};
+    use reverb_hw::hwmon::{CourbesPosees, Curve, FanChannel, Mode, Percent, set_curve, set_mode};
+
+    /// Pose une courbe quelconque mais valable sur ce canal, et rend le carnet
+    /// qui s'en souvient.
+    ///
+    /// Son contenu n'a aucune importance : ce que #97 exige, c'est qu'une courbe
+    /// **soit partie**, pas laquelle. C'est précisément la connaissance que le
+    /// pilote ne rend jamais, les fichiers de points étant en écriture seule.
+    fn carnet_avec_courbe(canal: &FanChannel) -> CourbesPosees {
+        let mut posees = CourbesPosees::vide();
+        let courbe = Curve::interpolate(&[
+            (1, Percent::new(30).expect("30 % est un pourcentage")),
+            (40, Percent::new(100).expect("100 % est un pourcentage")),
+        ])
+        .expect("une rampe croissante de 30 % à 100 % est une courbe valable");
+        set_curve(canal, &courbe, &mut posees).expect("la courbe part sur le matériel");
+        posees
+    }
 
     #[test]
     fn l_automatique_ecrit_exactement_deux_sur_un_canal_qui_sait() {
@@ -597,7 +643,9 @@ mod ecriture {
                 .expect("le Kraken expose son `pwmN_enable`");
             assert_eq!(lire(enable), "0", "{nom} part de « 0 »");
 
-            set_mode(c, Mode::HostCurve).expect("« auto » réussit sur un canal qui sait");
+            // #97 : la courbe d'abord, sinon « 2 » pousserait un tableau de zéros.
+            let posees = carnet_avec_courbe(c);
+            set_mode(c, Mode::HostCurve, &posees).expect("« auto » réussit sur un canal qui sait");
             assert_eq!(lire(enable), "2", "{nom} : « auto » écrit exactement « 2 »");
         }
     }
@@ -611,7 +659,9 @@ mod ecriture {
         let canaux = sysfs.canaux();
         let c = canal(&canaux, "kraken2023elite:fan-speed");
 
-        set_mode(c, Mode::HostCurve).expect("« auto » réussit sur un canal qui sait");
+        // #97 : la courbe d'abord, sinon « auto » est refusé.
+        let posees = carnet_avec_courbe(c);
+        set_mode(c, Mode::HostCurve, &posees).expect("« auto » réussit sur un canal qui sait");
         let relu = mode(c);
         assert!(
             matches!(relu, Mode::HostCurve),
@@ -629,8 +679,13 @@ mod ecriture {
         let canaux = sysfs.canaux();
         let c = canal(&canaux, "kraken2023elite:pump-speed");
 
+        // #97 : la courbe part **avant** la photographie. C'est l'écriture d'un
+        // « auto » que ce test confine, pas celle d'une courbe — laquelle a ses
+        // propres tests dans `spec_courbes.rs`.
+        let posees = carnet_avec_courbe(c);
+
         let avant = photographie(sysfs.racine());
-        set_mode(c, Mode::HostCurve).expect("« auto » réussit sur un canal qui sait");
+        set_mode(c, Mode::HostCurve, &posees).expect("« auto » réussit sur un canal qui sait");
         let apres = photographie(sysfs.racine());
 
         // `hwmon6` est le répertoire de `kraken2023elite` ; sysfs n'existe que
@@ -770,7 +825,7 @@ mod libelle_de_zero {
 
 mod inconnu {
     use super::{FauxSysfs, canal, canal_complet, ecarts, mode, photographie};
-    use reverb_hw::hwmon::{Mode, set_mode};
+    use reverb_hw::hwmon::{CourbesPosees, Mode, set_mode};
 
     #[test]
     fn une_valeur_de_mode_inconnue_se_lit_telle_quelle() {
@@ -822,7 +877,7 @@ mod inconnu {
         for valeur in [3u8, 4, 7, 255] {
             for c in [sait, ne_sait_pas] {
                 assert!(
-                    set_mode(c, Mode::Unknown(valeur)).is_err(),
+                    set_mode(c, Mode::Unknown(valeur), &CourbesPosees::vide()).is_err(),
                     "{} : `Mode::Unknown({valeur})` n'est pas réémis",
                     c.name
                 );

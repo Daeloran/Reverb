@@ -198,10 +198,14 @@ OPTIONS de « fan » — vitesse de rotation (demande les droits root) :
     --manual             autorise à sortir un canal de sa courbe firmware.
                          ⚠️ le canal cesse alors de réagir à la température
     --curve              met en service la courbe téléversée par « reverb curve »
-    --auto               rend la main au firmware.
-                         ⚠️ ce n'est PAS un retour garanti au profil d'usine :
-                         après une courbe hôte, le Kraken observé se rabat sur
-                         du refroidissement maximal (docs/VENTILATEURS.md)
+    --auto               fait exécuter la courbe de l'HÔTE (pwm_enable = 2).
+                         ⚠️ ce n'est PAS un retour au profil d'usine, et aucune
+                         valeur de pwm_enable ne l'y rend — seule une coupure
+                         d'alimentation le fait (docs/VENTILATEURS.md)
+                         ⚠️ REFUSÉ tant qu'aucune courbe n'a été posée pendant
+                         la vie du processus : « 2 » pousserait alors le tableau
+                         du pilote, à zéro partout, et arrêterait la régulation
+                         de la pompe sans le moindre message (issue #97)
 
 OPTIONS de « curve » — courbe exécutée par le firmware du Kraken :
     --point <P:C>        consigne C au point P. Répétable ; les points
@@ -242,7 +246,7 @@ EXEMPLES :
     sudo reverb fan --channel nzxtsmart2:fan-1 --pwm 60
     sudo reverb fan --all --pwm 40
     sudo reverb fan --channel kraken2023elite:pump-speed --pwm 80 --manual
-    sudo reverb fan --channel kraken2023elite:pump-speed --auto
+    sudo reverb curve --channel kraken2023elite:pump-speed --point 1:30 --point 40:100
     reverb ram --all --color ff00ff
     reverb ram --slot 2 --colors ff0000,ff4000,ff8000,ffc000,ffff00,c0ff00,80ff00,40ff00,00ff00,00ff40,00ff80
 ";

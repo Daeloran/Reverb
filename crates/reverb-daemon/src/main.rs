@@ -964,6 +964,7 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
             let gpu = etat.gpu.lock().ok().and_then(|lu| lu.clone());
             let mut lignes = telemetrie::releve(
                 peripheriques.canaux(),
+                peripheriques.courbes_posees(),
                 &etat.sondes,
                 gpu,
                 &mut etat.quarantaine,

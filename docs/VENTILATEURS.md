@@ -181,10 +181,66 @@ défaut, un **arrêt complet** de la machine, pas un redémarrage.
 
 ### Conséquence sur `reverb fan --auto`
 
-L'option écrit `pwm_enable = 0` et son aide annonçait « rend le canal à sa courbe firmware ».
+L'option écrivait `pwm_enable = 0` et son aide annonçait « rend le canal à sa courbe firmware ».
 C'est ce que le nom du mode laisse croire, et c'est faux sur le Kraken après usage d'une courbe
 hôte. L'aide a été corrigée : `--auto` rend la main au pilote par défaut, sans garantir le retour
 au profil d'usine.
+
+⚠️ **Depuis #50 l'option écrit `2`, non `0`** — et cette valeur-là n'est pas meilleure sans
+courbe : voir la section suivante.
+
+### ⚠️ `pwm_enable = 2` **sans courbe** arrête la régulation, il ne la rend pas
+
+**Le piège suivant, et il a coûté la régulation de la pompe.** Constaté sur SHYNAEL le
+2026-08-15, après un « auto » posé sur un Kraken jamais garni :
+
+```
+pwm1 = 0        pwm1_enable = 2        pompe 1910 tr/min (son plancher matériel)
+```
+
+Le même jour, une session de jeu mesurée avait montré la régulation d'usine parfaitement vivante —
+35 % à 37 °C de liquide, 60 % à 51 °C. Le « auto » l'a remplacée par 0 % de consigne.
+
+La cause est dans `nzxt-kraken3`, `kraken3_write` :
+
+```c
+case 2:
+    ret = kraken3_write_curve(priv, priv->channel_info[channel].pwm_points, channel);
+```
+
+`2` pousse **le tableau de points détenu par le pilote**, celui que `tempN_auto_pointM_pwm`
+alimente. S'il n'a jamais été téléversé, c'est celui du `kzalloc` : **zéro partout**. Autrement
+dit, `2` rend la main à la courbe de l'**hôte**, jamais au profil d'usine — et il n'existe
+**aucune** valeur de `pwm_enable` qui l'y rende. Ni `0`, comme la section précédente l'établit,
+ni `2`, ni `1`. Seule une coupure d'alimentation complète le fait.
+
+| écrit | ce que `nzxt-kraken3` en fait |
+|---|---|
+| `0` | `kraken3_write_fixed_duty(priv, 255, channel)` : 100 %, la barre lâchée |
+| `1` | la consigne de `pwmN`, telle quelle |
+| `2` | la courbe **de l'hôte** — zéro partout si personne ne l'a posée |
+
+⚠️ **C'est le mode de défaillance le plus coûteux du projet, parce qu'il est rassurant** : aucune
+erreur n'est rendue, le mode relu est exactement celui qu'on a demandé, la pompe continue de
+tourner à son plancher — donc rien ne s'entend — et le refroidissement est dégradé jusqu'au
+prochain arrêt complet. Même famille que le 34 °C figé derrière une pompe arrêtée (#68).
+
+**Reverb refuse donc `2` tant qu'aucune courbe n'a été téléversée sur le canal**, avant toute
+écriture, en nommant le canal et en citant `reverb curve` (issue #97).
+
+⚠️ **Cette mémoire ne peut vivre que côté hôte, et elle repart vide à chaque démarrage.** Les
+fichiers `tempN_auto_pointM_pwm` sont en écriture seule (`0200`) : leur présence ne dit rien de
+leur contenu, et on ne peut rien savoir de ce qu'un autre outil a écrit avant nous. C'est correct
+au sens strict — un état qu'on ne peut pas vérifier ne doit pas être supposé —, et c'est ce qui
+donne à `CourbesPosees` sa forme : une valeur détenue par le démon, remplie par `set_curve` seule.
+
+⚠️ **Conséquence assumée : « auto » n'est atteignable ni par le socket ni par la ligne de
+commande.** Le démon n'a aucun verbe pour poser une courbe — le bouton de la fenêtre reste donc
+éteint, ce que l'issue #104 doit corriger — et chaque invocation de `reverb` étant un processus
+neuf, `reverb curve` puis `reverb fan --curve` ne partagent aucun carnet. Un « auto » qui ne peut
+qu'arrêter la pompe vaut moins que pas d'« auto » ; le rendre de nouveau atteignable demande de
+poser la courbe et de l'activer **dans le même souffle**, ce que ni le socket ni la grammaire
+actuelle de la ligne de commande ne permettent.
 
 ### ⚠️ `pwm_enable = 0` **lu** ne dit pas ce qu'un `0` **écrit** fait
 

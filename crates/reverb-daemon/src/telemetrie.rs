@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use reverb_hw::hwmon::{FanChannel, Percent, Sonde};
+use reverb_hw::hwmon::{CourbesPosees, FanChannel, Percent, Sonde};
 use reverb_proto::Position;
 use reverb_proto::ipc::ResponseLine;
 
@@ -27,6 +27,12 @@ pub struct LectureCanal {
     pub rpm: Option<u32>,
     pub pwm: Option<u8>,
     pub mode: String,
+    /// Le bouton « auto » marcherait-il **maintenant** sur ce canal ?
+    ///
+    /// Deux conditions, jamais une seule : le pilote sait exécuter une courbe
+    /// (issue #50) **et** une courbe y a été posée depuis le démarrage
+    /// (issue #97). C'est ce booléen que la ligne `chan` porte et que la fenêtre
+    /// lit — elle n'ouvre aucun périphérique et ne décide donc rien elle-même.
     pub sait_faire_auto: bool,
 }
 
@@ -113,7 +119,12 @@ pub fn releve_canaux(
 /// C'est l'attribut qui rend `ETIMEDOUT` sur un contrôleur muet ; échouer dessus
 /// avant de toucher au régime et au PWM fait qu'apprendre le silence coûte cinq
 /// secondes une fois, et non trois.
-fn lire_le_canal(canal: &FanChannel) -> Result<LectureCanal, String> {
+///
+/// ⚠️ **Le carnet arrive en paramètre, il ne se relit pas du matériel** — il ne
+/// peut pas : `tempN_auto_pointM_pwm` est en écriture seule (issue #97). C'est
+/// aussi pourquoi cette fonction est publique : c'est elle que le démon appelle
+/// à chaque `status`, et en tester une jumelle vérifierait la jumelle.
+pub fn lire_le_canal(canal: &FanChannel, posees: &CourbesPosees) -> Result<LectureCanal, String> {
     let mode = canal.mode().map_err(|erreur| erreur.to_string())?;
 
     Ok(LectureCanal {
@@ -132,10 +143,11 @@ fn lire_le_canal(canal: &FanChannel) -> Result<LectureCanal, String> {
             .and_then(|brut| brut.trim().parse::<u8>().ok())
             .map(|brut| Percent::from_raw(brut).percent()),
         mode: mode.to_string(),
-        // Lu sur le nom du pilote, jamais sur une tentative d'écriture : la
-        // tentative qui réussit là où il ne fallait pas envoie le canal à plein
-        // régime, en silence (issue #50).
-        sait_faire_auto: canal.sait_faire_auto(),
+        // Lu sur le nom du pilote et sur le carnet, jamais sur une tentative
+        // d'écriture : la tentative qui réussit là où il ne fallait pas envoie
+        // le canal à plein régime, en silence (issue #50) — ou arrête sa
+        // régulation, ce qui ne s'entend même pas (issue #97).
+        sait_faire_auto: posees.autorise_auto(canal),
     })
 }
 
@@ -147,6 +159,7 @@ fn lire_le_canal(canal: &FanChannel) -> Result<LectureCanal, String> {
 /// barrettes de RAM, le GPU intégré, le wifi et la carte réseau.
 pub fn releve(
     canaux: &[FanChannel],
+    posees: &CourbesPosees,
     sondes: &[Sonde],
     gpu: Option<(String, i32)>,
     quarantaine: &mut Quarantaine,
@@ -154,7 +167,9 @@ pub fn releve(
 ) -> Vec<ResponseLine> {
     let mut lignes = Vec::new();
 
-    let tour = releve_canaux(canaux, quarantaine, maintenant, lire_le_canal);
+    let tour = releve_canaux(canaux, quarantaine, maintenant, |canal| {
+        lire_le_canal(canal, posees)
+    });
     // La raison se relit sur la ligne qui vient d'être produite : c'est la même,
     // et la dupliquer dans `a_signaler` ferait deux endroits à tenir d'accord.
     for ecarte in &tour.a_signaler {
