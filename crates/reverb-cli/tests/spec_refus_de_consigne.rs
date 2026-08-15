@@ -73,6 +73,13 @@
 //!   (`spec_courbe_avant_auto.rs`). Ce fichier ne parle que de `--pwm`.
 //! - **Le verrou de la fenêtre**, qui a son fichier : `reverb-gui/tests/spec_verrou_canal.rs`.
 
+// Les deux tables du banc associent un libellé à une **fabrique** de mode, pour que `Mode` n'ait pas
+// à être `Copy` — et clippy compte ce `[(&str, fn() -> Mode); N]` comme un type trop complexe. Le
+// même `allow` est déjà posé pour la même raison dans cinq fichiers d'intention voisins
+// (`spec_fil_ecran.rs`, `spec_plafond.rs`, …) : il ne touche à aucune assertion, il lève seulement
+// un refus de style sur une forme que ces tests ont choisie exprès.
+#![allow(clippy::type_complexity)]
+
 use reverb_cli::refus_de_consigne;
 use reverb_hw::hwmon::Mode;
 
