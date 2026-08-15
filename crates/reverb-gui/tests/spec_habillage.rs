@@ -441,7 +441,23 @@ fn la_silhouette_suit_la_geometrie_et_n_est_pas_une_constante() {
         "les deux géométries doivent bien différer, sinon ce test ne prouve rien"
     );
 
+    // ⚠️ **La vue de face en est sortie depuis #125, et la propriété ne peut PAS y tenir.**
+    // Son contour y est devenu un **rectangle**, celui des bornes de tout ce qui est dessiné — et
+    // ces bornes sont, après cadrage, le cadre lui-même. Le rectangle est donc **invariant en
+    // coordonnées normalisées**, quelle que soit la géométrie : ce n'est pas un contour figé, c'est
+    // une conséquence de la normalisation, qui ramène toujours le plus grand des deux côtés à la
+    // largeur utile.
+    //
+    // Exiger qu'il change reviendrait à exiger que le cadrage cesse de cadrer.
+    //
+    // ⚠️ **Ce qui remplace la garantie, plus bas : le rectangle doit ÉPOUSER le dessin.** Sans
+    // cela, un polygone écrit à la main aux mêmes coordonnées passerait — et c'est exactement ce
+    // que ce test existe pour empêcher. L'isométrie, elle, garde l'exigence d'origine : son
+    // enveloppe convexe suit bel et bien les LED.
     for ((vue, avant), (_, apres)) in vues_de(&mesuree).into_iter().zip(vues_de(&reorientee)) {
+        if vue == "vue de face" {
+            continue;
+        }
         let (a, b) = (avant.silhouette(), apres.silhouette());
         let differe = a.len() != b.len()
             || a.iter()
@@ -451,6 +467,78 @@ fn la_silhouette_suit_la_geometrie_et_n_est_pas_une_constante() {
             differe,
             "la silhouette de la {vue} est la même pour deux géométries différentes : elle est \
              écrite à la main, pas calculée depuis le boîtier — {a:?}"
+        );
+    }
+
+    // Le rectangle de face **épouse** ce qui est dessiné : chacun de ses quatre côtés touche
+    // l'extrême d'un sommet réel, à la marge près. Un rectangle posé en dur ne le ferait qu'à la
+    // géométrie où on l'a écrit — et ce test balaie les deux.
+    for geometrie in [&mesuree, &reorientee] {
+        let plan = Plan::nouveau(geometrie);
+        let contour = plan.silhouette();
+        assert_eq!(
+            contour.len(),
+            4,
+            "la vue de face rend un rectangle : {contour:?}"
+        );
+
+        let mut sommets: Vec<Place> = Vec::new();
+        for position in Position::ALL {
+            for led in 0..LEDS_PER_FAN as usize {
+                sommets.extend(plan.led_ventilateur(position, led));
+            }
+        }
+        for forme in plan.habillage() {
+            sommets.extend(forme.contour.iter().copied());
+        }
+        for organe in plan.organes() {
+            sommets.extend(organe.sommets.iter().copied());
+        }
+        assert!(!sommets.is_empty(), "il faut du contenu pour l'épouser");
+
+        let bord = |choix: fn(&Place) -> f32, plus_grand: bool| -> f32 {
+            sommets.iter().map(choix).fold(
+                if plus_grand {
+                    f32::NEG_INFINITY
+                } else {
+                    f32::INFINITY
+                },
+                if plus_grand { f32::max } else { f32::min },
+            )
+        };
+        let (rx0, rx1) = (
+            contour.iter().map(|p| p.x).fold(f32::INFINITY, f32::min),
+            contour
+                .iter()
+                .map(|p| p.x)
+                .fold(f32::NEG_INFINITY, f32::max),
+        );
+        let (ry0, ry1) = (
+            contour.iter().map(|p| p.y).fold(f32::INFINITY, f32::min),
+            contour
+                .iter()
+                .map(|p| p.y)
+                .fold(f32::NEG_INFINITY, f32::max),
+        );
+        // Le rectangle est écarté du contenu d'une marge, la même sur les quatre côtés : ce qu'on
+        // vérifie, c'est que cet écart est **le même partout**, donc qu'aucun côté n'a été posé
+        // ailleurs que sur l'extrême qu'il borne.
+        let ecarts = [
+            bord(|p| p.x, false) - rx0,
+            rx1 - bord(|p| p.x, true),
+            bord(|p| p.y, false) - ry0,
+            ry1 - bord(|p| p.y, true),
+        ];
+        let plus_petit = ecarts.iter().cloned().fold(f32::INFINITY, f32::min);
+        let plus_grand = ecarts.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            plus_petit > 0.0,
+            "un côté du rectangle passe DANS le dessin : écarts {ecarts:?}"
+        );
+        assert!(
+            plus_grand - plus_petit < EPSILON,
+            "les quatre côtés ne sont pas à la même marge du dessin — le rectangle ne l'épouse \
+             pas, il est posé : écarts {ecarts:?}"
         );
     }
 
