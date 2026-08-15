@@ -186,6 +186,10 @@ fn reglages_globaux() -> Reglages {
         direction: Direction::HautBas,
         // Champ ajouté par #75 ; le témoin global emploie `vague`, qui ne suit aucune sonde.
         sonde: None,
+        // Champ ajouté par #126. `None` est le comportement d'avant à l'octet
+        // près — un test d'intention de #126 le fige —, donc ce témoin observe
+        // exactement ce qu'il observait.
+        palette: None,
     }
 }
 
@@ -198,6 +202,10 @@ fn reglages_de_zone() -> Reglages {
         vitesse: 9,
         direction: Direction::ArriereAvant,
         sonde: None,
+        // Champ ajouté par #126. `None` est le comportement d'avant à l'octet
+        // près — un test d'intention de #126 le fige —, donc ce témoin observe
+        // exactement ce qu'il observait.
+        palette: None,
     }
 }
 
@@ -563,6 +571,9 @@ fn reglages_acceptables(anim: Animation) -> Reglages {
             // Ajouté par #75 : `thermique` exige le slug d'une sonde. Ce crate ne vérifie pas
             // qu'elle existe — c'est le démon qui les découvre —, un slug plausible suffit.
             "sonde" => reglages.sonde = Some("kraken2023elite:coolant-temp".to_owned()),
+            // ⚠️ Écartée pour #126 : `couleur` et `palette` s'excluent, et ce
+            // témoin porte la couleur depuis toujours. Voir `spec_eclairage.rs`.
+            "palette" => {}
             autre => panic!(
                 "« {autre} » est un paramètre d'animation que ce test ne sait pas fabriquer : le \
                  catalogue s'est étendu, ce test doit suivre"

@@ -192,6 +192,8 @@ fn reglage(animation: Option<&str>) -> Reglage {
         couleur: ANCIENNE,
         vitesse: VITESSE,
         direction: rang(DIRECTION),
+        // Champ ajouté par #126 : « aucune palette », le comportement d'avant.
+        palette: None,
     }
 }
 
@@ -1136,6 +1138,7 @@ fn une_zone_visee_recoit_la_couleur_sous_la_forme_que_l_animation_permet() {
                             vitesse: VITESSE,
                             direction: DIRECTION,
                             sonde: None,
+                            palette: None,
                         }),
                 },
                 // `arc-en-ciel` produit ses propres teintes : « dans la couleur choisie » n'y a

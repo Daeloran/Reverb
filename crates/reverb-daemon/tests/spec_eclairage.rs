@@ -95,6 +95,10 @@ fn reglages_temoins() -> Reglages {
         // Champ ajouté par #75. Aucune des animations employées ici ne suit de sonde ;
         // `vague` la refuserait même.
         sonde: None,
+        // Champ ajouté par #126. `None` est le comportement d'avant à l'octet
+        // près — un test d'intention de #126 le fige —, donc ce témoin observe
+        // exactement ce qu'il observait.
+        palette: None,
     }
 }
 
@@ -514,7 +518,7 @@ fn reglages_acceptables(animation: Animation) -> Reglages {
     let paires: Vec<(String, String)> = animation
         .parametres_acceptes()
         .iter()
-        .map(|cle| {
+        .filter_map(|cle| {
             let valeur = match *cle {
                 "couleur" => hexa(reglages_temoins().couleur),
                 "vitesse" => reglages_temoins().vitesse.to_string(),
@@ -523,12 +527,22 @@ fn reglages_acceptables(animation: Animation) -> Reglages {
                 // d'une sonde ; ce fichier ne vérifie que l'aller-retour du réglage, et un
                 // slug plausible y suffit — l'existence de la sonde est l'affaire du démon.
                 "sonde" => "kraken2023elite:coolant-temp".to_owned(),
+                // ⚠️ **Écartée pour #126, et c'est l'exclusion elle-même.**
+                // `couleur` et `palette` ne vont jamais ensemble — le démon
+                // refuse le couple —, et ce témoin porte la couleur depuis
+                // toujours. Lui ajouter la palette ferait refuser chaque
+                // commande qu'il fabrique.
+                //
+                // La palette n'échappe pas au filet pour autant : son
+                // aller-retour par « eclairage.conf » a son propre test, plus
+                // bas dans ce fichier.
+                "palette" => return None,
                 autre => panic!(
                     "« {autre} » est un paramètre d'animation que ce test ne sait pas fabriquer : \
                      l'étendre plutôt que le contourner."
                 ),
             };
-            ((*cle).to_owned(), valeur)
+            Some(((*cle).to_owned(), valeur))
         })
         .collect();
 

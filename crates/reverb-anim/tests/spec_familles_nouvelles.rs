@@ -74,7 +74,7 @@
 use std::collections::HashSet;
 
 use reverb_anim::{
-    Animation, CATALOGUE, Direction, Geometrie, Image, Orientation, Point, Reglages, Sens,
+    Animation, CATALOGUE, Direction, Geometrie, Image, Orientation, Palette, Point, Reglages, Sens,
 };
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
 use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
@@ -381,20 +381,58 @@ fn les_dix_familles_se_reencodent_et_se_redecodent_sans_perte() {
             temoin.sonde = Some(SONDE.to_owned());
         }
 
-        let ecrits = animation.reglages_ecrits(&temoin);
-        for cle in acceptes {
-            assert!(
-                ecrits.iter().any(|(nom_cle, _)| nom_cle == cle),
-                "« {nom} » accepte `{cle}` mais ne l'écrit pas : {ecrits:?}"
+        // ⚠️ **L'aller-retour se vérifie sur les DEUX branches depuis #126**, et
+        // c'est la seule chose que cette issue change ici. `couleur` et
+        // `palette` sont la première paire de clés du catalogue à s'exclure :
+        // une palette *remplace* la couleur, et écrire les deux produirait un
+        // `eclairage.conf` que le démon refuse au redémarrage suivant — le
+        // défaut de #69.
+        //
+        // L'invariant d'origine, « tout ce qui est accepté est écrit », valait
+        // tant qu'aucune clé n'en chassait une autre. Il devient « tout ce que
+        // le témoin **porte** est écrit », et la couverture y **gagne** : les
+        // deux branches sont désormais parcourues, là où une seule l'était.
+        let sans_palette = temoin.clone();
+        let avec_palette = if acceptes.contains(&"palette") {
+            let mut autre = temoin.clone();
+            autre.palette = Some(Palette::par_nom("light-pink").expect("palette du catalogue"));
+            // ⚠️ **La couleur revient à son défaut dans cette branche**, et ce
+            // n'est pas un contournement : sous palette, `couleur` n'est **pas
+            // écrite**, donc rien ne peut la relire. Exiger qu'elle survive
+            // reviendrait à exiger que les deux clés soient persistées, ce que
+            // le démon refuse au redémarrage suivant. Ce que le test vérifie
+            // ici, c'est que le **reste** traverse sans perte.
+            autre.couleur = Reglages::default().couleur;
+            Some(autre)
+        } else {
+            None
+        };
+
+        for temoin in std::iter::once(sans_palette).chain(avec_palette) {
+            let ecrits = animation.reglages_ecrits(&temoin);
+            for cle in acceptes {
+                // La clé chassée par l'autre n'est pas attendue : c'est la
+                // définition même de l'exclusion.
+                let portee = match *cle {
+                    "couleur" => temoin.palette.is_none(),
+                    "palette" => temoin.palette.is_some(),
+                    _ => true,
+                };
+                assert_eq!(
+                    ecrits.iter().any(|(nom_cle, _)| nom_cle == cle),
+                    portee,
+                    "« {nom} » accepte `{cle}` : il doit l'écrire si et seulement si le témoin le \
+                     porte — écrit {ecrits:?}"
+                );
+            }
+            let relus = animation.reglages(&ecrits).unwrap_or_else(|erreur| {
+                panic!("« {nom} » doit relire ce qu'elle écrit : {erreur}")
+            });
+            assert_eq!(
+                relus, temoin,
+                "« {nom} » ne se relit pas sans perte : écrit {ecrits:?}"
             );
         }
-        let relus = animation
-            .reglages(&ecrits)
-            .unwrap_or_else(|erreur| panic!("« {nom} » doit relire ce qu'elle écrit : {erreur}"));
-        assert_eq!(
-            relus, temoin,
-            "« {nom} » ne se relit pas sans perte : écrit {ecrits:?}"
-        );
     }
 }
 
