@@ -185,3 +185,36 @@ L'option écrit `pwm_enable = 0` et son aide annonçait « rend le canal à sa c
 C'est ce que le nom du mode laisse croire, et c'est faux sur le Kraken après usage d'une courbe
 hôte. L'aide a été corrigée : `--auto` rend la main au pilote par défaut, sans garantir le retour
 au profil d'usine.
+
+### ⚠️ `pwm_enable = 0` **lu** ne dit pas ce qu'un `0` **écrit** fait
+
+C'est la seule valeur de ce fichier qui ait deux sens, et les confondre a coûté un diagnostic.
+
+Le pilote `nzxt-kraken3` **n'écrit rien au probe** : son initialisation n'envoie que
+`set_interval` et `finish_init`, aucune consigne ni courbe. Le champ `mode` qu'il tient sort donc
+du `kzalloc` à `0`, et `pwmN_enable` rend ce `0` tant que personne n'y a touché.
+
+| | ce que ça établit |
+|---|---|
+| `0` **lu** | le pilote **ne pilote pas** ce canal. Ce qu'il fait, c'est le périphérique qui le décide — et `pwmN` le dit. |
+| `0` **écrit** | `kraken3_write_fixed_duty(priv, 255, channel)` puis plus rien : 100 % et la barre lâchée. |
+
+Relevé sur SHYNAEL le 2026-08-15, Kraken jamais touché depuis le démarrage :
+
+```
+pwm1_enable = 0     pwm1 = 77 (30 %)     pompe 1357 tr/min
+```
+
+et pendant une session de jeu de 72 minutes, un duty qui a suivi le liquide par paliers — 89,
+102, 115, 128, 153 — pour une pompe montée de 1500 à 2380 tr/min. **Une régulation d'usine bien
+vivante**, que la colonne MODE annonçait « plein-régime-100% ».
+
+Reverb distingue donc deux modes là où le fichier n'a qu'une valeur : `non-piloté` pour ce qu'une
+lecture établit, `plein-régime-100%` pour ce qu'une écriture provoque. Le second ne sort jamais
+d'une lecture — c'est une **intention**, pas un état observable, et l'avouer vaut mieux que de
+deviner (issue #101).
+
+⚠️ **Après une écriture de `0`, la relecture rend donc `non-piloté` et non `plein-régime-100%`.**
+Ce n'est pas une perte : « non piloté » reste vrai — le pilote a bien lâché la barre —, et le
+`pwmN` relu montre alors 100 % au lieu de 30 %. C'est le pourcentage qui distingue les deux
+situations, pas le mode.

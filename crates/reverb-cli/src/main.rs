@@ -398,7 +398,19 @@ fn consigner(
             canal.name
         ));
     }
-    if matches!(mode, hwmon::Mode::HostCurve | hwmon::Mode::PleinRegime) {
+    // ⚠️ `NonPilote` remplace ici `PleinRegime` : c'est ce que la lecture d'un
+    // `0` rend depuis #101, et `PleinRegime` ne sort plus jamais de `mode()`.
+    // Le comportement est identique à celui d'avant, à dessein — #101 corrige
+    // un libellé, pas une politique.
+    //
+    // ⚠️ **Mais le raisonnement du bloc ci-dessus est désormais faux, et le
+    // correctif appartient à #97.** « Un canal en `0` n'a rien à perdre » ne
+    // vaut que si `0` voulait dire 100 %. Or un `0` lu est le plus souvent un
+    // canal sur sa courbe d'usine, en pleine régulation : sur SHYNAEL le
+    // 2026-08-15, la pompe y suivait le liquide de 35 à 60 %. Lui imposer une
+    // consigne fixe la sort de cette régulation **sans rien demander**, ce qui
+    // est exactement ce que le garde prétend empêcher.
+    if matches!(mode, hwmon::Mode::HostCurve | hwmon::Mode::NonPilote) {
         hwmon::set_mode(canal, hwmon::Mode::Manual).map_err(|e| echec_ecriture(canal, &e))?;
     }
 

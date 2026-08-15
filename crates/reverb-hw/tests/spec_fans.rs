@@ -926,21 +926,26 @@ mod modes {
     use reverb_hw::hwmon::Mode;
 
     #[test]
-    fn enable_a_zero_est_la_courbe_firmware() {
+    fn enable_a_zero_se_lit_en_non_pilote() {
         // issue #7, critère d'acceptation — « Un canal en courbe firmware
         // (`pwm_enable = 0`) n'est jamais basculé en manuel implicitement ».
-        // docs/VENTILATEURS.md — « la pompe et le ventilateur du Kraken sont en
-        // `pwm_enable = 0`, donc **sur leur courbe firmware** ». C'est la
-        // lecture du mode qui rend ce refus possible : mal la faire, c'est
-        // sortir la pompe de sa courbe sans le dire.
+        // C'est la lecture du mode qui rend ce refus possible : mal la faire,
+        // c'est sortir la pompe de sa courbe sans le dire.
+        //
+        // ⚠️ **Le variant attendu a changé deux fois, et la prémisse une seule.**
+        // #7 lisait `0` comme « courbe firmware », #50 l'a renommé
+        // `PleinRegime` en établissant qu'une ÉCRITURE de `0` envoie à 100 %, et
+        // #101 sépare les deux sens : la lecture rend désormais `NonPilote`.
+        // L'intention de #7 — ne pas basculer ce canal en manuel sans le dire —
+        // est inchangée, et c'est bien elle que ce test garde.
         let sysfs = arborescence_de_reference("mode_courbe_firmware");
         let canaux = sysfs.canaux();
 
         for nom in ["kraken2023elite:pump-speed", "kraken2023elite:fan-speed"] {
             let m = mode(canal(&canaux, nom));
             assert!(
-                matches!(m, Mode::PleinRegime),
-                "{nom} suit sa courbe firmware, lu : {m:?}"
+                matches!(m, Mode::NonPilote),
+                "{nom} est à « 0 » : le pilote ne le pilote pas, lu : {m:?}"
             );
         }
     }
@@ -1013,12 +1018,14 @@ mod modes {
             .iter()
             .filter(|c| matches!(mode(c), Mode::Manual))
             .count();
-        let courbes = canaux
+        // `NonPilote` depuis #101 — la valeur du fichier n'a pas changé, sa
+        // traduction si.
+        let non_pilotes = canaux
             .iter()
-            .filter(|c| matches!(mode(c), Mode::PleinRegime))
+            .filter(|c| matches!(mode(c), Mode::NonPilote))
             .count();
         assert_eq!(manuels, 3, "les trois canaux de `nzxtsmart2`");
-        assert_eq!(courbes, 2, "les deux canaux de `kraken2023elite`");
+        assert_eq!(non_pilotes, 2, "les deux canaux de `kraken2023elite`");
     }
 }
 
