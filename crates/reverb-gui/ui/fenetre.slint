@@ -1292,7 +1292,13 @@ export component Fenetre inherits Window {
                                         Text {
                                             text: canal.position == "" ? canal.canal : canal.position;
                                             font-size: 12px;
-                                            color: #e6e6ef;
+                                            // Le nom pâlit avec sa ligne. Un canal en
+                                            // quarantaine garde sa place et doit se
+                                            // voir comme tel : le faire disparaître
+                                            // laissait croire qu'il n'existe pas —
+                                            // donc qu'il n'y a rien à régler, ni rien
+                                            // à réparer (#100).
+                                            color: canal.lisible ? #e6e6ef : #8a8c9b;
                                             horizontal-stretch: 1;
                                             overflow: elide;
                                         }
@@ -1312,6 +1318,12 @@ export component Fenetre inherits Window {
                                             // elle qui décide si une mesure a le
                                             // droit de déplacer le curseur.
                                             value: canal.pwm;
+                                            // ⚠️ La poignée d'un canal muet ne se
+                                            // tire pas (#100). Le curseur reste où
+                                            // il était plutôt que de retomber à
+                                            // zéro, qui se lirait comme un
+                                            // ventilateur qu'on vient d'arrêter.
+                                            enabled: canal.lisible;
                                             changed(valeur) => {
                                                 root.regler-ventilateur(canal.canal, Math.round(valeur));
                                             }
@@ -1348,6 +1360,11 @@ export component Fenetre inherits Window {
                                             text: "auto";
                                             visible: canal.sait-faire-auto;
                                             width: canal.sait-faire-auto ? self.preferred-width : 0px;
+                                            // Montré mais inerte tant que le canal
+                                            // se tait : c'est le bouton qu'on irait
+                                            // chercher quand la ligne ne montre plus
+                                            // rien, et il n'atteindrait personne.
+                                            enabled: canal.lisible;
                                             clicked => { root.rendre-au-firmware(canal.canal); }
                                         }
                                     }

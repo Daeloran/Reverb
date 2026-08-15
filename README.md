@@ -489,6 +489,12 @@ constante changera et la fenêtre suivra.
   autres. C'est l'issue #104 qui rouvrira le bouton, en donnant au démon de quoi poser la courbe.
 - Une sonde qui cesse de répondre s'affiche **illisible**, et le reste de la fenêtre continue à
   pleine vitesse. Voir [ci-dessous](#une-sonde-muette-nemporte-pas-le-démon).
+- Un **canal de ventilation** muet s'affiche illisible lui aussi — à sa place dans la liste, sa
+  poignée et son « auto » inertes —, là où sa ligne **disparaissait** : une ligne absente laisse
+  croire que le canal n'existe pas, donc qu'il n'y a rien à régler ni rien à réparer (#100).
+  ⚠️ Encore faut-il qu'il ait répondu **une fois depuis l'ouverture de la fenêtre** : une ligne
+  `unreadable` ne dit pas la nature de son sujet, et la fenêtre reconnaît un canal à l'avoir vu en
+  `chan`. Un Kraken déjà en rade au lancement manque donc à l'appel jusqu'à sa première réponse.
 - Une LED peinte à la main (`paint`) **ne survit pas à un redémarrage** : `eclairage.conf` garde
   une couleur par cible, pas une par LED (#21). La cible reprend sa couleur unie au démarrage.
   **Une zone, si** — c'est le moyen de rendre une peinture durable : sélectionner les LED, les
