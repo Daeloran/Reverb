@@ -39,6 +39,7 @@ use reverb_gui::reglages::{
 use reverb_gui::sondes::{
     Historique, ModelesNvme, Releve, SondeRetenue, modeles_nvme, sondes_retenues,
 };
+use reverb_gui::telemetrie::{LigneCanal, Tri};
 use reverb_gui::{
     AncreEcran, FamilleAnimation, Fenetre, LigneProfil, LigneTemperature, LigneVentilateur,
     LigneZone, PointHalo, PointLed,
@@ -373,6 +374,14 @@ struct Pupitre {
     /// à chaque seconde recrée les curseurs, et un curseur recréé sous les
     /// doigts perd le geste en cours.
     canaux: Rc<VecModel<LigneVentilateur>>,
+    /// Le tri de la télémétrie, qui se souvient des canaux déjà vus (#100).
+    tri: RefCell<Tri>,
+    /// Les lignes de canaux du dernier tour, telles que le tri les a rendues.
+    ///
+    /// C'est d'elles que les poignées tirent leur requête : une commande vers un
+    /// canal en quarantaine ne part pas, et [`LigneCanal::commande`] est le seul
+    /// endroit qui le décide.
+    canaux_lus: RefCell<Vec<LigneCanal>>,
     /// L'origine des temps de la fenêtre. Les poignées raisonnent en durées
     /// depuis elle, ce qui les rend testables sans horloge.
     depart: Instant,
@@ -432,6 +441,8 @@ impl Pupitre {
             zones: RefCell::new(Vec::new()),
             visee: RefCell::new(None),
             canaux: Rc::new(VecModel::default()),
+            tri: RefCell::new(Tri::nouveau()),
+            canaux_lus: RefCell::new(Vec::new()),
             depart: Instant::now(),
             ecran: RefCell::new(EcranChoisi::default()),
             limiteur: RefCell::new(Limiteur::nouveau()),
@@ -456,6 +467,20 @@ impl Pupitre {
             .borrow()
             .get(rang)
             .map(|retenue| retenue.slug.clone())
+    }
+
+    /// La requête qu'une consigne produit pour ce canal, s'il en accepte une.
+    ///
+    /// ⚠️ **`None` quand le canal est en quarantaine** (#100) : on ne tire pas
+    /// une poignée vers un canal qui ne répond pas. `None` aussi quand aucun
+    /// tour de télémétrie ne l'a encore nommé — la liste est alors vide, et il
+    /// n'y a rien à régler.
+    fn commande_du_canal(&self, canal: &str, action: FanAction) -> Option<Request> {
+        self.canaux_lus
+            .borrow()
+            .iter()
+            .find(|ligne| ligne.canal == canal)?
+            .commande(action)
     }
 
     /// La mémoire du profil rappelé s'efface : l'éclairage vient de changer.
@@ -1643,12 +1668,13 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
                 maintenant,
             );
             // Une commande par pas franchi, pas une par image : c'est la
-            // poignée qui le décide, pas la cadence de la souris.
-            if let Some(consigne) = poignee.a_envoyer() {
-                let _ = envoi.send(Request::Fan {
-                    channel: canal.to_string(),
-                    action: FanAction::Pwm(consigne),
-                });
+            // poignée qui le décide, pas la cadence de la souris. Et c'est la
+            // ligne du canal qui décide s'il y a quelqu'un pour la recevoir : un
+            // canal en quarantaine n'émet rien (#100).
+            if let Some(consigne) = poignee.a_envoyer()
+                && let Some(requete) = pupitre.commande_du_canal(&canal, FanAction::Pwm(consigne))
+            {
+                let _ = envoi.send(requete);
             }
         });
     }
@@ -1668,16 +1694,20 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
         let pupitre = pupitre.clone();
         let envoi = ordres;
         fenetre.on_rendre_au_firmware(move |canal| {
+            // ⚠️ **« auto » non plus ne part vers un canal en quarantaine**
+            // (#100), et c'est justement le bouton qu'on irait chercher quand la
+            // ligne ne montre plus rien. La poignée n'est pas libérée pour
+            // autant : rien n'a été demandé, donc rien n'a changé.
+            let Some(requete) = pupitre.commande_du_canal(&canal, FanAction::Auto) else {
+                return;
+            };
             pupitre
                 .poignees
                 .borrow_mut()
                 .entry(canal.to_string())
                 .or_insert_with(Poignee::nouvelle)
                 .liberer();
-            let _ = envoi.send(Request::Fan {
-                channel: canal.to_string(),
-                action: FanAction::Auto,
-            });
+            let _ = envoi.send(requete);
         });
     }
 }
@@ -1965,65 +1995,60 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
 }
 
 fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine]) {
-    let mut canaux = Vec::new();
     let mut temperatures = Vec::new();
-    let mut releves: Vec<(String, Releve)> = Vec::new();
     let maintenant = pupitre.maintenant();
+    // Le tri est du calcul, et il vit dans la bibliothèque : c'est lui qui sait
+    // qu'un `unreadable` dont le sujet est un canal déjà vu est une ligne de
+    // ventilateur, et non un relevé de sonde (#100).
+    let vue = pupitre.tri.borrow_mut().poser(lignes);
     let mut poignees = pupitre.poignees.borrow_mut();
-    for ligne in lignes {
-        match ligne {
-            ResponseLine::Channel {
-                channel,
-                position,
-                rpm,
-                pwm,
-                mode,
-                sait_faire_auto,
-            } => {
-                // La mesure passe par la poignée du canal : c'est elle qui
-                // décide si elle a le droit de déplacer le curseur, ou si une
-                // consigne encore fraîche le tient.
-                let poignee = poignees
-                    .entry(channel.clone())
-                    .or_insert_with(Poignee::nouvelle);
-                poignee.mesurer(pwm.unwrap_or(0), maintenant);
-                canaux.push(LigneVentilateur {
-                    canal: SharedString::from(channel.clone()),
-                    position: SharedString::from(
-                        position.map_or_else(String::new, |position| position.name().to_owned()),
-                    ),
-                    rpm: SharedString::from(
-                        rpm.map_or_else(|| "—".to_owned(), |tours| tours.to_string()),
-                    ),
-                    pwm: i32::from(poignee.affichee()),
-                    // Le texte et la barre lisent la **même** poignée : c'est ce
-                    // qui les garde d'accord pendant qu'on tire, sans attendre
-                    // le tour de télémétrie suivant. Le `pwm` brut ne sert qu'à
-                    // dire si le canal répond (#102).
-                    consigne: SharedString::from(consigne_affichee(poignee, *pwm)),
-                    mode: SharedString::from(mode.clone()),
-                    lisible: rpm.is_some(),
-                    sait_faire_auto: *sait_faire_auto,
-                });
-            }
-            ResponseLine::Temp {
-                sensor,
-                millidegrees,
-            } => releves.push((sensor.clone(), Releve::Valeur(*millidegrees))),
-            ResponseLine::Unreadable { subject, reason } => {
-                // Une sonde débranchée le dit, et sa courbe garde la trace du
-                // trou : figer sa dernière valeur ferait croire qu'on la lit
-                // encore.
-                releves.push((subject.clone(), Releve::Illisible));
-                let _ = reason;
-            }
-            _ => {}
+    let mut canaux = Vec::new();
+    for ligne in &vue.canaux {
+        let poignee = poignees
+            .entry(ligne.canal.clone())
+            .or_insert_with(Poignee::nouvelle);
+        // La mesure passe par la poignée : c'est elle qui décide si elle a le
+        // droit de déplacer le curseur, ou si une consigne encore fraîche le
+        // tient.
+        //
+        // ⚠️ **Elle ne reçoit que ce qui a été mesuré**, et un canal en
+        // quarantaine ne mesure rien (#100). Le 0 que la fenêtre lui donnait
+        // quand la consigne manquait ferait retomber le curseur à zéro à chaque
+        // hoquet du Kraken — ce qui se lit comme un ventilateur qu'on vient
+        // d'arrêter, et c'est le maquillage que le projet refuse partout
+        // ailleurs.
+        if let Some(pwm) = ligne.pwm {
+            poignee.mesurer(pwm, maintenant);
         }
+        canaux.push(LigneVentilateur {
+            canal: SharedString::from(ligne.canal.clone()),
+            position: SharedString::from(
+                ligne
+                    .position
+                    .map_or_else(String::new, |position| position.name().to_owned()),
+            ),
+            rpm: SharedString::from(
+                ligne
+                    .rpm
+                    .map_or_else(|| "—".to_owned(), |tours| tours.to_string()),
+            ),
+            pwm: i32::from(poignee.affichee()),
+            // Le texte et la barre lisent la **même** poignée : c'est ce qui les
+            // garde d'accord pendant qu'on tire, sans attendre le tour de
+            // télémétrie suivant. Le `pwm` ne sert qu'à dire si le canal répond
+            // (#102) — et depuis #100 c'est celui de la ligne triée, donc `None`
+            // pour un canal en quarantaine, qui écrit alors `-- %`.
+            consigne: SharedString::from(consigne_affichee(poignee, ligne.pwm)),
+            mode: SharedString::from(ligne.mode.clone()),
+            lisible: ligne.lisible,
+            sait_faire_auto: ligne.sait_faire_auto,
+        });
     }
+    *pupitre.canaux_lus.borrow_mut() = vue.canaux;
 
     {
         let mut historique = pupitre.historique.borrow_mut();
-        for (sonde, releve) in releves {
+        for (sonde, releve) in vue.sondes {
             historique.noter(&sonde, releve);
         }
         // ⚠️ **Le démon rend ses seize sondes, la fenêtre en montre quatre.**

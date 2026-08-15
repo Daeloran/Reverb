@@ -385,8 +385,9 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     interface.set_ventilateurs(ModelRc::new(VecModel::from(vec![
         // Un canal de chaque espèce : celui qui n'a pas de mode automatique et
         // n'affiche donc pas de bouton « auto », celui qui en a un (#50), et
-        // celui qui ne répond plus — c'est la seule façon de regarder ce qu'un
-        // canal muet écrit à côté de sa barre sans débrancher un Kraken (#102).
+        // celui qui est en quarantaine (#100, #102) — sans cette troisième
+        // ligne, ni le grisé d'un canal muet ni ce qu'il écrit à côté de sa
+        // barre ne se vérifieraient autrement qu'en débranchant un Kraken.
         LigneVentilateur {
             canal: SharedString::from("nzxtsmart2:fan-1"),
             position: SharedString::from("radiateur haut"),
@@ -410,10 +411,18 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
         LigneVentilateur {
             canal: SharedString::from("kraken2023elite:fan-speed"),
             position: SharedString::new(),
+            // Ni régime ni mode : rien n'a été mesuré à ce tour, et la ligne ne
+            // montre donc aucune mesure. Le curseur, lui, **reste où il était**
+            // (#100) — d'où `pwm: 40` et non `0`, qui se lirait comme un
+            // ventilateur qu'on vient d'arrêter.
+            //
+            // Le texte, lui, écrit `-- %` (#102) : le curseur garde une position,
+            // il ne prétend pas que c'est une mesure. Les deux règles se
+            // rencontrent exactement ici.
             rpm: SharedString::from("—"),
-            pwm: 0,
+            pwm: 40,
             consigne: consigne(None),
-            mode: SharedString::from("—"),
+            mode: SharedString::new(),
             lisible: false,
             sait_faire_auto: true,
         },

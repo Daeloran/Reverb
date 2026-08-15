@@ -12,5 +12,6 @@ pub mod client;
 pub mod plan;
 pub mod reglages;
 pub mod sondes;
+pub mod telemetrie;
 
 slint::include_modules!();
