@@ -137,6 +137,23 @@ impl Quarantaine {
         Quarantaine::default()
     }
 
+    /// Oublie tout ce qu'elle sait de cette cible : au prochain tour elle sera
+    /// relevée sans délai, comme une cible jamais vue (issue #98).
+    ///
+    /// ⚠️ **C'est un oubli, pas une échéance avancée.** Une cible libérée puis
+    /// retombée entre à nouveau en quarantaine avec `signaler: true` et repart de
+    /// [`DELAI_INITIAL`] — ce qui fait apparaître dans le journal une panne qui
+    /// revient aussitôt après une réparation. Une simple remise à l'heure de
+    /// l'échéance tairait exactement ce cas-là.
+    ///
+    /// ⚠️ **Oublier n'est pas répondre.** Une cible oubliée n'a rien dit ; elle a
+    /// seulement le droit d'être relue. Qui décide de réparer doit tenir sa propre
+    /// mémoire de « qui a répondu », sans quoi chaque réparation ferait repartir
+    /// son compte de tentatives à zéro et le plafond serait inatteignable.
+    pub fn oublie(&mut self, cible: &str) {
+        self.ecartees.remove(cible);
+    }
+
     /// Un tour de relevé pour cette sonde.
     ///
     /// ⚠️ **`relever` n'est appelée que si la sonde n'est pas en quarantaine.**

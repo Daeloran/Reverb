@@ -16,10 +16,12 @@
 pub mod cadence;
 pub mod ecran;
 pub mod fil_ecran;
+pub mod fil_reparation;
 pub mod peripheriques;
 pub mod persistance;
 pub mod profils;
 pub mod quarantaine;
+pub mod reparation;
 pub mod serveur;
 pub mod telemetrie;
 pub mod zones;

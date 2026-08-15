@@ -10,8 +10,14 @@
 //! vérifié sur SHYNAEL : `USBDEVFS_CLAIMINTERFACE` réussit sans rien détacher.
 //!
 //! Pourquoi pas `libusb` : le projet écrit déjà ses trames hidraw sans
-//! bibliothèque, et la surface nécessaire ici tient en trois `ioctl`. Le prix
+//! bibliothèque, et la surface nécessaire ici tient en quatre `ioctl`. Le prix
 //! est le seul bloc `unsafe` du dépôt, confiné à ce module.
+//!
+//! ⚠️ **Le quatrième `ioctl` ne sert pas à l'image** : `USBDEVFS_RESET`
+//! réinitialise le port du Kraken quand son firmware cesse de répondre en
+//! gardant son lien USB (issue #98). C'est un geste **visible sur la machine** —
+//! le périphérique disparaît du bus puis y revient —, et il vit donc derrière une
+//! décision bornée, jamais dans une boucle.
 //!
 //! ⚠️ **Le paquet de longueur nulle est obligatoire pour l'image, et néfaste
 //! pour l'en-tête.** `1 228 800 = 2400 × 512`, multiple exact de
@@ -22,7 +28,7 @@
 //! Un seul `ioctl` suffit pour les 1,2 Mo : ce noyau ne découpe pas.
 
 // Seule dérogation du dépôt à `unsafe_code`, que le workspace passe en `deny`
-// pour la rendre possible. Elle couvre trois appels à `ioctl`, tous dans ce
+// pour la rendre possible. Elle couvre quatre appels à `ioctl`, tous dans ce
 // fichier, tous sur un descripteur ouvert par la bibliothèque standard, avec des
 // structures dont la disposition est celle de `linux/usbdevice_fs.h`.
 //
@@ -72,6 +78,9 @@ const USBDEVFS_RELEASEINTERFACE: u64 = 0x8004_5510;
 /// `_IOWR('U', 2, struct usbdevfs_bulktransfer)`
 const USBDEVFS_BULK: u64 = 0xc018_5502;
 
+/// `_IO('U', 20)` — aucune direction, aucun argument : `0x55 << 8 | 20`.
+const USBDEVFS_RESET: u64 = 0x0000_5514;
+
 /// `struct usbdevfs_bulktransfer` de `linux/usbdevice_fs.h`.
 #[repr(C)]
 struct BulkTransfer {
@@ -91,6 +100,11 @@ unsafe extern "C" {
 pub struct Screen {
     file: File,
     path: PathBuf,
+    /// La série du périphérique effectivement ouvert, quand il en expose une.
+    ///
+    /// Gardée pour que le reset de #98 vise **ce** périphérique et pas un autre :
+    /// le nœud, lui, change de numéro dès que le bus renumérote.
+    serie: Option<String>,
 }
 
 impl Screen {
@@ -102,8 +116,14 @@ impl Screen {
     /// [`io::ErrorKind::PermissionDenied`] si la règle udev de `packaging/`
     /// n'est pas installée.
     pub fn open() -> io::Result<Self> {
-        let path = find_in(Path::new("/sys/bus/usb/devices"), Path::new("/dev/bus/usb"))?;
-        Self::open_at(&path)
+        let noeud = resoudre_in(
+            Path::new("/sys/bus/usb/devices"),
+            Path::new("/dev/bus/usb"),
+            None,
+        )?;
+        let mut screen = Self::open_at(&noeud.chemin)?;
+        screen.serie = noeud.serie;
+        Ok(screen)
     }
 
     /// Ouvre un nœud `/dev/bus/usb/...` donné et réclame son interface.
@@ -112,6 +132,10 @@ impl Screen {
         let screen = Screen {
             file,
             path: path.to_path_buf(),
+            // Un nœud ouvert par son chemin n'a été identifié par rien : c'est
+            // l'appelant qui a choisi, on ne lui prête pas une série qu'on n'a
+            // pas lue.
+            serie: None,
         };
         screen.claim()?;
         Ok(screen)
@@ -120,6 +144,15 @@ impl Screen {
     /// Chemin du nœud ouvert, pour les messages d'erreur.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// La série du périphérique ouvert, si sysfs en donne une.
+    ///
+    /// C'est elle qu'il faut passer à [`reset`] pour réinitialiser **ce**
+    /// périphérique-là : après un reset, le nœud a changé de numéro et le chemin
+    /// gardé ici ne désigne plus rien de sûr.
+    pub fn serie(&self) -> Option<&str> {
+        self.serie.as_deref()
     }
 
     fn claim(&self) -> io::Result<()> {
@@ -210,11 +243,41 @@ impl Drop for Screen {
     }
 }
 
+/// Un `1e71:300c` branché : son nœud usbfs, et la série qu'il annonce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Noeud {
+    /// `/dev/bus/usb/BBB/DDD`. ⚠️ **Il change** — `devnum` est réattribué à
+    /// chaque énumération, donc à chaque reset.
+    pub chemin: PathBuf,
+    /// Ce que `sysfs` lit dans le descripteur du périphérique. `None` si celui-ci
+    /// n'expose pas de `serial`.
+    pub serie: Option<String>,
+}
+
 /// Retrouve le nœud `/dev/bus/usb/BBB/DDD` du Kraken.
 ///
 /// Les deux racines sont des paramètres pour que la fonction se teste contre
 /// une fausse arborescence, sans matériel — même approche que `hwmon::discover_in`.
 pub fn find_in(sys_bus: &Path, dev_bus: &Path) -> io::Result<PathBuf> {
+    Ok(resoudre_in(sys_bus, dev_bus, None)?.chemin)
+}
+
+/// Retrouve le Kraken par **VID:PID et, si on en connaît une, par sa série**.
+///
+/// ⚠️ **Un nœud usbfs n'est pas une identité, c'est une adresse du moment.**
+/// `busnum` et `devnum` sont réattribués à chaque énumération : un
+/// `USBDEVFS_RESET` fait donc changer le chemin du périphérique qu'il vient de
+/// réinitialiser. Garder le chemin d'avant pour réessayer, c'est viser une place
+/// vide — ou, pire, celle qu'un autre périphérique occupe désormais. D'où une
+/// résolution qui repart de sysfs à chaque fois, et une série qui dit **lequel**
+/// on cherche (issue #98). C'est la règle des `hidraw` du CLAUDE.md, appliquée à
+/// l'USB : jamais de chemin conservé, jamais de chemin codé en dur.
+///
+/// ⚠️ **Une série demandée est exigée, pas préférée.** Un `1e71:300c` qui porte
+/// une autre série est un autre périphérique, et lui envoyer un reset serait le
+/// débrancher sans le vouloir. Mieux vaut un `NotFound` qui nomme la série
+/// cherchée.
+pub fn resoudre_in(sys_bus: &Path, dev_bus: &Path, serie: Option<&str>) -> io::Result<Noeud> {
     for entree in fs::read_dir(sys_bus)? {
         let device = entree?.path();
         if lire(&device, "idVendor").as_deref() != Some(VENDOR) {
@@ -223,19 +286,82 @@ pub fn find_in(sys_bus: &Path, dev_bus: &Path) -> io::Result<PathBuf> {
         if lire(&device, "idProduct").as_deref() != Some(PRODUCT) {
             continue;
         }
+        let trouvee = lire(&device, "serial");
+        if let Some(voulue) = serie
+            && trouvee.as_deref() != Some(voulue)
+        {
+            continue;
+        }
         let (Some(bus), Some(num)) = (lire(&device, "busnum"), lire(&device, "devnum")) else {
             continue;
         };
         let (Ok(bus), Ok(num)) = (bus.parse::<u32>(), num.parse::<u32>()) else {
             continue;
         };
-        return Ok(dev_bus.join(format!("{bus:03}")).join(format!("{num:03}")));
+        return Ok(Noeud {
+            chemin: dev_bus.join(format!("{bus:03}")).join(format!("{num:03}")),
+            serie: trouvee,
+        });
     }
 
     Err(io::Error::new(
         io::ErrorKind::NotFound,
-        format!("aucun Kraken {VENDOR}:{PRODUCT} branché"),
+        match serie {
+            Some(voulue) => {
+                format!("aucun Kraken {VENDOR}:{PRODUCT} de série « {voulue} » branché")
+            }
+            None => format!("aucun Kraken {VENDOR}:{PRODUCT} branché"),
+        },
     ))
+}
+
+/// Réinitialise le port du Kraken — `USBDEVFS_RESET` (issue #98).
+///
+/// Rend le chemin du nœud qui a reçu le geste, pour le journal : c'est la seule
+/// trace qu'un opérateur aura de *ce qui* a été secoué.
+///
+/// ⚠️ **`Ok` ne veut pas dire « guéri ».** L'`ioctl` réussit dès que le noyau a
+/// réinitialisé le port ; il ne dit rien de ce que le firmware fait ensuite, et
+/// l'incident de #98 est précisément celui d'un périphérique **énuméré qui ne
+/// répond plus**. C'est la source qui répond à nouveau qui prouve la guérison,
+/// jamais cette valeur de retour.
+///
+/// ⚠️ **Toute poignée déjà ouverte sur ce périphérique devient invalide** — celle
+/// que [`Screen`] tient comprise. L'appelant doit la lâcher et la rouvrir.
+pub fn reset(serie: Option<&str>) -> io::Result<PathBuf> {
+    reset_in(
+        Path::new("/sys/bus/usb/devices"),
+        Path::new("/dev/bus/usb"),
+        serie,
+    )
+}
+
+/// [`reset`], avec ses racines en paramètre.
+///
+/// ⚠️ **Aucun test automatisé n'appelle cette fonction**, et c'est délibéré : elle
+/// ferait disparaître puis réapparaître un périphérique de la machine qui la
+/// lance. Ce qui se teste est la **résolution** — juste au-dessus — et la
+/// **décision** de réinitialiser, qui vit dans `reverb-daemon::reparation`.
+pub fn reset_in(sys_bus: &Path, dev_bus: &Path, serie: Option<&str>) -> io::Result<PathBuf> {
+    let noeud = resoudre_in(sys_bus, dev_bus, serie)?;
+    // En lecture-écriture : le noyau refuse un reset sur un descripteur ouvert
+    // en lecture seule, un reset n'étant pas une consultation.
+    let fichier = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&noeud.chemin)?;
+
+    let code = unsafe {
+        ioctl(
+            fichier.as_raw_fd(),
+            USBDEVFS_RESET,
+            std::ptr::null_mut::<c_void>(),
+        )
+    };
+    if code < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(noeud.chemin)
 }
 
 fn lire(device: &Path, attribut: &str) -> Option<String> {
@@ -286,6 +412,146 @@ mod tests {
             io::ErrorKind::NotFound,
             "un 1e71 qui n'est pas un 300c ne doit pas être pris pour l'écran"
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // -----------------------------------------------------------------------
+    // Résolution par VID:PID **et série** (issue #98)
+    // -----------------------------------------------------------------------
+    //
+    // ⚠️ **Tests de logique, écrits avec le code.** Le critère d'acceptation de
+    // #98 — « le périphérique à réinitialiser est résolu par VID:PID + série,
+    // jamais par un chemin codé en dur » — n'avait pas de test d'intention :
+    // l'issue ne disait pas si `find_in` devait être étendue ou doublée, et un
+    // test d'intention ne pouvait pas trancher ce qu'elle ne posait pas. La
+    // partie que #98 fige à l'aveugle est la **décision**
+    // (`spec_reparation_source.rs`), qui garantit qu'aucun chemin ne traverse la
+    // couture. Le **geste**, lui, se vérifie ici.
+    //
+    // ⚠️ Aucun de ces tests ne réinitialise quoi que ce soit : ils lisent une
+    // fausse arborescence sysfs et n'ouvrent aucun nœud.
+
+    /// Pose un `1e71:300c` dans une fausse arborescence sysfs.
+    fn poser_kraken(base: &Path, dossier: &str, serie: &str, devnum: u32) {
+        let device = base.join(dossier);
+        fs::create_dir_all(&device).unwrap();
+        fs::write(device.join("idVendor"), "1e71\n").unwrap();
+        fs::write(device.join("idProduct"), "300c\n").unwrap();
+        fs::write(device.join("busnum"), "1\n").unwrap();
+        fs::write(device.join("devnum"), format!("{devnum}\n")).unwrap();
+        fs::write(device.join("serial"), format!("{serie}\n")).unwrap();
+    }
+
+    #[test]
+    fn la_serie_designe_le_kraken_quand_deux_repondent_aux_memes_identifiants() {
+        // Deux `1e71:300c` sur la même machine ne sont pas un cas d'école : le
+        // dépôt en compte déjà deux pour `1e71:2012`, physiquement identiques et
+        // que **seule** leur série distingue (CLAUDE.md). Sans elle, un reset
+        // part sur le premier que `read_dir` rend — c'est-à-dire au hasard, et
+        // il débranche un périphérique qui allait bien.
+        let base = std::env::temp_dir().join("reverb-usbfs-serie");
+        let _ = fs::remove_dir_all(&base);
+        poser_kraken(&base, "1-9.1", "BB8C90820E900630", 7);
+        poser_kraken(&base, "1-4.2", "AA0000000000AAAA", 12);
+
+        let vise = resoudre_in(&base, Path::new("/dev/bus/usb"), Some("AA0000000000AAAA")).unwrap();
+        assert_eq!(
+            vise.chemin,
+            Path::new("/dev/bus/usb/001/012"),
+            "la série demandée doit désigner son propre nœud, pas le premier 300c venu"
+        );
+        assert_eq!(vise.serie.as_deref(), Some("AA0000000000AAAA"));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn une_serie_absente_du_bus_est_refusee_plutot_que_remplacee() {
+        // La faute symétrique, et la plus dangereuse : se rabattre sur « l'autre
+        // 300c, faute de mieux ». Un `USBDEVFS_RESET` fait disparaître le
+        // périphérique du bus ; le poser sur celui qu'on n'a pas demandé, c'est
+        // casser ce qui marchait pour réparer ce qui n'est plus là.
+        let base = std::env::temp_dir().join("reverb-usbfs-serie-absente");
+        let _ = fs::remove_dir_all(&base);
+        poser_kraken(&base, "1-9.1", "BB8C90820E900630", 7);
+
+        let erreur = resoudre_in(
+            &base,
+            Path::new("/dev/bus/usb"),
+            Some("SERIE-QUI-N-EXISTE-PAS"),
+        )
+        .unwrap_err();
+        assert_eq!(erreur.kind(), io::ErrorKind::NotFound);
+        assert!(
+            erreur.to_string().contains("SERIE-QUI-N-EXISTE-PAS"),
+            "le refus doit nommer la série cherchée — c'est le seul diagnostic \
+             que l'opérateur reçoit ; trouvé « {erreur} »"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn apres_un_reset_le_numero_du_noeud_change_mais_la_serie_non() {
+        // ⚠️ **Le corollaire USB du test n° 12 de `spec_reparation_source.rs`.**
+        // Là-bas, ce sont les répertoires `hwmonN` qui échangent leurs numéros ;
+        // ici, c'est `devnum` que le noyau réattribue en réénumérant. Le même
+        // danger dans les deux cas : garder l'adresse d'avant fait viser un
+        // **autre** périphérique, et rien ne le signale.
+        //
+        // Ce test est la raison pour laquelle `reset_in` re-résout depuis sysfs
+        // au lieu de réutiliser le chemin que `Screen` avait gardé.
+        let base = std::env::temp_dir().join("reverb-usbfs-renumerote");
+        let _ = fs::remove_dir_all(&base);
+        const SERIE: &str = "BB8C90820E900630";
+        poser_kraken(&base, "1-9.1", SERIE, 7);
+
+        let avant = resoudre_in(&base, Path::new("/dev/bus/usb"), Some(SERIE)).unwrap();
+        assert_eq!(avant.chemin, Path::new("/dev/bus/usb/001/007"));
+
+        // Le reset a eu lieu : le périphérique a quitté le bus puis y est revenu,
+        // et le noyau lui a donné le numéro libre suivant. Sa série, elle, est
+        // dans son descripteur et ne bouge pas.
+        fs::remove_dir_all(base.join("1-9.1")).unwrap();
+        poser_kraken(&base, "1-9.1", SERIE, 8);
+
+        let apres = resoudre_in(&base, Path::new("/dev/bus/usb"), Some(SERIE)).unwrap();
+        assert_eq!(
+            apres.chemin,
+            Path::new("/dev/bus/usb/001/008"),
+            "le nœud a changé de numéro : le retrouver par sa série est le seul \
+             moyen de viser encore le bon périphérique"
+        );
+        assert_ne!(
+            apres.chemin, avant.chemin,
+            "sans changement de numéro, ce test ne dit rien du danger qu'il décrit"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn un_kraken_sans_serie_reste_trouvable_sans_serie_demandee() {
+        // Tous les périphériques n'exposent pas de `serial`. Celui de SHYNAEL le
+        // fait — relevé le 2026-08-15, `BB8C90820E900630` — mais exiger une série
+        // qu'un contrôleur n'annonce pas rendrait la dalle introuvable là où elle
+        // l'était hier. Sans série demandée, la recherche reste celle d'avant.
+        let base = std::env::temp_dir().join("reverb-usbfs-sans-serie");
+        let _ = fs::remove_dir_all(&base);
+        let device = base.join("1-9.1");
+        fs::create_dir_all(&device).unwrap();
+        fs::write(device.join("idVendor"), "1e71\n").unwrap();
+        fs::write(device.join("idProduct"), "300c\n").unwrap();
+        fs::write(device.join("busnum"), "1\n").unwrap();
+        fs::write(device.join("devnum"), "7\n").unwrap();
+
+        let noeud = resoudre_in(&base, Path::new("/dev/bus/usb"), None).unwrap();
+        assert_eq!(noeud.chemin, Path::new("/dev/bus/usb/001/007"));
+        assert_eq!(
+            noeud.serie, None,
+            "une série absente se dit absente, elle ne s'invente pas"
+        );
+
         let _ = fs::remove_dir_all(&base);
     }
 

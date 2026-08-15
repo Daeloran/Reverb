@@ -16,9 +16,10 @@ repository = "https://github.com/Daeloran/Reverb"
 # lève pas localement.
 #
 # La dérogation est déclarée en tête de chacun de ces deux modules et n'y
-# couvre que quatre appels au total, tous à `ioctl`, tous sur un descripteur
-# ouvert par `std`. Partout ailleurs, un `unsafe` reste une erreur de
-# compilation. Voir l'ADR-004 pour la condition de révision.
+# couvre que cinq appels au total, tous à `ioctl`, tous sur un descripteur
+# ouvert par `std` — le cinquième étant le `USBDEVFS_RESET` de l'issue #98.
+# Partout ailleurs, un `unsafe` reste une erreur de compilation. Voir l'ADR-004
+# pour la condition de révision.
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

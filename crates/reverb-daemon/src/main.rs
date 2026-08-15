@@ -4,6 +4,7 @@
 //! principal détient seul les périphériques**. Aucun verrou sur le matériel :
 //! ce qui n'est pas partagé ne peut pas entrer en collision.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, channel};
@@ -13,10 +14,11 @@ use std::time::{Duration, Instant};
 use reverb_anim::{Animation, Geometrie, Orientation, Reglages, Sens};
 use reverb_daemon::cadence::{Cadence, Tick};
 use reverb_daemon::ecran;
-use reverb_daemon::peripheriques::{Consigne, Peripheriques};
+use reverb_daemon::peripheriques::{Consigne, Peripheriques, SOURCE_DU_KRAKEN};
 use reverb_daemon::persistance::{self, Eclairage};
 use reverb_daemon::profils::{self, Ecriture, Profil};
 use reverb_daemon::quarantaine::{Quarantaine, Releve};
+use reverb_daemon::reparation::{Constat, EtatSource, TENTATIVES_MAXIMALES};
 use reverb_daemon::serveur::{self, Ordre};
 use reverb_daemon::telemetrie;
 use reverb_daemon::zones::{self, Rendu, Tampon, Zones};
@@ -301,6 +303,22 @@ struct Etat {
     echeance_ecran: Option<Instant>,
     /// Les sondes écartées parce qu'elles ne répondent plus (#68).
     quarantaine: Quarantaine,
+    /// Les cibles — canaux et sondes — dont la **dernière lecture** a échoué.
+    ///
+    /// ⚠️ **Ce n'est pas la quarantaine**, et les confondre coûterait le plafond
+    /// de #98. Une réparation réussie **oublie** la quarantaine d'une cible pour
+    /// qu'elle soit relue sans délai ; la cible n'a pas répondu pour autant. Si
+    /// « muette » se lisait dans la quarantaine, chaque reset ferait paraître la
+    /// source revenue, le compte de tentatives repartirait de zéro, et le démon
+    /// secouerait le Kraken jusqu'au redémarrage — la boucle exacte que l'issue
+    /// interdit, atteinte par le chemin qu'elle ne nomme pas.
+    ///
+    /// Seule une lecture qui **réussit** en retire une cible.
+    muettes: HashSet<String>,
+    /// Quand soumettre le prochain état des sources au fil de réparation (#98).
+    prochaine_soumission: Duration,
+    /// Ce qu'il reste à faire après un reset qui a réussi, et à partir de quand.
+    reprise: Option<Reprise>,
     /// La dernière valeur de la sonde que `thermique` suit, en degrés (#75).
     ///
     /// `None` : aucune animation ne suit de sonde, ou celle-ci est écartée. Le
@@ -354,9 +372,27 @@ impl Etat {
             diffusion: Diffusion::Rien,
             echeance_ecran: None,
             quarantaine: Quarantaine::nouvelle(),
+            muettes: HashSet::new(),
+            prochaine_soumission: Duration::ZERO,
+            reprise: None,
             mesure: None,
             prochaine_mesure: Duration::ZERO,
             naissance: Instant::now(),
+        }
+    }
+
+    /// Note ce qu'une lecture vient de dire d'une cible (#98).
+    ///
+    /// C'est la seule mémoire de « qui a répondu » du démon, et c'est elle qui
+    /// décide de l'effondrement d'une source. Elle est alimentée par **toutes**
+    /// les lectures — celles du `status`, celle de la sonde que `thermique` suit,
+    /// celles des champs d'une composition — parce qu'une source ne se déclare
+    /// effondrée que si tout ce qu'elle porte s'est tu.
+    fn noter(&mut self, cible: &str, a_repondu: bool) {
+        if a_repondu {
+            self.muettes.remove(cible);
+        } else if !self.muettes.contains(cible) {
+            self.muettes.insert(cible.to_owned());
         }
     }
 
@@ -551,6 +587,10 @@ impl Etat {
             Releve::Valeur(millidegres) => Some(millidegres as f32 / 1000.0),
             Releve::Muette { .. } => None,
         };
+        // Cette lecture-ci compte comme les autres : une machine qui n'ouvre
+        // jamais de fenêtre mais anime `thermique` est un cas parfaitement
+        // ordinaire, et son démon doit voir la source tomber (#98).
+        self.noter(&slug, self.mesure.is_some());
     }
 }
 
@@ -559,6 +599,44 @@ impl Etat {
 /// Une seconde : c'est la cadence de la télémétrie, et une température de
 /// liquide ne bouge pas plus vite.
 const INTERVALLE_MESURE: Duration = Duration::from_secs(1);
+
+/// Entre deux dépôts d'état auprès du fil de réparation (#98).
+///
+/// Une seconde, la cadence des `status` que la fenêtre demande : déposer à celle
+/// de la boucle de rendu — jusqu'à trente fois par seconde — n'apprendrait rien
+/// de plus, l'état ne changeant qu'au rythme des lectures.
+const INTERVALLE_REPARATION: Duration = Duration::from_secs(1);
+
+/// Ce qu'on laisse au périphérique pour revenir avant de redécouvrir ce qu'il
+/// porte (#98).
+///
+/// ⚠️ **Cette durée n'a pas été mesurée**, et rien dans le dépôt ne permet de la
+/// mesurer sans réinitialiser un vrai Kraken. Ce qu'on sait : un
+/// `USBDEVFS_RESET` fait quitter le bus au périphérique, le noyau le réénumère,
+/// puis `nzxt-kraken3` se relie et réenregistre son `hwmon`. Redécouvrir trop tôt
+/// ne trouverait rien — et une source sans cible n'est **pas** une source
+/// effondrée (voir `reparation::effondree`), ce qui remettrait le compte de
+/// tentatives à zéro et ferait boucler la réparation.
+///
+/// Cinq secondes sont donc une marge, pas une mesure. Elle ne coûte rien : la
+/// prochaine tentative n'est de toute façon due que
+/// [`reparation::DELAI_ENTRE_TENTATIVES`] plus tard.
+const DELAI_DE_REENUMERATION: Duration = Duration::from_secs(5);
+
+/// Ce qu'il reste à faire une fois qu'un reset a réussi, et à partir de quand.
+struct Reprise {
+    /// La source réinitialisée, par son **nom** — les numéros `hwmonN` ont pu
+    /// changer entre-temps, c'est précisément pourquoi on redécouvre.
+    source: String,
+    /// Quand le périphérique aura eu le temps de revenir.
+    quand: Instant,
+    /// La poignée usbfs de la dalle a-t-elle été lâchée, et donc à rouvrir ?
+    ///
+    /// ⚠️ Distinct de « la source est celle du Kraken » : sur une machine où
+    /// aucune dalle n'a jamais été ouverte, il n'y a rien à rouvrir, et tenter le
+    /// ferait apparaître un écran que personne n'avait.
+    rouvrir_l_ecran: bool,
+}
 
 fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat: Etat) {
     let mut cadence = Cadence::new(IMAGES_PAR_SECONDE);
@@ -582,6 +660,11 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat:
         // (#75). Placée avant le calcul de l'image, et hors de `tampon` qui est
         // appelée trente fois par seconde.
         etat.rafraichir_la_mesure();
+
+        // Une source entièrement muette a droit à un reset USB, borné (#98). Ce
+        // tour ne fait que décider et ramasser : le geste vit sur son propre fil,
+        // comme la dalle depuis #83.
+        tour_de_reparation(&mut etat, peripheriques);
 
         let anime = etat.animation.is_some() || etat.zone_animee();
         if anime != animait {
@@ -771,6 +854,208 @@ fn encaisser_les_verdicts(etat: &mut Etat, peripheriques: &Peripheriques) -> boo
     abandonne
 }
 
+// ---------------------------------------------------------------------------
+// La réparation d'une source muette (issue #98)
+// ---------------------------------------------------------------------------
+
+/// Les cibles connues d'une source `hwmon` — ses canaux et ses sondes.
+///
+/// ⚠️ **Toutes celles qui ont été découvertes**, et non seulement celles qu'on a
+/// relevées. C'est ce qui donne son sens au « une seule cible muette ne déclenche
+/// rien » : une source dont on n'a lu qu'une cible sur trois n'a pas prouvé son
+/// effondrement, et un `USBDEVFS_RESET` sur un contrôleur qui répond encore casse
+/// ce qui marchait.
+///
+/// Conséquence assumée : le démon ne constate l'effondrement que lorsqu'il relève
+/// **tout**, c'est-à-dire en servant un `status`. La fenêtre en demande un par
+/// seconde, et c'est le régime sous lequel les deux incidents de l'issue ont été
+/// observés.
+fn cibles_de(etat: &Etat, peripheriques: &Peripheriques, source: &str) -> Vec<String> {
+    let mut cibles: Vec<String> = peripheriques
+        .canaux()
+        .iter()
+        .filter(|canal| canal.source == source)
+        .map(|canal| canal.name.clone())
+        .collect();
+    cibles.extend(
+        etat.sondes
+            .iter()
+            .filter(|sonde| sonde.origine == source)
+            .map(|sonde| sonde.slug.clone()),
+    );
+    cibles
+}
+
+/// Un tour de réparation : ce qu'on soumet, et ce qu'on encaisse (#98).
+///
+/// ⚠️ **Rien ici ne réinitialise quoi que ce soit.** Le geste vit sur le fil de
+/// [`reverb_daemon::fil_reparation`], qui détient le réparateur seul ; ce fil-ci
+/// dépose un état, ramasse un verdict, et ne bloque sur ni l'un ni l'autre. C'est
+/// le motif de #83, appliqué au quatrième chemin qui portait le même défaut.
+fn tour_de_reparation(etat: &mut Etat, peripheriques: &mut Peripheriques) {
+    let maintenant = etat.naissance.elapsed();
+
+    if maintenant >= etat.prochaine_soumission {
+        etat.prochaine_soumission = maintenant + INTERVALLE_REPARATION;
+        for source in peripheriques.sources_reparables().to_vec() {
+            let cibles = cibles_de(etat, peripheriques, &source);
+            // ⚠️ **Une source dont on ne connaît aucune cible n'est pas soumise du
+            // tout**, et ce n'est pas la même chose que la soumettre à vide.
+            //
+            // Un reset fait quitter le bus au périphérique : entre la
+            // redécouverte et son retour, il n'a plus ni canal ni sonde. Soumis à
+            // vide, il rendrait `Rien` — « pas de symptôme » —, ce qui **clôt
+            // l'épisode** et remet le compte de tentatives à zéro. Un contrôleur
+            // qui met plus longtemps que prévu à revenir serait alors resecoué au
+            // premier essai, indéfiniment : la boucle exacte que #98 interdit,
+            // atteinte par le chemin qu'elle ne nomme pas.
+            //
+            // En ne soumettant rien, l'épisode est **gelé** : il reprend au rang
+            // suivant si la source revient encore muette, et se clôt normalement
+            // dès qu'une de ses cibles répond.
+            if cibles.is_empty() {
+                continue;
+            }
+            let muettes = cibles
+                .iter()
+                .filter(|cible| etat.muettes.contains(*cible))
+                .cloned()
+                .collect();
+            peripheriques.soumettre_reparation(
+                EtatSource {
+                    source,
+                    cibles,
+                    muettes,
+                },
+                maintenant,
+            );
+        }
+    }
+
+    for (source, constat) in peripheriques.constats_reparation() {
+        match constat {
+            Constat::Reussie { tentative } => {
+                eprintln!(
+                    "réparation de « {source} » : reset n° {tentative} passé — redécouverte dans \
+                     {} s.\n→ « passé » qualifie l'ioctl, pas la guérison : c'est la source qui \
+                     répond à nouveau qui le dira",
+                    DELAI_DE_REENUMERATION.as_secs()
+                );
+                let rouvrir_l_ecran = source == SOURCE_DU_KRAKEN && peripheriques.lacher_ecran();
+                etat.reprise = Some(Reprise {
+                    source,
+                    quand: Instant::now() + DELAI_DE_REENUMERATION,
+                    rouvrir_l_ecran,
+                });
+            }
+            Constat::Echouee { tentative, erreur } => {
+                eprintln!(
+                    "attention : réparation de « {source} » : reset n° {tentative} refusé : \
+                     {erreur} — rien n'a changé"
+                );
+            }
+            Constat::Abandon => {
+                eprintln!(
+                    "{TENTATIVES_MAXIMALES} resets USB sans retour de « {source} » : le démon \
+                     renonce à la réparer.\n→ ses cibles restent en quarantaine, et sur les \
+                     incidents relevés seul un redémarrage l'a ramenée"
+                );
+            }
+            // Le fil ne remonte pas les tours sans geste — ces bras sont là pour
+            // que l'ajout d'un verdict ne passe pas inaperçu.
+            Constat::Rien | Constat::Patiente | Constat::Repos => {}
+        }
+    }
+
+    let due = etat
+        .reprise
+        .as_ref()
+        .is_some_and(|reprise| Instant::now() >= reprise.quand);
+    if due && let Some(reprise) = etat.reprise.take() {
+        reprendre_apres_reset(etat, peripheriques, &reprise);
+    }
+}
+
+/// Redécouvre ce qu'une source porte, une fois qu'elle a eu le temps de revenir.
+///
+/// ⚠️ **Les noms survivent, les chemins non.** Un `hwmon` qui disparaît puis
+/// revient reçoit le numéro libre — ce que le CLAUDE.md relève déjà des `hidraw`,
+/// « constaté, pas supposé », et qu'un reset provoque à volonté. Garder les
+/// anciennes poignées, c'est lire le fichier d'un **autre** périphérique et
+/// l'afficher sous le nom du premier : une température plausible sous le mauvais
+/// nom, et rien pour le signaler.
+fn reprendre_apres_reset(etat: &mut Etat, peripheriques: &mut Peripheriques, reprise: &Reprise) {
+    let source = &reprise.source;
+
+    match reverb_hw::hwmon::sondes() {
+        Ok(sondes) => {
+            eprintln!(
+                "réparation de « {source} » : {} sonde(s) redécouverte(s)",
+                sondes.len()
+            );
+            etat.sondes = sondes;
+        }
+        // Les anciennes poignées sont conservées faute de mieux : elles sont
+        // peut-être fausses, mais les jeter ferait disparaître toutes les sondes
+        // de la machine pour un incident qui n'en concerne qu'une source.
+        Err(erreur) => eprintln!(
+            "attention : redécouverte des sondes impossible après le reset de « {source} » : \
+             {erreur}"
+        ),
+    }
+    match peripheriques.redecouvrir_canaux() {
+        Ok(compte) => {
+            eprintln!("réparation de « {source} » : {compte} canal/canaux redécouvert(s)")
+        }
+        Err(erreur) => eprintln!(
+            "attention : redécouverte des canaux impossible après le reset de « {source} » : \
+             {erreur}"
+        ),
+    }
+
+    // ⚠️ **Les quarantaines de cette source sont libérées, cible par cible.**
+    // Sans cela, la réparation ne servirait à rien pendant cinq minutes : les
+    // cibles porteraient encore le délai accumulé avant la panne, et le démon
+    // attendrait tout ce temps avant de découvrir que le contrôleur est revenu.
+    //
+    // ⚠️ **`etat.muettes` n'est pas touché.** Oublier une quarantaine autorise une
+    // relecture ; elle ne fait pas répondre la cible. Les vider ici ferait
+    // paraître la source revenue au tour suivant, remettrait le compte de
+    // tentatives à zéro, et le plafond serait inatteignable.
+    for cible in cibles_de(etat, peripheriques, source) {
+        etat.quarantaine.oublie(&cible);
+    }
+
+    if reprise.rouvrir_l_ecran {
+        match peripheriques.rouvrir_ecran() {
+            Ok(()) => {
+                eprintln!("réparation de « {source} » : poignée usbfs de la dalle rouverte");
+                peripheriques.luminosite_ecran(etat.ecran.luminosite);
+                if let Err(message) = etat.preparer_ecran() {
+                    eprintln!("attention : écran non rétabli : {message}");
+                    etat.ecran.affichage = ecran::Affichage::Rien;
+                }
+            }
+            // Dit une fois, puis plus rien : réessayer en boucle d'ouvrir un nœud
+            // qui n'existe pas est exactement l'insistance que #70 a bornée. Une
+            // commande `screen` ne suffira pas à la rouvrir — il faut redémarrer
+            // le service —, et c'est ce que cette ligne doit permettre de
+            // comprendre.
+            Err(message) => {
+                eprintln!(
+                    "attention : dalle non rouverte après le reset : {message}\n→ elle reste au \
+                     firmware jusqu'au prochain démarrage de reverbd"
+                );
+                // L'horloge d'émission s'arrête aussi, comme après l'abandon de
+                // #70 : composer une image de 1,2 Mo toutes les deux secondes
+                // pour n'en déposer nulle part serait du travail pur perte.
+                // L'état persisté, lui, n'est pas touché — un redémarrage retente.
+                etat.echeance_ecran = None;
+            }
+        }
+    }
+}
+
 /// Ce que les champs de la composition montrent à cet instant (#80).
 ///
 /// Vide quand la dalle n'en porte pas : aucune sonde n'est alors lue.
@@ -802,18 +1087,28 @@ fn champs_du_moment(etat: &mut Etat) -> Vec<(Ancre, ecran::ChampRendu)> {
             let rendu = match source {
                 Source::Texte(texte) => ecran::ChampRendu::Texte(texte),
                 Source::Temperature { sonde, libelle } => {
-                    let valeur = match etat.sondes.iter().find(|connue| connue.slug == sonde) {
-                        Some(connue) => {
+                    // ⚠️ **Deux `None` distincts, et c'est tout l'objet de ce
+                    // `Option<Option<_>>`** : la sonde inconnue, qui n'a pas été
+                    // relevée du tout, et la sonde relevée qui s'est tue. Les
+                    // confondre inscrirait dans les muettes de #98 une cible dont
+                    // on n'a rien demandé, et ferait paraître effondrée une source
+                    // que personne n'a lue.
+                    let releve = match etat.sondes.iter().find(|connue| connue.slug == sonde) {
+                        Some(connue) => Some(
                             match etat
                                 .quarantaine
                                 .tour(&sonde, maintenant, || connue.lire().ok())
                             {
                                 Releve::Valeur(millidegres) => Some(millidegres as f32 / 1000.0),
                                 Releve::Muette { .. } => None,
-                            }
-                        }
+                            },
+                        ),
                         None => None,
                     };
+                    if let Some(valeur) = releve {
+                        etat.noter(&sonde, valeur.is_some());
+                    }
+                    let valeur = releve.flatten();
                     ecran::ChampRendu::Temperature { libelle, valeur }
                 }
             };
@@ -970,6 +1265,20 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
                 &mut etat.quarantaine,
                 maintenant,
             );
+            // ⚠️ **C'est ici que l'effondrement se constate** (#98). Un `status`
+            // est le seul moment où le démon relève **tout** ce que la machine
+            // porte, et « toutes les cibles d'une source se taisent » ne peut se
+            // savoir que de ce qui a été relevé. La fenêtre en demande un par
+            // seconde : c'est le régime sous lequel les deux incidents de l'issue
+            // ont été observés.
+            for ligne in &lignes {
+                match ligne {
+                    ResponseLine::Channel { channel, .. } => etat.noter(channel, true),
+                    ResponseLine::Temp { sensor, .. } => etat.noter(sensor, true),
+                    ResponseLine::Unreadable { subject, .. } => etat.noter(subject, false),
+                    _ => {}
+                }
+            }
             lignes.push(ResponseLine::End);
             lignes
         }
