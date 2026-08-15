@@ -662,19 +662,33 @@ mod libelle_de_zero {
     use reverb_hw::hwmon::Mode;
 
     #[test]
-    fn la_valeur_zero_se_lit_en_plein_regime() {
-        // issue #50 — « `0` = **100 % et on lâche la barre** », et « Le nom
-        // `Mode::FirmwareCurve` pour `0` est donc faux ».
+    fn la_valeur_zero_se_lit_en_non_pilote() {
+        // ⚠️ **Ce test portait la conclusion inverse jusqu'au 2026-08-15**, et
+        // il est modifié parce que sa PRÉMISSE était fausse — jamais pour le
+        // faire passer. Le précédent de procédure est celui de #50 lui-même,
+        // qui avait déjà retourné un test de #9 pour la même raison.
         //
-        // Le nom retenu par ce fichier est `Mode::PleinRegime` (en-tête).
+        // issue #50 établissait « `0` = 100 % et on lâche la barre », ce qui est
+        // exact **de l'écriture** : `kraken3_write_pwm_enable(0)` appelle
+        // `kraken3_write_fixed_duty(priv, 255, channel)`. Ce fichier en avait
+        // conclu que la LECTURE de `0` disait la même chose. Elle ne le dit pas.
+        //
+        // `nzxt-kraken3` n'écrit rien au probe — son initialisation n'envoie que
+        // `set_interval` et `finish_init`. Le champ `mode` sort du `kzalloc` à
+        // `0`, et un `0` lu sur un canal jamais touché signifie seulement que
+        // personne côté hôte ne le pilote.
+        //
+        // Constaté sur SHYNAEL le 2026-08-15 : `pwm1_enable = 0`, `pwm1 = 77`,
+        // pompe à 1357 tr/min, duty qui suit le liquide par paliers — 89, 102,
+        // 115, 128, 153. La colonne MODE annonçait « plein-régime-100% » (#101).
         let sysfs = arborescence_de_reference("zero_plein_regime");
         let canaux = sysfs.canaux();
 
         for nom in ["kraken2023elite:pump-speed", "kraken2023elite:fan-speed"] {
             let m = mode(canal(&canaux, nom));
             assert!(
-                matches!(m, Mode::PleinRegime),
-                "{nom} est à « 0 », donc à plein régime, lu : {m:?}"
+                matches!(m, Mode::NonPilote),
+                "{nom} est à « 0 » : le pilote ne le pilote pas, lu : {m:?}"
             );
         }
     }
@@ -711,14 +725,20 @@ mod libelle_de_zero {
     }
 
     #[test]
-    fn les_cinq_libelles_de_mode_restent_distincts_et_non_vides() {
+    fn les_six_libelles_de_mode_restent_distincts_et_non_vides() {
         // La colonne MODE se lit d'un coup d'œil : deux modes qui s'écrivent
         // pareil ne se distinguent plus. C'est ce qui rend le renommage utile
         // plutôt que cosmétique — `PleinRegime` et `HostCurve` doivent
         // désormais se lire différemment, alors que « laissé au firmware » et
         // « courbe de l'hôte » se confondaient à l'usage.
+        //
+        // ⚠️ **Six depuis #101**, et les deux nouvelles voisines sont justement
+        // celles qu'il ne faut pas confondre : `NonPilote` est ce qu'un `0` lu
+        // établit, `PleinRegime` ce qu'un `0` écrit provoque. Le fichier sysfs
+        // ne les distingue pas ; cette colonne, si.
         let libelles: Vec<String> = [
             Mode::Manual,
+            Mode::NonPilote,
             Mode::PleinRegime,
             Mode::HostCurve,
             Mode::Unknown(3),

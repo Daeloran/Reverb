@@ -52,7 +52,10 @@ impl FanChannel {
         };
         let brut = fs::read_to_string(chemin)?;
         match brut.trim().parse::<u8>() {
-            Ok(0) => Ok(Mode::PleinRegime),
+            // ⚠️ `NonPilote` et non `PleinRegime` : un `0` **lu** ne dit pas ce
+            // qu'un `0` **écrit** fait. Voir la documentation des deux
+            // variantes (issue #101).
+            Ok(0) => Ok(Mode::NonPilote),
             Ok(1) => Ok(Mode::Manual),
             Ok(2) => Ok(Mode::HostCurve),
             Ok(autre) => Ok(Mode::Unknown(autre)),
@@ -92,11 +95,37 @@ impl FanChannel {
 const PILOTES_AUTOMATIQUES: [&str; 1] = ["kraken2023elite"];
 
 /// Ce que le canal fait de sa consigne, lu dans `pwmN_enable`.
+///
+/// ⚠️ **`0` n'a pas le même sens selon qu'on le lit ou qu'on l'écrit**, et c'est
+/// la seule valeur du fichier dans ce cas. Deux variantes le portent donc :
+/// [`Mode::NonPilote`] pour ce qu'un `0` lu établit, [`Mode::PleinRegime`] pour
+/// ce qu'un `0` écrit provoque. Les confondre affichait « plein-régime-100% »
+/// devant une pompe à 30 % (issue #101).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// `1` — la consigne écrite est appliquée telle quelle.
     Manual,
-    /// `0` — plein régime, sans régulation.
+    /// `0` **lu** — le pilote ne pilote pas ce canal.
+    ///
+    /// ⚠️ **Ce n'est pas « le canal est à 100 % »**, comme la lecture de `0` se
+    /// traduisait jusqu'au 2026-08-15. `nzxt-kraken3` **n'écrit rien au probe** :
+    /// son initialisation n'envoie que `set_interval` et `finish_init`, aucune
+    /// consigne ni courbe. Le champ `mode` du pilote sort donc du `kzalloc` à
+    /// `0`, et lire `0` sur un canal jamais touché ne dit qu'une chose — que
+    /// personne côté hôte ne le pilote (issue #101).
+    ///
+    /// Ce que le canal fait alors, c'est le périphérique qui le décide, et la
+    /// consigne relue dans `pwmN` le dit : 30 % pour un Kraken sur son profil
+    /// d'usine, 100 % pour un Kraken à qui l'on vient d'écrire
+    /// [`Mode::PleinRegime`]. Dans les deux cas « non piloté » reste vrai — la
+    /// nuance est dans le pourcentage, pas dans le mode.
+    ///
+    /// Mesuré sur SHYNAEL le 2026-08-15 : `pwm1_enable = 0`, `pwm1 = 77`,
+    /// pompe à 1357 tr/min, et un duty qui suivait la température par paliers
+    /// — 89, 102, 115, 128, 153. Une régulation bien vivante, que le libellé
+    /// d'avant annonçait à fond.
+    NonPilote,
+    /// `0` **écrit** — plein régime, sans régulation.
     ///
     /// ⚠️ **Ce n'est pas « laissé au firmware »**, comme cette variante s'est
     /// appelée jusqu'au 2026-08-02. `nzxt-kraken3` en fait
@@ -105,6 +134,11 @@ pub enum Mode {
     /// L'observation de `docs/VENTILATEURS.md` — « le Kraken s'y rabat sur du
     /// refroidissement maximal » — était donc exacte, et son explication à
     /// portée de main dans le pilote.
+    ///
+    /// ⚠️ **Elle ne sort jamais de [`FanChannel::mode`]** : une fois écrite, le
+    /// fichier contient `0`, et un `0` relu ne se distingue pas de celui d'un
+    /// canal jamais touché. C'est une **intention**, pas un état observable —
+    /// et c'est bien l'aveu qu'il faut faire, plutôt que de deviner.
     ///
     /// La fenêtre ne le propose nulle part, et « auto » vise [`Mode::HostCurve`].
     PleinRegime,
@@ -130,6 +164,7 @@ impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Mode::Manual => write!(f, "manuel"),
+            Mode::NonPilote => write!(f, "non-piloté"),
             Mode::PleinRegime => write!(f, "plein-régime-100%"),
             Mode::HostCurve => write!(f, "courbe-de-l'hôte"),
             Mode::Unknown(valeur) => write!(f, "inconnu-{valeur}"),
@@ -355,7 +390,11 @@ pub fn set_mode(channel: &FanChannel, mode: Mode) -> io::Result<()> {
 
     let valeur = match mode {
         Mode::Manual => "1",
-        Mode::PleinRegime => "0",
+        // Les deux s'écrivent `0`, et c'est le fait matériel : le fichier n'a
+        // qu'une valeur pour les deux sens. Réécrire le mode qu'on vient de
+        // lire ne doit pas changer le canal, d'où `NonPilote` acceptée ici
+        // plutôt que refusée (issue #101).
+        Mode::NonPilote | Mode::PleinRegime => "0",
         Mode::HostCurve => "2",
         Mode::Unknown(valeur) => {
             return Err(io::Error::new(
