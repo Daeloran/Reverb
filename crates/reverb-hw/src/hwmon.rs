@@ -14,6 +14,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use reverb_proto::ipc::{
+    MODE_COURBE_DE_L_HOTE, MODE_INCONNU_PREFIXE, MODE_MANUEL, MODE_NON_PILOTE, MODE_NON_REGLABLE,
+    MODE_PLEIN_REGIME,
+};
+
 /// Un canal de vitesse découvert dans sysfs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FanChannel {
@@ -224,25 +229,33 @@ pub enum Mode {
     Unsupported,
 }
 
-/// ⚠️ **Un mode s'écrit en un seul jeton, sans espace.**
+/// ⚠️ **Ce n'est pas une étiquette d'affichage, c'est un jeton de protocole.**
 ///
-/// Ce libellé traverse le socket dans le champ `mode` d'une ligne `chan`, et
+/// Le libellé traverse le socket dans le champ `mode` d'une ligne `chan`, et
 /// depuis #50 ce champ n'est plus le dernier — le drapeau « sait faire auto » le
-/// suit. C'est l'arité de la ligne qui distingue un démon d'avant de un démon
+/// suit. C'est l'arité de la ligne qui distingue un démon d'avant d'un démon
 /// d'après (six jetons ou sept) : un mode à espaces la rendrait indécidable.
 ///
 /// Les libellés sont donc devenus des mots composés. C'est le prix du champ
 /// gagné, et il se paie une fois : « courbe-de-l'hôte » se lit encore, là où
 /// deviner l'arité d'une ligne ne se lit pas du tout.
+///
+/// ⚠️ **Les six graphies vivent dans [`reverb_proto::ipc`]**, avec les autres
+/// jetons du format de fil, et non ici. La fenêtre les relit de l'autre côté du
+/// socket sans dépendre de `reverb-hw`, et depuis #112 elle **décide** dessus :
+/// `non-piloté` et `courbe-de-l'hôte` verrouillent la barre d'un canal qui
+/// régule seul. Recopiées aux deux bouts, un renommage les ferait diverger en
+/// silence — et la barre de la pompe se déverrouillerait sans que rien ne le
+/// dise.
 impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Mode::Manual => write!(f, "manuel"),
-            Mode::NonPilote => write!(f, "non-piloté"),
-            Mode::PleinRegime => write!(f, "plein-régime-100%"),
-            Mode::HostCurve => write!(f, "courbe-de-l'hôte"),
-            Mode::Unknown(valeur) => write!(f, "inconnu-{valeur}"),
-            Mode::Unsupported => write!(f, "non-réglable"),
+            Mode::Manual => write!(f, "{MODE_MANUEL}"),
+            Mode::NonPilote => write!(f, "{MODE_NON_PILOTE}"),
+            Mode::PleinRegime => write!(f, "{MODE_PLEIN_REGIME}"),
+            Mode::HostCurve => write!(f, "{MODE_COURBE_DE_L_HOTE}"),
+            Mode::Unknown(valeur) => write!(f, "{MODE_INCONNU_PREFIXE}{valeur}"),
+            Mode::Unsupported => write!(f, "{MODE_NON_REGLABLE}"),
         }
     }
 }

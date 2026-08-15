@@ -310,3 +310,26 @@ deviner (issue #101).
 Ce n'est pas une perte : « non piloté » reste vrai — le pilote a bien lâché la barre —, et le
 `pwmN` relu montre alors 100 % au lieu de 30 %. C'est le pourcentage qui distingue les deux
 situations, pas le mode.
+
+### Les six modes, et ce qu'une consigne y remplace
+
+Le tableau que la fenêtre affiche derrière son point d'interrogation, et sur lequel le garde-fou de
+`reverb fan --pwm` se décide (issue #112). **Deux modes protègent quelque chose**, et ce sont ceux
+où le décideur n'est pas l'hôte :
+
+| mode | qui décide de la vitesse | ce qu'une consigne y remplace |
+|---|---|---|
+| `non-piloté` | le **périphérique**, sur son propre profil | une régulation qu'aucune commande ne rétablit — seule une coupure d'alimentation complète |
+| `courbe-de-l'hôte` | le **firmware**, sur la courbe téléversée | la seule courbe que l'utilisateur ait posée lui-même |
+| `manuel` | l'**hôte** | rien : la consigne d'avant, qui ne régulait pas |
+| `plein-régime-100%` | personne — la barre est lâchée | rien : c'est l'état dont on veut le plus pouvoir sortir |
+| `inconnu-N` | **inconnu** — l'hôte ne sait pas lire cette valeur | inconnu, et l'affirmer serait implémenter depuis un ❓ |
+| `non-réglable` | le matériel seul, aucun `pwmN_enable` | rien : aucun mode ne s'y écrit ni ne s'y perd |
+
+⚠️ **Le déclencheur est le mode, jamais le nom du contrôleur.** Aujourd'hui les deux canaux du
+Kraken lisent `non-piloté` et les trois `nzxtsmart2` lisent `manuel` : verrouiller sur « kraken »
+donnerait le même résultat, et casserait en silence au premier pilote qui change — en mentant au
+passage sur un canal du Kraken déjà passé en `manuel`, où il n'y a plus rien à protéger.
+
+⚠️ **Ni le drapeau `sait_faire_auto`.** Depuis #97 il vaut « le pilote sait faire auto **et** une
+courbe a été posée », donc toujours `non` : il ne dit plus rien du matériel.

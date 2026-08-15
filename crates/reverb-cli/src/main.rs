@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use reverb_cli::cli::{
     self, ActionEcran, ActionRam, ActionVentilateur, Cible, CibleCanal, CibleRam, Command,
 };
+use reverb_cli::refus_de_consigne;
 use reverb_hw::hidraw::{self, Controller};
 use reverb_hw::hwmon::{self, FanChannel, Percent};
 use reverb_hw::i2c;
@@ -394,44 +395,35 @@ fn consigner(
         ));
     }
 
-    // Un canal qui exécute une courbe réagit à la température. Lui imposer une
-    // consigne fixe l'en sort — et il n'y reviendra pas tout seul. Ça ne doit
-    // jamais être un effet de bord.
+    // Un canal qui régule seul — sur une courbe, ou sur le profil d'usine du
+    // périphérique — perd cette régulation dès qu'on lui écrit une consigne, et
+    // il n'y reviendra pas tout seul. Ça ne doit jamais être un effet de bord.
     //
-    // ⚠️ **C'est `HostCurve` (2) qui adapte, pas `PleinRegime` (0).** Ce garde
-    // visait `0` jusqu'au 2026-08-02, et disait au passage « suit sa courbe
+    // ⚠️ **Le verdict est calculé, et il tombe avant toute écriture** — ni
+    // `set_mode`, ni `set_pwm`. `refus_de_consigne` ne reçoit ni descripteur ni
+    // `&FanChannel` : elle ne *peut* pas écrire, et le critère « rien n'est
+    // écrit » devient une propriété de sa signature.
+    //
+    // ⚠️ **Le garde a visé `0` jusqu'au 2026-08-02, puis ne l'a plus visé du
+    // tout, et les deux étaient faux.** Il disait alors « suit sa courbe
     // firmware et s'adapte à la température » d'un canal qui tourne en fait à
-    // 100 % sans rien réguler (issue #50). Un canal en `0` n'a donc rien à
-    // perdre à recevoir une consigne : on le sort du plein régime sans rien
-    // demander, ce qui est même le service rendu.
+    // 100 % sans rien réguler, ce que #50 a corrigé en le déplaçant sur
+    // `HostCurve`. Mais l'exemption qui en est restée — « un canal en `0` n'a
+    // rien à perdre » — ne valait que si `0` voulait dire 100 %. Or un `0`
+    // **lu** dit le contraire (#101) : le pilote n'a jamais touché ce canal, et
+    // le périphérique exécute son propre profil. Sur SHYNAEL le 2026-08-15, la
+    // pompe y suivait le liquide de 35 à 60 %. **L'issue #112 ferme ce trou** :
+    // `NonPilote` refuse comme `HostCurve`, et `--manual` lève les deux.
     let mode = canal
         .mode()
         .map_err(|e| format!("lecture du mode de « {} » : {e}", canal.name))?;
 
-    if mode == hwmon::Mode::HostCurve && !manual {
-        return Err(format!(
-            "« {} » exécute une courbe et s'adapte à la température. \
-             Lui imposer {} % l'en sortirait définitivement : ajoutez « --manual » \
-             si c'est voulu, et « reverb fan --channel {} --auto » pour l'y rendre.",
-            canal.name,
-            percent.percent(),
-            canal.name
-        ));
+    if let Some(refus) = refus_de_consigne(&canal.name, mode, manual) {
+        return Err(refus);
     }
-    // ⚠️ `NonPilote` remplace ici `PleinRegime` : c'est ce que la lecture d'un
-    // `0` rend depuis #101, et `PleinRegime` ne sort plus jamais de `mode()`.
-    // Le comportement est identique à celui d'avant, à dessein — #101 corrige
-    // un libellé, pas une politique.
-    //
-    // ⚠️ **Mais le raisonnement du bloc ci-dessus reste faux, et #97 ne l'a pas
-    // corrigé** — cette issue ferme le trou d'« auto », pas celui-ci. « Un canal
-    // en `0` n'a rien à perdre » ne vaut que si `0` voulait dire 100 %. Or un
-    // `0` lu est le plus souvent un canal sur sa courbe d'usine, en pleine
-    // régulation : sur SHYNAEL le 2026-08-15, la pompe y suivait le liquide de
-    // 35 à 60 %. Lui imposer une consigne fixe la sort de cette régulation
-    // **sans rien demander**, ce qui est exactement ce que le garde prétend
-    // empêcher — et #97 rend le retour plus cher encore, « auto » réclamant
-    // désormais une courbe.
+
+    // Le refus levé, il faut bien sortir le canal de son mode : `set_pwm` seul
+    // n'aurait aucun effet tant que `pwmN_enable` ne vaut pas `1`.
     //
     // Le carnet ne sert à rien ici — seul `HostCurve` le consulte — mais la
     // signature le réclame, et un carnet vide est ce qu'un processus neuf a.

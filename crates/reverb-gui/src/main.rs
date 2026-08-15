@@ -18,7 +18,7 @@
 //! pendant qu'une animation tourne.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -39,10 +39,10 @@ use reverb_gui::reglages::{
 use reverb_gui::sondes::{
     Historique, ModelesNvme, Releve, SondeRetenue, modeles_nvme, sondes_retenues,
 };
-use reverb_gui::telemetrie::{LigneCanal, Tri};
+use reverb_gui::telemetrie::{LigneCanal, Tri, aide_des_modes};
 use reverb_gui::{
-    AncreEcran, FamilleAnimation, Fenetre, LigneProfil, LigneTemperature, LigneVentilateur,
-    LigneZone, PointHalo, PointLed,
+    AideMode, AncreEcran, FamilleAnimation, Fenetre, LigneProfil, LigneTemperature,
+    LigneVentilateur, LigneZone, PointHalo, PointLed,
 };
 use reverb_proto::composition::{Ancre, Fond, Source};
 use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine, ScreenAction};
@@ -382,6 +382,18 @@ struct Pupitre {
     /// canal en quarantaine ne part pas, et [`LigneCanal::commande`] est le seul
     /// endroit qui le décide.
     canaux_lus: RefCell<Vec<LigneCanal>>,
+    /// Les canaux dont le cadenas a été ouvert à la main (#112).
+    ///
+    /// ⚠️ **Mémoire de fenêtre, et elle repart fermée à chaque ouverture.** Un
+    /// verrou qui se souviendrait d'avoir été ouvert ne protégerait plus rien le
+    /// lendemain — or ce qu'il protège est une régulation d'usine qu'aucune
+    /// commande ne rétablit. Comme la pastille du profil rappelé, ça ne se
+    /// persiste pas.
+    ///
+    /// ⚠️ **Et non un champ de [`LigneCanal`]** : celle-ci est reconstruite à
+    /// chaque tour de `status`, une fois par seconde, et un verrou rangé dedans
+    /// se refermerait au milieu du geste.
+    deverrouilles: RefCell<HashSet<String>>,
     /// L'origine des temps de la fenêtre. Les poignées raisonnent en durées
     /// depuis elle, ce qui les rend testables sans horloge.
     depart: Instant,
@@ -443,6 +455,7 @@ impl Pupitre {
             canaux: Rc::new(VecModel::default()),
             tri: RefCell::new(Tri::nouveau()),
             canaux_lus: RefCell::new(Vec::new()),
+            deverrouilles: RefCell::new(HashSet::new()),
             depart: Instant::now(),
             ecran: RefCell::new(EcranChoisi::default()),
             limiteur: RefCell::new(Limiteur::nouveau()),
@@ -475,12 +488,30 @@ impl Pupitre {
     /// une poignée vers un canal qui ne répond pas. `None` aussi quand aucun
     /// tour de télémétrie ne l'a encore nommé — la liste est alors vide, et il
     /// n'y a rien à régler.
+    ///
+    /// ⚠️ **`None` enfin quand le canal régule seul et que son cadenas est
+    /// fermé** (#112). C'est **l'unique entonnoir** des ordres de ventilateur —
+    /// la poignée comme le bouton « auto » y passent —, et donc le seul endroit
+    /// où le verrou se pose. Le doubler ailleurs ferait deux chemins d'émission,
+    /// dont le second n'aurait aucune raison d'être le bon.
     fn commande_du_canal(&self, canal: &str, action: FanAction) -> Option<Request> {
+        let deverrouille = self.deverrouilles.borrow().contains(canal);
         self.canaux_lus
             .borrow()
             .iter()
             .find(|ligne| ligne.canal == canal)?
-            .commande(action)
+            .commande_verrouillable(action, deverrouille)
+    }
+
+    /// Bascule le cadenas d'un canal, et rend son nouvel état.
+    fn basculer_le_verrou(&self, canal: &str) -> bool {
+        let mut deverrouilles = self.deverrouilles.borrow_mut();
+        if deverrouilles.remove(canal) {
+            false
+        } else {
+            deverrouilles.insert(canal.to_owned());
+            true
+        }
     }
 
     /// La mémoire du profil rappelé s'efface : l'éclairage vient de changer.
@@ -525,6 +556,7 @@ fn main() -> ExitCode {
     fenetre.set_directions(noms_des_directions());
     fenetre.set_affichages(noms_des_affichages());
     fenetre.set_affichages_lisibles(noms_lisibles_des_affichages());
+    fenetre.set_aides_des_modes(aides_des_modes());
     fenetre.set_rayon_disque(rayon_du_disque());
     fenetre.set_champs_max(
         i32::try_from(reverb_proto::composition::Composition::CHAMPS_MAX).unwrap_or(4),
@@ -1692,6 +1724,23 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
     }
     {
         let pupitre = pupitre.clone();
+        fenetre.on_basculer_verrou(move |canal| {
+            let ouvert = pupitre.basculer_le_verrou(&canal);
+            // ⚠️ **La ligne affichée suit tout de suite**, sans attendre le tour
+            // de `status` suivant : une seconde de barre encore grisée après le
+            // clic se lirait comme un cadenas qui n'a pas pris.
+            for rang in 0..pupitre.canaux.row_count() {
+                if let Some(mut ligne) = pupitre.canaux.row_data(rang)
+                    && ligne.canal == canal
+                {
+                    ligne.deverrouille = ouvert;
+                    pupitre.canaux.set_row_data(rang, ligne);
+                }
+            }
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
         let envoi = ordres;
         fenetre.on_rendre_au_firmware(move |canal| {
             // ⚠️ **« auto » non plus ne part vers un canal en quarantaine**
@@ -2002,6 +2051,7 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
     // ventilateur, et non un relevé de sonde (#100).
     let vue = pupitre.tri.borrow_mut().poser(lignes);
     let mut poignees = pupitre.poignees.borrow_mut();
+    let deverrouilles = pupitre.deverrouilles.borrow();
     let mut canaux = Vec::new();
     for ligne in &vue.canaux {
         let poignee = poignees
@@ -2042,8 +2092,13 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
             mode: SharedString::from(ligne.mode.clone()),
             lisible: ligne.lisible,
             sait_faire_auto: ligne.sait_faire_auto,
+            // Le cadenas et son état : le premier est un fait lu sur le
+            // matériel, le second une mémoire de fenêtre (#112).
+            regule_seul: ligne.regule_seul(),
+            deverrouille: deverrouilles.contains(&ligne.canal),
         });
     }
+    drop(deverrouilles);
     *pupitre.canaux_lus.borrow_mut() = vue.canaux;
 
     {
@@ -2189,6 +2244,22 @@ fn familles() -> ModelRc<FamilleAnimation> {
         })
         .collect();
     ModelRc::new(VecModel::from(familles))
+}
+
+/// Les six modes et leur explication, pour le panneau que le `?` ouvre (#112).
+///
+/// ⚠️ **La table vient de la bibliothèque**, comme le catalogue d'animations :
+/// écrire ces textes dans le `.slint` les mettrait hors de portée des tests, et
+/// la liste des modes est celle du protocole, pas un choix d'affichage.
+fn aides_des_modes() -> ModelRc<AideMode> {
+    let aides: Vec<AideMode> = aide_des_modes()
+        .into_iter()
+        .map(|(mode, texte)| AideMode {
+            mode: SharedString::from(mode),
+            texte: SharedString::from(texte),
+        })
+        .collect();
+    ModelRc::new(VecModel::from(aides))
 }
 
 /// Les huit directions, sous le mot qui les écrit sur le socket.

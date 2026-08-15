@@ -1100,6 +1100,57 @@ pub fn encode_paliers(paliers: &[(i32, u8)]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Les jetons de mode d'un canal de ventilation
+// ---------------------------------------------------------------------------
+//
+// ⚠️ **Ce sont des jetons de protocole, pas des étiquettes d'affichage.** Ils
+// sont *écrits* par `reverb_hw::hwmon::Mode` dans le champ `mode` d'une ligne
+// `chan`, et *relus* de l'autre côté du socket par la fenêtre — qui ne dépend
+// pas de `reverb-hw`, et n'a pas à s'y mettre pour une colonne de texte. Chacun
+// des deux les recopiant, une divergence ne produirait aucun message.
+//
+// Tant que le mode n'était qu'affiché, cette divergence se **voyait** : une
+// colonne qui écrit autre chose se lit. Depuis l'issue #112, la fenêtre
+// **décide** dessus — `non-piloté` et `courbe-de-l'hôte` verrouillent la barre
+// de consigne d'un canal qui régule seul. Un renommage silencieux de l'un des
+// deux déverrouillerait la pompe du Kraken, et le premier glissement
+// remplacerait une régulation d'usine que rien ne rétablit sans coupure
+// d'alimentation complète (`docs/VENTILATEURS.md`). Le jeton porte donc un
+// garde-fou, et il vit du côté du format de fil plutôt qu'aux deux bouts.
+//
+// ⚠️ **Un mode s'écrit en un seul jeton, sans espace** — c'est l'arité de la
+// ligne `chan` qui dit si le drapeau « sait faire auto » la suit (#50), et un
+// mode à espaces la rendrait indécidable. D'où les mots composés.
+
+/// `pwmN_enable` à `1` — la consigne écrite par l'hôte est appliquée telle quelle.
+pub const MODE_MANUEL: &str = "manuel";
+
+/// `pwmN_enable` à `0` **lu** — le pilote ne pilote pas ce canal.
+///
+/// Ce que le canal fait alors, c'est le périphérique qui le décide (#101).
+pub const MODE_NON_PILOTE: &str = "non-piloté";
+
+/// `pwmN_enable` à `0` **écrit** — 100 % et la barre lâchée.
+///
+/// Une **intention**, jamais un état observable : une relecture rend
+/// [`MODE_NON_PILOTE`] (#101).
+pub const MODE_PLEIN_REGIME: &str = "plein-régime-100%";
+
+/// `pwmN_enable` à `2` — le firmware exécute la courbe posée par **l'hôte**.
+pub const MODE_COURBE_DE_L_HOTE: &str = "courbe-de-l'hôte";
+
+/// Une valeur de `pwmN_enable` que l'hôte ne sait pas interpréter.
+///
+/// ⚠️ **C'est un préfixe et non un jeton complet** : le libellé porte le nombre
+/// lu — `inconnu-7`, `inconnu-42`. Une constante entière ne pourrait figer que
+/// l'une des 256 valeurs, et c'est justement le nombre que personne ne sait
+/// interpréter.
+pub const MODE_INCONNU_PREFIXE: &str = "inconnu-";
+
+/// La source n'expose aucun `pwmN_enable` — le cas de `nct6687`.
+pub const MODE_NON_REGLABLE: &str = "non-réglable";
+
+// ---------------------------------------------------------------------------
 // Réponses
 // ---------------------------------------------------------------------------
 
@@ -1803,7 +1854,7 @@ fn reste(champ: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    //! Tests de logique du verbe `profil` (#74).
+    //! Tests de logique du verbe `profil` (#74) et des jetons de mode (#112).
     //!
     //! Les tests d'intention du profil vivent dans `tests/spec_profils.rs` — ils
     //! portent sur le **nom**, qui est pur. Ceux-ci portent sur son passage par
@@ -1811,6 +1862,46 @@ mod tests {
     //! sans fixer de forme de requête.
 
     use super::*;
+
+    #[test]
+    fn les_jetons_de_mode_sont_figes() {
+        // ⚠️ **Les six graphies sont recopiées littéralement, exprès.** Une
+        // assertion qui comparerait la constante à elle-même ne vérifierait
+        // rien ; celle-ci fige le **format de fil**, et fait échouer bruyamment
+        // tout renommage — y compris celui qui ne changerait qu'une apostrophe.
+        //
+        // Elles sont lues par `reverb-gui`, qui décide dessus depuis #112 : un
+        // renommage silencieux de `non-piloté` déverrouillerait la barre de la
+        // pompe du Kraken, et le premier glissement remplacerait sa régulation
+        // d'usine sans retour possible.
+        assert_eq!(MODE_MANUEL, "manuel");
+        assert_eq!(MODE_NON_PILOTE, "non-piloté");
+        assert_eq!(MODE_PLEIN_REGIME, "plein-régime-100%");
+        assert_eq!(MODE_COURBE_DE_L_HOTE, "courbe-de-l'hôte");
+        assert_eq!(MODE_INCONNU_PREFIXE, "inconnu-");
+        assert_eq!(MODE_NON_REGLABLE, "non-réglable");
+    }
+
+    #[test]
+    fn aucun_jeton_de_mode_ne_porte_d_espace() {
+        // C'est l'arité de la ligne `chan` qui dit si le drapeau « sait faire
+        // auto » la suit (#50) : un mode à espaces gagnerait un jeton et la
+        // rendrait indécidable. Le préfixe des valeurs inconnues en fait
+        // partie — il est suivi d'un nombre, qui n'en porte pas non plus.
+        for jeton in [
+            MODE_MANUEL,
+            MODE_NON_PILOTE,
+            MODE_PLEIN_REGIME,
+            MODE_COURBE_DE_L_HOTE,
+            MODE_INCONNU_PREFIXE,
+            MODE_NON_REGLABLE,
+        ] {
+            assert!(
+                !jeton.chars().any(char::is_whitespace),
+                "« {jeton} » porte une espace"
+            );
+        }
+    }
 
     fn nom(saisi: &str) -> NomProfil {
         NomProfil::nouveau(saisi).expect("nom valide")
