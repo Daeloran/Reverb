@@ -321,6 +321,16 @@ fn courbe(paliers: &[(i32, u8)]) -> Courbe {
 // 0 — les repères de ce fichier ne sont aucun défaut
 // ---------------------------------------------------------------------------
 
+// ⚠️ `assertions_on_constants` reproche à ces assertions d'avoir une valeur
+// connue à la compilation, donc d'être « toujours vraies ». C'est exactement ce
+// que ce test existe pour garantir : elles sont vraies des valeurs
+// d'aujourd'hui, et le test est là pour qu'elles le restent de celles de demain.
+// L'exception est posée ici plutôt que les assertions réécrites — un
+// `const { assert!(…) }` perdrait le message, qui nomme les chiffres fautifs.
+//
+// Seule modification apportée à ce fichier après son écriture, et elle ne touche
+// aucune assertion.
+#[allow(clippy::assertions_on_constants)]
 #[test]
 fn les_reperes_de_ce_fichier_ne_sont_aucun_defaut() {
     // Tout ce qui suit suppose que la plage tracée monte, que la courbe par défaut y tient

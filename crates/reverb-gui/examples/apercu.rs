@@ -24,7 +24,7 @@ use reverb_anim::{Animation, CATALOGUE, Direction, Geometrie};
 use reverb_gui::plan::{Plan, halo, places_des_ancres, rayon_du_disque};
 use reverb_gui::reglages::{
     Poignee, TRACE_ASPECT, TRACE_CHAUD, TRACE_FROID, commandes_de_trace, consigne_affichee,
-    degres_lisibles,
+    degres_lisibles, point_du_palier,
 };
 use reverb_gui::sondes::{COURBE_ASPECT, Historique, MEMOIRE, Releve, commandes_de_courbe};
 use reverb_gui::{
@@ -540,6 +540,10 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
                 consigne: SharedString::from(format!("{pourcent} %")),
                 degres: milli.div_euclid(1_000),
                 pourcent: i32::from(*pourcent),
+                // La poignée, posée par `point_du_palier` — l'inverse exact de
+                // la conversion qui lit le geste (#122).
+                trace_x: point_du_palier((*milli, *pourcent)).0,
+                trace_y: point_du_palier((*milli, *pourcent)).1,
             })
             .collect::<Vec<PalierCourbe>>(),
     )));

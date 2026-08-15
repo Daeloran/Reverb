@@ -40,7 +40,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Un Kraken muet, le démon tente de le réparer | ✅ trois resets USB bornés, sur son propre fil, puis redécouverte |
 | Régulation des ventilateurs | ✅ les trois canaux sans mode auto, sur la courbe du liquide |
 | Un canal qui régule seul ne se défait pas d'un geste | ✅ verrou dans la fenêtre, refus en ligne de commande |
-| La régulation se pilote à la souris | ✅ prise en charge, courbe éditée et tracée par la fonction du démon |
+| La régulation se pilote à la souris | ✅ prise en charge, courbe éditée **par points sur son tracé** |
 
 ## Ce que les protocoles permettent
 
@@ -800,6 +800,46 @@ geste, dont celle qui laisse écrire ne se verrait sinon sur aucune image.
 Chaque canal **régulable** — celui dont le pilote n'a aucun mode automatique — porte un bouton
 « Réguler », et « Ne plus réguler » une fois pris en charge. La courbe s'édite sous la liste, avec
 le tracé de ce qu'elle donne, et le bouton « Appliquer la courbe » la pose par le socket.
+
+#### La courbe s'édite par points, sur son tracé
+
+| geste | ce qu'il fait |
+|---|---|
+| clic gauche sur un point | le saisit ; le traîner change sa température **et** sa consigne |
+| clic gauche sur le cadre | pose un palier de plus — **refusé au-delà de huit**, en le disant |
+| clic droit sur un point | le retire — **sauf le dernier**, auquel cas rien ne bouge et la fenêtre le dit |
+
+Les barres de #113 restent, en **réglage fin** : la souris place un point à quelques centaines de
+millidegrés près dans un cadre de 360 px, et viser 45 000 exactement reste impossible sans elles.
+
+⚠️ **Le plancher est d'UN palier, pas de deux — et l'issue disait le contraire.** Elle affirmait
+que « `Courbe::depuis` refuse une courbe qui n'a pas au moins deux paliers ». C'est faux, et
+vérifié : cette fonction refuse une courbe **vide**, une consigne au-dessus de 100, deux paliers à
+la même température et une température décroissante. Deux tests d'intention figent l'inverse —
+`une_courbe_a_un_seul_palier_est_plate` (#99) et `une_courbe_a_un_seul_palier_reste_acceptee`
+(#113). Une consigne fixe est une courbe parfaitement sensée, et `regule courbe 45000:80` passe.
+
+⚠️ **Le juge de ce plancher est donc l'éditeur, jamais `Courbe::depuis`.** Rendre cette dernière
+plus stricte casserait les deux tests ci-dessus et ferait diverger la fenêtre du démon. C'est
+l'inverse du réflexe qu'on a en lisant l'issue, et un test existe pour l'empêcher.
+
+⚠️ **Un point traîné en travers d'un voisin est refusé en le disant, jamais réordonné.** Les
+réordonner serait deviner ce qui a été tapé. Le refus vient du même juge que le bouton « Appliquer »,
+donc de `Courbe::depuis` — celle que le démon exécute.
+
+⚠️ **Le geste est ramené aux bornes du cadre**, et les poignées ne le sont **pas**. La souris sort du
+cadre en un dixième de seconde ; sans borner, une consigne à 110 % ferait refuser la courbe et un
+palier traîné à gauche deviendrait indessinable *et* inattrapable. Mais un palier venu du socket hors
+de la plage tracée doit montrer **où il est**, sinon deux paliers distincts se confondraient sous la
+même poignée. On borne donc ce qu'un geste **produit**, jamais ce qu'on **affiche**.
+
+⚠️ **Ce n'est pas l'écrêtage que #121 a refusé sur la maquette.** Là-bas, replier un coin sur le bord
+créait une **sélection au hasard** — un résultat faux et invisible. Ici, buter contre le bord est le
+seul résultat visible, et il se corrige d'un second geste.
+
+⚠️ **Aucune coordonnée de poignée n'est calculée dans le `.slint`.** Elles viennent de
+`point_du_palier`, l'inverse exact de la conversion qui lit le geste : deux calculs séparés
+divergeraient, et une poignée finirait ailleurs que là où le clic la reprend.
 
 ⚠️ **« Régulé » et « verrouillé » grisent tous deux une barre, pour des raisons opposées**, et la
 fenêtre doit donc les distinguer : un canal régulé est piloté **par le démon** et on protège la

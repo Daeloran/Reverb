@@ -36,7 +36,7 @@ use std::time::Duration;
 use reverb_anim::{Animation, CATALOGUE, Direction, ReglageInvalide, Reglages};
 use reverb_proto::composition::{Ancre, Fond, Source};
 use reverb_proto::ipc::{ProfilAction, Request, ResponseLine, ScreenAction};
-use reverb_proto::regulation::Courbe;
+use reverb_proto::regulation::{Courbe, CourbeInvalide};
 use reverb_proto::{Led, NomInvalide, NomProfil, Rgb};
 
 use crate::telemetrie::trace_de_courbe;
@@ -914,6 +914,16 @@ impl CourbeEditee {
             *consigne = pourcent.min(100);
         }
     }
+
+    /// Remplace les paliers par ceux qu'un geste de l'éditeur a produits (#122).
+    ///
+    /// ⚠️ **Ne reçoit qu'une courbe déjà jugée.** Les quatre fonctions de geste
+    /// passent par `Courbe::depuis` avant de rendre `Ok` : ce qui arrive ici est
+    /// valide, et un refus n'est jamais posé — l'éditeur garde alors ce qu'il
+    /// montrait, et la fenêtre écrit pourquoi.
+    pub fn poser(&mut self, paliers: Vec<(i32, u8)>) {
+        self.paliers = paliers;
+    }
 }
 
 /// La plage sur laquelle le panneau trace la courbe, en millidegrés.
@@ -946,6 +956,178 @@ pub const TRACE_POINTS: usize = 51;
 /// chiffres à tenir d'accord finiraient par diverger, et le symptôme serait
 /// celui qu'on vient de corriger — un tracé faux que rien ne signale.
 pub const TRACE_ASPECT: f32 = 4.0;
+
+// ---------------------------------------------------------------------------
+// L'éditeur de courbe par points (issue #122)
+// ---------------------------------------------------------------------------
+
+/// Combien de paliers une courbe peut porter, vue de la fenêtre.
+///
+/// Huit. La courbe livrée en a trois, et huit couvre toute forme utile entre 20
+/// et 70 °C — assez peu pour que chaque point reste saisissable à la souris dans
+/// un cadre de ~360 px.
+///
+/// ⚠️ **C'est une borne d'ergonomie, et elle vit ici.** `Courbe::depuis` n'en a
+/// aucune : le protocole accepte autant de paliers qu'on veut, et un tracé à
+/// trente points serait illisible autant qu'inutile. La fenêtre se donne donc
+/// une limite que le socket n'a pas — l'inverse serait plus grave.
+pub const PALIERS_MAX: usize = 8;
+
+/// À quelle distance un clic attrape un point, dans le repère du tracé.
+///
+/// Le cadre mesuré fait 359 × 88 px (#113), et le tracé est émis sur
+/// [`TRACE_ASPECT`] × 1 : une unité vaut donc ~88 px, et 0,12 vaut **~10,5 px**
+/// — une cible de souris confortable.
+///
+/// ⚠️ **Deux zones de saisie ne se touchent jamais** sur une courbe régulière :
+/// huit paliers répartis sur `TRACE_ASPECT` sont à 0,571 l'un de l'autre, soit
+/// **4,8 fois ce rayon**.
+pub const RAYON_DE_SAISIE: f32 = 0.12;
+
+/// Le palier que désigne un point du cadre.
+///
+/// ⚠️ **La conversion part de [`TRACE_ASPECT`], jamais d'un second chiffre.**
+/// Un `4.0` écrit en dur passerait aujourd'hui et casserait sans un mot à la
+/// première correction de la constante — le défaut même que #113 a corrigé.
+///
+/// ⚠️ **Le geste est ramené aux bornes du cadre.** La souris en sort en un
+/// dixième de seconde ; sans cela une consigne à 110 % ferait refuser la courbe,
+/// et un palier traîné à gauche du cadre deviendrait indessinable **et**
+/// inattrapable. Ce n'est pas l'écrêtage que #121 a refusé sur la maquette :
+/// là-bas, replier un coin créait une **sélection au hasard** ; ici, buter est
+/// le seul résultat visible, et il se corrige d'un second geste.
+pub fn palier_dans_le_trace(x: f32, y: f32) -> (i32, u8) {
+    let part = (x / TRACE_ASPECT).clamp(0.0, 1.0);
+    let plage = i64::from(TRACE_CHAUD) - i64::from(TRACE_FROID);
+    let milli = i64::from(TRACE_FROID) + (f64::from(part) * plage as f64).round() as i64;
+    // ⚠️ `y` descend quand la consigne monte : le repère de Slint a son axe
+    // vertical vers le bas, comme celui de SVG.
+    let consigne = ((1.0 - y.clamp(0.0, 1.0)) * 100.0).round() as u8;
+    (
+        milli.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+        consigne.min(100),
+    )
+}
+
+/// Où un palier se pose dans le cadre — l'inverse de [`palier_dans_le_trace`].
+///
+/// ⚠️ **Celui-ci ne replie jamais.** Un palier venu du socket hors de la plage
+/// tracée doit montrer **où il est**, sinon deux paliers distincts se
+/// confondraient sous la même poignée. C'est l'asymétrie voulue : on borne ce
+/// qu'un geste **produit**, jamais ce qu'on **affiche**.
+pub fn point_du_palier((milli, consigne): (i32, u8)) -> (f32, f32) {
+    let plage = (i64::from(TRACE_CHAUD) - i64::from(TRACE_FROID)) as f64;
+    let avance = (f64::from(milli) - f64::from(TRACE_FROID)) / plage;
+    (
+        (avance as f32) * TRACE_ASPECT,
+        1.0 - f32::from(consigne) / 100.0,
+    )
+}
+
+/// Le rang du palier qu'un clic attrape : le plus proche à portée, `None` sinon.
+pub fn palier_saisi(paliers: &[(i32, u8)], x: f32, y: f32) -> Option<usize> {
+    let mut meilleur: Option<(usize, f32)> = None;
+    for (rang, palier) in paliers.iter().enumerate() {
+        let (px, py) = point_du_palier(*palier);
+        let ecart = ((px - x).powi(2) + (py - y).powi(2)).sqrt();
+        if ecart <= RAYON_DE_SAISIE && meilleur.is_none_or(|(_, deja)| ecart < deja) {
+            meilleur = Some((rang, ecart));
+        }
+    }
+    meilleur.map(|(rang, _)| rang)
+}
+
+/// La courbe où le palier de rang `rang` a été traîné jusqu'à `(x, y)`.
+///
+/// ⚠️ **Substitué à sa place, jamais réordonné.** Un point traîné en travers de
+/// son voisin est **refusé** par le juge, et le refus dit lequel : les réordonner
+/// serait deviner ce qui a été tapé.
+pub fn palier_deplace(
+    paliers: &[(i32, u8)],
+    rang: usize,
+    x: f32,
+    y: f32,
+) -> Result<Vec<(i32, u8)>, CourbeInvalide> {
+    let mut suite = paliers.to_vec();
+    let place = suite.get_mut(rang).ok_or_else(|| CourbeInvalide {
+        raison: format!(
+            "aucun palier de rang {rang} : la courbe en compte {}",
+            paliers.len()
+        ),
+    })?;
+    *place = palier_dans_le_trace(x, y);
+    juge(suite)
+}
+
+/// La courbe privée de son palier de rang `rang`.
+///
+/// ⚠️ **Refusée s'il ne resterait *rien*, et c'est le seul plancher réel.** Une
+/// courbe à **un** palier est parfaitement valide — une consigne fixe —, et deux
+/// tests d'intention le figent : `une_courbe_a_un_seul_palier_est_plate` (#99,
+/// démon) et `une_courbe_a_un_seul_palier_reste_acceptee` (#113, fenêtre).
+///
+/// ⚠️ **Le juge de ce plancher est l'éditeur, jamais `Courbe::depuis`.** Rendre
+/// cette dernière plus stricte pour qu'elle exige deux paliers casserait les deux
+/// tests ci-dessus et ferait diverger la fenêtre du démon — `regule courbe
+/// 45000:80` doit continuer de passer par le socket.
+pub fn palier_retire(paliers: &[(i32, u8)], rang: usize) -> Result<Vec<(i32, u8)>, CourbeInvalide> {
+    if rang >= paliers.len() {
+        return Err(CourbeInvalide {
+            raison: format!(
+                "aucun palier de rang {rang} : la courbe en compte {}",
+                paliers.len()
+            ),
+        });
+    }
+    if paliers.len() <= 1 {
+        return Err(CourbeInvalide {
+            raison: "c'est le dernier palier : une courbe sans aucun palier ne dit plus aucune                      consigne. Déplacez-le plutôt que de le retirer"
+                .to_owned(),
+        });
+    }
+    let mut suite = paliers.to_vec();
+    suite.remove(rang);
+    juge(suite)
+}
+
+/// La courbe augmentée d'un palier en `(x, y)`, inséré à son rang.
+///
+/// Refusée au-delà de [`PALIERS_MAX`], en le disant.
+pub fn palier_ajoute(
+    paliers: &[(i32, u8)],
+    x: f32,
+    y: f32,
+) -> Result<Vec<(i32, u8)>, CourbeInvalide> {
+    if paliers.len() >= PALIERS_MAX {
+        return Err(CourbeInvalide {
+            raison: format!(
+                "une courbe porte au plus {PALIERS_MAX} paliers, et celle-ci en a déjà {}.                  Retirez-en un avant d'en poser un autre",
+                paliers.len()
+            ),
+        });
+    }
+    let neuf = palier_dans_le_trace(x, y);
+    let mut suite = paliers.to_vec();
+    // À sa place dans l'ordre des températures : c'est la seule insertion qui ne
+    // demande pas de deviner. Une température déjà prise sera refusée par le
+    // juge, en la nommant.
+    let rang = suite
+        .iter()
+        .position(|(milli, _)| *milli > neuf.0)
+        .unwrap_or(suite.len());
+    suite.insert(rang, neuf);
+    juge(suite)
+}
+
+/// Soumet une courbe au juge du démon, et la rend telle quelle si elle passe.
+///
+/// ⚠️ **`Courbe::depuis` et rien d'autre.** C'est la fonction que le démon
+/// exécute : un second juge écrit ici n'aurait aucune raison d'être le bon, et la
+/// fenêtre accepterait des courbes que le socket refuse — ou l'inverse.
+fn juge(paliers: Vec<(i32, u8)>) -> Result<Vec<(i32, u8)>, CourbeInvalide> {
+    Courbe::depuis(&paliers)?;
+    Ok(paliers)
+}
 
 /// Une température en millidegrés, telle qu'elle s'écrit dans le panneau.
 ///

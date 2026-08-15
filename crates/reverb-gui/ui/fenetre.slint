@@ -111,6 +111,17 @@ export struct PalierCourbe {
     consigne: string,
     degres: int,
     pourcent: int,
+    // Ou la poignee se pose dans le cadre, en fractions du repere du trace
+    // (#122).
+    //
+    // ⚠️ **Calcule par `point_du_palier`, jamais ici.** C'est la regle de la
+    // maquette appliquee au trace : une coordonnee ecrite dans ce fichier
+    // marcherait le jour ou on l'ecrit et deviendrait fausse sans un mot le jour
+    // ou les bornes de la plage tracee changent. Et surtout, elle divergerait de
+    // la conversion INVERSE qui lit le geste — les deux doivent etre l'aller et
+    // le retour d'une meme fonction.
+    trace-x: float,
+    trace-y: float,
 }
 
 // Un mode de la colonne MODE, et ce qu'il veut dire (#112).
@@ -513,6 +524,16 @@ export component Fenetre inherits Window {
     callback regler-palier-consigne(int, int);
     // Poser la courbe editee. Refusee EN LE DISANT si elle n'en est pas une.
     callback appliquer-courbe();
+    // Les trois gestes de l'editeur par points (#122). Les coordonnees sont des
+    // fractions du CADRE, converties en (millidegres, pourcent) cote Rust : la
+    // conversion part de `TRACE_ASPECT`, jamais d'un second chiffre.
+    callback saisir-palier(float, float);
+    callback trainer-palier(float, float);
+    callback retirer-palier(float, float);
+    callback poser-palier(float, float);
+    // Le rang du palier attrape, ou -1. Sert a le mettre en evidence, et a
+    // brancher les barres de reglage fin dessus.
+    in-out property <int> palier-saisi: -1;
 
     // La famille retenue, ou une famille vide quand c'est « aucune ». Evite de
     // repeter le decalage de rang — le menu commence par « aucune », le
@@ -1778,6 +1799,62 @@ export component Fenetre inherits Window {
                                         color: #55566a;
                                         horizontal-alignment: center;
                                         vertical-alignment: center;
+                                    }
+                                    // Les poignees des paliers, posees par
+                                    // `point_du_palier` — jamais par un calcul
+                                    // ecrit ici, qui divergerait de la
+                                    // conversion du geste (#122).
+                                    for palier[rang] in root.paliers: Rectangle {
+                                        width: 11px;
+                                        height: 11px;
+                                        border-radius: 6px;
+                                        x: 8px + (parent.width - 16px)
+                                            * palier.trace-x / root.trace-aspect - 5px;
+                                        y: 8px + (parent.height - 16px) * palier.trace-y - 5px;
+                                        background: rang == root.palier-saisi ? #ffffff : #4d7cff;
+                                        border-width: 2px;
+                                        border-color: #14141b;
+                                    }
+                                    // ⚠️ La zone de geste couvre le CADRE, pas
+                                    // le trace : un point pose au ras du bord
+                                    // doit rester attrapable, et c'est la lecon
+                                    // de #121 sur la maquette.
+                                    TouchArea {
+                                        // Les fractions du cadre, converties
+                                        // cote Rust. La marge de 8px est celle
+                                        // du Path, sinon le geste et le dessin
+                                        // differeraient d'une demi-marge.
+                                        function fx(px: length) -> float {
+                                            return (px - 8px) / (parent.width - 16px) * root.trace-aspect;
+                                        }
+                                        function fy(py: length) -> float {
+                                            return (py - 8px) / (parent.height - 16px);
+                                        }
+                                        pointer-event(evenement) => {
+                                            if (evenement.kind == PointerEventKind.down
+                                                && evenement.button == PointerEventButton.right) {
+                                                root.retirer-palier(fx(self.mouse-x), fy(self.mouse-y));
+                                            }
+                                        }
+                                        clicked => {
+                                            // Un clic qui n'a rien attrape pose
+                                            // un palier ; sinon il l'a saisi, et
+                                            // le relacher ne doit rien poser de
+                                            // plus.
+                                            if (root.palier-saisi < 0) {
+                                                root.poser-palier(fx(self.mouse-x), fy(self.mouse-y));
+                                            }
+                                        }
+                                        moved => {
+                                            if (self.pressed && root.palier-saisi >= 0) {
+                                                root.trainer-palier(fx(self.mouse-x), fy(self.mouse-y));
+                                            }
+                                        }
+                                        changed pressed => {
+                                            if (self.pressed) {
+                                                root.saisir-palier(fx(self.mouse-x), fy(self.mouse-y));
+                                            }
+                                        }
                                     }
                                 }
                                 HorizontalLayout {

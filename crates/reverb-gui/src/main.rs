@@ -35,8 +35,9 @@ use reverb_gui::plan::{
 use reverb_gui::reglages::{
     AFFICHAGES, ChoixDeComposition, ChoixDeProfil, CourbeEditee, EcranChoisi, Limiteur, Poignee,
     Reglage, TRACE_ASPECT, TRACE_CHAUD, TRACE_FROID, commandes_de_trace, consigne_affichee,
-    degres_lisibles, directions_offertes, eclairage_lu, requete_d_animation,
-    requete_de_composition, requete_de_profil, requetes_pour_la_couleur,
+    degres_lisibles, directions_offertes, eclairage_lu, palier_ajoute, palier_deplace,
+    palier_retire, palier_saisi, point_du_palier, requete_d_animation, requete_de_composition,
+    requete_de_profil, requetes_pour_la_couleur,
 };
 use reverb_gui::sondes::{
     COURBE_ASPECT, Historique, ModelesNvme, Releve, SondeRetenue, commandes_de_courbe,
@@ -1866,6 +1867,65 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
             poser_la_courbe(&fenetre, &pupitre);
         });
     }
+    // Les quatre gestes de l'éditeur par points (#122).
+    //
+    // ⚠️ **Chacun passe par le juge du démon avant de poser quoi que ce soit** :
+    // les fonctions de `reglages.rs` rendent `Err` quand `Courbe::depuis` refuse,
+    // et l'éditeur garde alors ce qu'il montrait. Un point traîné en travers de
+    // son voisin est donc refusé **en le disant**, jamais réordonné en silence.
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_saisir_palier(move |x, y| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            let rang = palier_saisi(pupitre.courbe.borrow().paliers(), x, y);
+            fenetre.set_palier_saisi(rang.and_then(|r| i32::try_from(r).ok()).unwrap_or(-1));
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_trainer_palier(move |x, y| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            let Ok(rang) = usize::try_from(fenetre.get_palier_saisi()) else {
+                return;
+            };
+            let tente = palier_deplace(pupitre.courbe.borrow().paliers(), rang, x, y);
+            appliquer_le_geste(&fenetre, &pupitre, tente);
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_retirer_palier(move |x, y| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            // Le clic droit vise ce qu'il touche, pas ce qui était saisi : on
+            // relit donc le rang sous le curseur.
+            let Some(rang) = palier_saisi(pupitre.courbe.borrow().paliers(), x, y) else {
+                return;
+            };
+            let tente = palier_retire(pupitre.courbe.borrow().paliers(), rang);
+            appliquer_le_geste(&fenetre, &pupitre, tente);
+            fenetre.set_palier_saisi(-1);
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_poser_palier(move |x, y| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            let tente = palier_ajoute(pupitre.courbe.borrow().paliers(), x, y);
+            appliquer_le_geste(&fenetre, &pupitre, tente);
+        });
+    }
     {
         let pupitre = pupitre.clone();
         let envoi = ordres.clone();
@@ -1915,6 +1975,25 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
 /// remplacer recréerait les poignées sous les doigts qui les tirent, et remettrait
 /// leur rang à zéro. C'est le défaut que le menu des sondes a déjà eu, par une
 /// autre porte.
+/// Pose le résultat d'un geste d'éditeur, ou écrit pourquoi il est refusé (#122).
+///
+/// ⚠️ **Rien n'est posé sur un refus.** L'éditeur garde ce qu'il montrait, et la
+/// raison s'écrit devant les poignées — pas dans un journal après coup. C'est la
+/// règle de `appliquer-courbe` depuis #113, étendue aux quatre gestes.
+fn appliquer_le_geste(
+    fenetre: &Fenetre,
+    pupitre: &Pupitre,
+    tente: Result<Vec<(i32, u8)>, reverb_proto::regulation::CourbeInvalide>,
+) {
+    match tente {
+        Ok(paliers) => {
+            pupitre.courbe.borrow_mut().poser(paliers);
+            poser_la_courbe(fenetre, pupitre);
+        }
+        Err(erreur) => fenetre.set_refus_courbe(SharedString::from(erreur.raison)),
+    }
+}
+
 fn poser_la_courbe(fenetre: &Fenetre, pupitre: &Pupitre) {
     let courbe = pupitre.courbe.borrow();
     let paliers = courbe.paliers();
@@ -1932,6 +2011,10 @@ fn poser_la_courbe(fenetre: &Fenetre, pupitre: &Pupitre) {
             consigne: SharedString::from(format!("{pourcent} %")),
             degres: milli.div_euclid(1_000),
             pourcent: i32::from(*pourcent),
+            // La poignée, posée par `point_du_palier` — l'inverse exact de
+            // la conversion qui lit le geste (#122).
+            trace_x: point_du_palier((*milli, *pourcent)).0,
+            trace_y: point_du_palier((*milli, *pourcent)).1,
         };
         if modele.row_data(rang).as_ref() != Some(&ligne) {
             modele.set_row_data(rang, ligne);
