@@ -225,6 +225,9 @@ fn ligne_chan(pwm: Option<u8>) -> ResponseLine {
         pwm,
         mode: "pwm".to_string(),
         sait_faire_auto: false,
+        // #113 : la ligne `chan` gagne un dernier jeton. Ce fichier ne parle que
+        // de la valeur écrite à côté d'une barre, et rien ici n'en dépend.
+        regulable: false,
     }
 }
 

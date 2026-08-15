@@ -62,6 +62,9 @@
 //!     pub pwm: Option<u8>,
 //!     pub mode: String,
 //!     pub sait_faire_auto: bool,
+//!     /// Ajouté par #113 : ce pilote n'a aucun mode automatique, donc l'hôte peut le réguler.
+//!     /// Aucun test de ce fichier ne l'observe — il compte des lectures, pas des drapeaux.
+//!     pub regulable: bool,
 //! }
 //!
 //! /// Ce qu'un tour de relevé des canaux a produit.
@@ -255,6 +258,7 @@ fn piege() -> LectureCanal {
         pwm: Some(66),
         mode: "piège".to_owned(),
         sait_faire_auto: true,
+        regulable: false,
     }
 }
 
@@ -310,6 +314,7 @@ fn en_bonne_sante(nom: &str) -> LectureCanal {
             pwm: Some(40),
             mode: Mode::HostCurve.to_string(),
             sait_faire_auto: true,
+            regulable: false,
         },
         VOISIN => LectureCanal {
             position: None,
@@ -317,6 +322,7 @@ fn en_bonne_sante(nom: &str) -> LectureCanal {
             pwm: Some(60),
             mode: Mode::HostCurve.to_string(),
             sait_faire_auto: true,
+            regulable: false,
         },
         VENTILO_1 => LectureCanal {
             position: Some(Position::BasGauche),
@@ -324,6 +330,7 @@ fn en_bonne_sante(nom: &str) -> LectureCanal {
             pwm: Some(35),
             mode: Mode::Manual.to_string(),
             sait_faire_auto: false,
+            regulable: false,
         },
         VENTILO_2 => LectureCanal {
             position: Some(Position::BasMilieu),
@@ -331,6 +338,7 @@ fn en_bonne_sante(nom: &str) -> LectureCanal {
             pwm: Some(36),
             mode: Mode::Manual.to_string(),
             sait_faire_auto: false,
+            regulable: false,
         },
         BOITIER => LectureCanal {
             position: None,
@@ -338,6 +346,7 @@ fn en_bonne_sante(nom: &str) -> LectureCanal {
             pwm: Some(50),
             mode: Mode::Unsupported.to_string(),
             sait_faire_auto: false,
+            regulable: false,
         },
         autre => panic!("« {autre} » n'est pas un canal du banc"),
     }
@@ -352,6 +361,7 @@ fn ligne_attendue(nom: &str, lecture: &LectureCanal) -> ResponseLine {
         pwm: lecture.pwm,
         mode: lecture.mode.clone(),
         sait_faire_auto: lecture.sait_faire_auto,
+        regulable: lecture.regulable,
     }
 }
 

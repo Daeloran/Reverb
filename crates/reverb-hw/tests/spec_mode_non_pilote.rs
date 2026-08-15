@@ -742,13 +742,18 @@ mod ligne_chan {
                 pwm: Some(30),
                 mode: libelle(canal(&canaux, nom)),
                 sait_faire_auto: true,
+                // #113 : la grammaire gagne un dernier jeton. Ce qui compte ici
+                // est inchangé — le mode reste **un** jeton, donc l'arité de la
+                // ligne reste décidable, quel que soit le nombre de drapeaux
+                // qui le suivent.
+                regulable: false,
             };
 
             let encodee = encode_response_line(&ligne);
             assert_eq!(
                 encodee.split_whitespace().count(),
-                7,
-                "la ligne « {encodee} » doit garder ses sept jetons"
+                8,
+                "la ligne « {encodee} » doit garder ses huit jetons"
             );
             assert_eq!(
                 parse_response_line(&encodee),

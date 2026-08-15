@@ -98,6 +98,10 @@ fn canal(channel: &str, mode: &str, sait_faire_auto: bool) -> ResponseLine {
         pwm: Some(60),
         mode: mode.to_owned(),
         sait_faire_auto,
+        // #113 : la ligne gagne un dernier jeton. `false` ici parce que ce
+        // fichier fige la place du drapeau de #50, pas la capacité d'un
+        // contrôleur donné.
+        regulable: false,
     }
 }
 
@@ -110,6 +114,7 @@ fn canal_muet(channel: &str, mode: &str, sait_faire_auto: bool) -> ResponseLine 
         pwm: None,
         mode: mode.to_owned(),
         sait_faire_auto,
+        regulable: false,
     }
 }
 
@@ -180,22 +185,28 @@ fn le_champ_s_ecrit_oui_ou_non_en_dernier_et_se_relit() {
     // exact, un encodeur qui écrirait `chan … manual 1` passerait un test de
     // décodage indulgent sans qu'on le voie, et la fenêtre d'une version
     // ultérieure ne saurait plus le lire.
+    //
+    // ⚠️ **Les quatre lignes attendues ont gagné un jeton en #113**, qui ajoute
+    // `regulable` à la fin de la grammaire — exactement comme #50 avait ajouté
+    // le sien à la fin de celle de #17. Le drapeau de ce fichier reste à sa
+    // place, sixième champ, et c'est bien ce que la ligne vérifie ; ce qui a
+    // changé, c'est ce qui vient **après** lui.
     let cas: [(ResponseLine, &str); 4] = [
         (
             canal(AVEC_AUTO, "manual", true),
-            "chan kraken2023elite:fan-speed radiateur-haut 1200 60 manual oui",
+            "chan kraken2023elite:fan-speed radiateur-haut 1200 60 manual oui non",
         ),
         (
             canal(SANS_AUTO, "manual", false),
-            "chan nzxtsmart2:fan-1 radiateur-haut 1200 60 manual non",
+            "chan nzxtsmart2:fan-1 radiateur-haut 1200 60 manual non non",
         ),
         (
             canal_muet("kraken2023elite:pump-speed", "firmware", true),
-            "chan kraken2023elite:pump-speed - - - firmware oui",
+            "chan kraken2023elite:pump-speed - - - firmware oui non",
         ),
         (
             canal_muet(SANS_AUTO, "firmware", false),
-            "chan nzxtsmart2:fan-1 - - - firmware non",
+            "chan nzxtsmart2:fan-1 - - - firmware non non",
         ),
     ];
 
@@ -219,7 +230,17 @@ fn le_champ_est_le_dernier_jeton_de_la_ligne() {
     // inséré au milieu décalerait tout ce qui suit, et une ligne de démon d'hier
     // se décoderait en un canal plausible et faux — un `pwm` lu comme un `rpm`.
     //
-    // La ligne `chan` compte donc sept jetons, et le nouveau est le septième.
+    // La ligne `chan` comptait donc sept jetons, et le nouveau était le
+    // septième.
+    //
+    // ⚠️ **#113 en a ajouté un huitième, `regulable`, et pour la même raison.**
+    // Ce que ce test protège est intact : le drapeau de #50 reste le **sixième
+    // champ**, donc rien de ce qui le précède n'a bougé, donc une ligne de démon
+    // d'hier se décode toujours en elle-même — c'est cette propriété-là qui
+    // rendait « le dernier » souhaitable, et non la place elle-même. Un champ
+    // inséré **au milieu** décalerait tout ce qui suit et ferait lire un `pwm`
+    // comme un `rpm` ; c'est ce que les deux dernières assertions interdisent
+    // toujours.
     for (ligne, attendu) in [
         (canal(AVEC_AUTO, "manual", true), "oui"),
         (canal(SANS_AUTO, "manual", false), "non"),
@@ -227,15 +248,15 @@ fn le_champ_est_le_dernier_jeton_de_la_ligne() {
         let encodee = encode_response_line(&ligne);
         let jetons: Vec<&str> = encodee.split(' ').collect();
 
-        assert_eq!(jetons.len(), 7, "sept jetons attendus : « {encodee} »");
+        assert_eq!(jetons.len(), 8, "huit jetons attendus : « {encodee} »");
         assert_eq!(jetons[0], "chan");
         assert_eq!(
             jetons[6], attendu,
-            "le champ est le dernier jeton : « {encodee} »"
+            "le champ reste le sixième champ, à la fin de la grammaire de #50 : « {encodee} »"
         );
         assert!(
-            encodee.ends_with(&format!(" {attendu}")),
-            "« {encodee} » doit finir par « {attendu} »"
+            encodee.ends_with(&format!(" {attendu} non")),
+            "« {encodee} » doit porter « {attendu} » juste avant le jeton ajouté par #113"
         );
     }
 }
@@ -271,7 +292,10 @@ fn les_champs_absents_restent_des_tirets_a_cote_du_nouveau_champ() {
     // `unwrap_or_default()` reste plus court à écrire que le cas absent.
     let muet = canal_muet(AVEC_AUTO, "firmware", true);
     let encodee = encode_response_line(&muet);
-    assert_eq!(encodee, "chan kraken2023elite:fan-speed - - - firmware oui");
+    assert_eq!(
+        encodee,
+        "chan kraken2023elite:fan-speed - - - firmware oui non"
+    );
 
     let relue = parse_response_line(&encodee).expect("ligne bien formée");
     let ResponseLine::Channel {
@@ -298,9 +322,13 @@ fn les_champs_absents_restent_des_tirets_a_cote_du_nouveau_champ() {
         pwm: Some(0),
         mode: "manual".to_owned(),
         sait_faire_auto: false,
+        regulable: false,
     };
     let encodee = encode_response_line(&arrete);
-    assert_eq!(encodee, "chan nzxtsmart2:fan-2 bas-milieu 0 0 manual non");
+    assert_eq!(
+        encodee,
+        "chan nzxtsmart2:fan-2 bas-milieu 0 0 manual non non"
+    );
     assert_eq!(parse_response_line(&encodee), Ok(arrete));
 }
 
@@ -444,10 +472,11 @@ fn un_mode_nomme_oui_ou_non_ne_se_confond_pas_avec_le_champ() {
             Ok(attendue.clone()),
             "décodage de « {ligne} »"
         );
-        // Et le réencodage remet toujours les sept jetons : une ligne à six
-        // jetons est une entrée tolérée, jamais une sortie.
+        // Et le réencodage remet toujours tous les jetons — sept jusqu'à #113,
+        // huit depuis : une ligne courte est une entrée tolérée, jamais une
+        // sortie.
         let reencodee = encode_response_line(&attendue);
-        assert_eq!(reencodee.split(' ').count(), 7, "« {reencodee} »");
+        assert_eq!(reencodee.split(' ').count(), 8, "« {reencodee} »");
         assert_eq!(parse_response_line(&reencodee), Ok(attendue));
     }
 }
@@ -471,7 +500,12 @@ fn un_septieme_jeton_qui_n_est_ni_oui_ni_non_est_refuse() {
         "chan nzxtsmart2:fan-1 - - - manual OUI",
         "chan nzxtsmart2:fan-1 - - - manual Non",
         "chan nzxtsmart2:fan-1 - - - manual -",
-        "chan nzxtsmart2:fan-1 - - - manual oui non",
+        // ⚠️ **Cette ligne-ci était « chan … manual oui non » avant #113**, où
+        // elle portait un jeton de trop. Elle en est désormais une valide :
+        // sept champs, `regulable` en dernier. Ce qu'elle vérifiait — un jeton
+        // au-delà de la grammaire est refusé, jamais absorbé — se vérifie donc
+        // un cran plus loin, sur le huitième champ.
+        "chan nzxtsmart2:fan-1 - - - manual oui non oui",
     ] {
         let erreur: ResponseError = parse_response_line(ligne)
             .expect_err("un champ « sait faire auto » incompréhensible est refusé");
