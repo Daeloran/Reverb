@@ -708,6 +708,23 @@ barrettes et de la dalle du Kraken. **Aucune de ces formes n'a de coordonnée da
 toutes viennent de `plan.rs`, sinon la maquette divergerait de la géométrie à la première
 correction.
 
+**Le châssis a la forme de la vue.** De face c'est un **rectangle**, en isométrie l'enveloppe
+convexe des LED : une boîte vue de face en projection orthographique *est* un rectangle, et de
+trois-quarts la même boîte se projette en hexagone.
+
+⚠️ **Ce n'était pas le cas jusqu'à #125, et ça se voyait.** Les deux vues partageaient l'enveloppe
+convexe, si bien que le châssis de face était un polygone à **quatorze tranches obliques** — le
+contour de l'*éclairage*, pas celui du boîtier. Il avait un second défaut, moins visible et plus
+gênant : l'enveloppe s'arrête aux centres de LED plus une pastille, quand un cadre de ventilateur
+est tracé entre 1,20 et 1,25 fois son demi-axe. **Les ventilateurs dépassaient du trait censé les
+contenir** — mesuré à 1,6·10⁻⁴ de cadre sur `bas-gauche`. Le rectangle part donc des bornes de
+**tout ce qui est dessiné**, jamais des seules LED.
+
+⚠️ **Il reste déduit, jamais écrit à la main**, et c'est la contrainte qui commande : `Geometrie`
+ne porte que dix orientations — les centres et le rayon sont les mêmes pour toutes les géométries
+d'une même machine —, donc un contour calculé sur les anneaux serait insensible à toute géométrie
+possible, c'est-à-dire indiscernable d'un polygone posé en dur.
+
 **Chaque LED baigne son entourage de sa couleur.** C'est ce qu'on reconnaît d'un boîtier RGB avant
 la forme des pales, et une LED éteinte ne diffuse rien — un halo sur du noir ferait croire à un
 démon qui n'a pas reçu la commande.

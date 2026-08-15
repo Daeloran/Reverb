@@ -441,16 +441,27 @@ impl Plan {
 
     /// Le contour du châssis, dans l'ordre du contour.
     ///
-    /// ⚠️ **Il épouse le nuage des cent vingt-quatre LED**, et non les anneaux.
-    /// C'est la seule façon qu'il ait de suivre la géométrie : `Geometrie` ne
-    /// porte que dix orientations — les centres et le rayon sont les mêmes pour
-    /// toutes les géométries d'une même machine —, si bien qu'une silhouette
-    /// calculée sur les anneaux serait insensible à toute géométrie possible,
-    /// c'est-à-dire indiscernable d'un polygone écrit à la main.
+    /// **Sa forme dépend de la vue**, et les deux se déduisent du contenu :
+    ///
+    /// | vue | contour | pourquoi |
+    /// |---|---|---|
+    /// | [`Vue::Face`] | un **rectangle** à axes alignés | une boîte vue de face en projection orthographique *est* un rectangle |
+    /// | [`Vue::Isometrique`] | l'enveloppe convexe du nuage | de trois-quarts, la même boîte se projette en hexagone |
+    ///
+    /// ⚠️ **Ni l'un ni l'autre n'est écrit à la main.** C'est la contrainte qui
+    /// commande : `Geometrie` ne porte que dix orientations — les centres et le
+    /// rayon sont les mêmes pour toutes les géométries d'une même machine —, si
+    /// bien qu'un contour calculé sur les anneaux serait insensible à toute
+    /// géométrie possible, c'est-à-dire indiscernable d'un polygone posé en
+    /// dur. Le rectangle de face se déduit des **bornes du contenu dessiné**,
+    /// l'enveloppe isométrique du **nuage des cent vingt-quatre LED**.
     ///
     /// Contrepartie assumée : remonter un ventilateur fait respirer le contour
     /// de quelques millièmes de cadre. Les douze arêtes de #28 le font déjà,
     /// elles viennent de `Geometrie::bornes()`, donc des LED elles-mêmes.
+    ///
+    /// ⚠️ **En vue de face, il contient l'habillage et pas seulement les LED**
+    /// (issue #125). Voir [`rectangle_du_chassis`].
     pub fn silhouette(&self) -> &[Place] {
         &self.silhouette
     }
@@ -821,7 +832,6 @@ fn cadrer(plan: Plan, etendues: [(f32, f32); 10]) -> Plan {
     for reglette in &plan.barrettes {
         nuage.extend_from_slice(reglette);
     }
-    let silhouette = silhouette_du_nuage(&nuage, pastille);
 
     // L'habillage aussi se calcule avant, et pour la même raison : il dérive des
     // places brutes et des demi-axes bruts, et il doit entrer dans les bornes.
@@ -846,9 +856,6 @@ fn cadrer(plan: Plan, etendues: [(f32, f32); 10]) -> Plan {
     // face déborderait : ses anneaux y sont dessinés **plus petits que nature**
     // (voir `rayon_dessine`), si bien que le nuage de LED y est plus étroit que
     // le volume dont les organes internes tirent leurs proportions.
-    for sommet in &silhouette {
-        bornes.ajouter(sommet.x, sommet.y);
-    }
     for face in &plan.faces {
         for sommet in &face.sommets {
             bornes.ajouter(sommet.x, sommet.y);
@@ -863,6 +870,18 @@ fn cadrer(plan: Plan, etendues: [(f32, f32); 10]) -> Plan {
         for sommet in forme.contour.iter().chain(&forme.creux) {
             bornes.ajouter(sommet.x, sommet.y);
         }
+    }
+
+    // La silhouette vient **après** les bornes du contenu, et non plus avant :
+    // en vue de face elle s'en déduit (issue #125).
+    let silhouette = match plan.vue {
+        Vue::Face => rectangle_du_chassis(&bornes, pastille),
+        Vue::Isometrique => silhouette_du_nuage(&nuage, pastille),
+    };
+    // Puis elle rentre dans le cadre à son tour — elle déborde du contenu de la
+    // marge qu'on vient de lui donner.
+    for sommet in &silhouette {
+        bornes.ajouter(sommet.x, sommet.y);
     }
 
     let utile = 1.0 - 2.0 * MARGE;
@@ -1309,6 +1328,36 @@ fn corps_de_barrette(
         bord(norme + retrait, proche),
         bord(norme + retrait, loin),
         bord(-retrait, loin),
+    ]
+}
+
+/// Le contour du châssis **en vue de face** : le rectangle du contenu, écarté
+/// d'une marge (issue #125).
+///
+/// Un boîtier est une boîte, et une boîte vue de face en projection
+/// orthographique **est** un rectangle. L'enveloppe convexe employée jusqu'ici
+/// donnait un polygone à quatorze tranches obliques, qui n'était le contour de
+/// rien — c'était l'enveloppe de l'*éclairage*, pas celle du châssis.
+///
+/// ⚠️ **Elle part des bornes du contenu dessiné, jamais des seules LED.** Les
+/// cadres de ventilateur sont tracés entre 1,20 et 1,25 fois leur demi-axe
+/// (`CADRE_EXTERIEUR`) là où le nuage s'arrête aux centres de LED : un
+/// rectangle déduit du seul nuage laisserait les ventilateurs dépasser du
+/// trait censé les contenir, ce qui était le second défaut de #125. Mesuré
+/// avant correction : le cadre de `BasGauche` sortait de 1,6·10⁻⁴ de cadre.
+///
+/// La justification de [`Plan::silhouette`] tient toujours : ces bornes
+/// dérivent des places dessinées, donc le rectangle **bouge avec la
+/// géométrie**. Ce n'est pas un polygone écrit à la main.
+fn rectangle_du_chassis(bornes: &Bornes, marge: f32) -> Vec<Place> {
+    let (x0, y0) = (bornes.x_min - marge, bornes.y_min - marge);
+    let (x1, y1) = (bornes.x_max + marge, bornes.y_max + marge);
+    // Dans l'ordre du contour, fermeture implicite — comme partout ailleurs.
+    vec![
+        Place { x: x0, y: y0 },
+        Place { x: x1, y: y0 },
+        Place { x: x1, y: y1 },
+        Place { x: x0, y: y1 },
     ]
 }
 
