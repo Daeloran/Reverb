@@ -151,6 +151,15 @@
 //! - **Le lissage de la sonde et la quantification de la courbe** : les deux autres remèdes
 //!   proposés par l'issue, tous deux écartés au profit de l'hystérésis.
 
+// Les assertions qui **encadrent** `HYSTERESIS` et le situent par rapport à `REPLI` sont
+// constantes une fois la constante écrite, et clippy les refuse à ce titre — comme dans
+// `spec_plafond.rs` et `spec_fil_ecran.rs`, où le même `allow` est posé pour la même raison. C'est
+// précisément leur intérêt : elles ne servent pas à observer une exécution mais à casser la
+// compilation le jour où quelqu'un poserait un seuil hors de la fourchette que #111 a raisonnée.
+// Aucune assertion n'a été touchée pour lever ce lint — seul cet `allow` a été ajouté, après
+// l'implémentation.
+#![allow(clippy::assertions_on_constants)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverb_daemon::regulation::{Courbe, Ecriture, HYSTERESIS, Motif, REPLI, Regulation};

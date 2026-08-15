@@ -45,6 +45,29 @@
 //! intestable sans matériel — exactement ce que #99 avait acheté en rendant les
 //! écritures au lieu de les faire.
 //!
+//! # Une consigne ne suit pas le bruit de la sonde (issue #111)
+//!
+//! Le 2026-08-15, régulation de #99 active depuis des heures, machine au repos :
+//!
+//! ```text
+//! 15:51:10  nzxtsmart2:fan-{1,2,3} à 46 %   (liquide 40.4 °C)
+//! 15:51:48  nzxtsmart2:fan-{1,2,3} à 45 %   (liquide 40.1 °C)
+//! 15:52:28  nzxtsmart2:fan-{1,2,3} à 46 %   (liquide 40.2 °C)
+//! ```
+//!
+//! **Trente écritures en huit minutes** pour 0,3 °C d'amplitude, soit ~3 500 par
+//! jour et par canal, sur un contrôleur qui a déjà montré qu'il n'aimait pas les
+//! écritures rapprochées.
+//!
+//! ⚠️ **La règle de #99 était respectée à la lettre et ratée en esprit.** « On
+//! n'écrit que ce qui change » est vrai — la consigne *change* vraiment, la
+//! sonde bruite de ±0,3 °C et la courbe fait 3 %/°C —, et la régulation ne se
+//! tait jamais pour autant.
+//!
+//! D'où [`HYSTERESIS`] : ce n'est plus l'existence de l'écart qui décide, c'est
+//! sa **taille**. Voir `merite_une_ecriture` pour la grandeur mesurée et les
+//! exemptions.
+//!
 //! # Millidegrés partout, jamais de degrés flottants
 //!
 //! `Sonde::lire` rend des millidegrés entiers, comme `hwmon` ; une conversion
@@ -82,6 +105,25 @@ pub const SONDE_DU_LIQUIDE: &str = "kraken2023elite:coolant-temp";
 /// derrière une sonde morte, c'est un CPU qui chauffe sans que rien ne le
 /// signale. Et ça arrive — le Kraken se plante périodiquement.
 pub const REPLI: u8 = 50;
+
+/// L'écart de consigne, en points de pourcentage, à partir duquel une
+/// réécriture part (issue #111).
+///
+/// La sonde du liquide bruite de ±0,1 à 0,3 °C d'une lecture à l'autre ; la
+/// courbe fait 3 %/°C sur ce segment, donc ce bruit vaut **±1 point de
+/// consigne**. Mesuré sur SHYNAEL le 2026-08-15, machine au repos, régulation
+/// active depuis des heures : trente écritures en huit minutes sur les trois
+/// canaux, pour 0,3 °C d'amplitude.
+///
+/// ⚠️ **Le seuil est atteint, pas dépassé** : on écrit dès que l'écart vaut
+/// `HYSTERESIS`. Un seuil « strictement supérieur » ferait de 2 un seuil de 3
+/// en pratique, et le chiffre écrit ici ne voudrait plus dire ce qu'il dit.
+///
+/// Deux points suffisent à faire taire le bruit relevé, et laissent passer
+/// toute variation dépassant 0,7 °C de liquide — soit très en deçà d'une vraie
+/// montée en charge, qui a mis quarante minutes à gagner quinze degrés le
+/// 2026-08-15. Plus large, l'hystérésis se mettrait à retarder cette montée-là.
+pub const HYSTERESIS: u8 = 2;
 
 /// Où l'état de la régulation est conservé entre deux démarrages.
 ///
@@ -264,6 +306,57 @@ fn arrondi(numerateur: i64, denominateur: i64) -> i64 {
     (2 * numerateur + denominateur).div_euclid(2 * denominateur)
 }
 
+/// L'écart entre ce qu'un canal **porte** et la consigne justifie-t-il de lui
+/// écrire ? (issue #111)
+///
+/// La grandeur est `|porté − consigne|`, **jamais** `|consigne − dernière
+/// écrite|`. Trois raisons, dans cet ordre :
+///
+/// - **elle compose avec #110**. Un canal bloqué à 25 % pour une consigne de
+///   46 % montre vingt et un points d'écart : il reste réécrit à chaque tour, et
+///   la réparation automatique tient. Comparée à l'intention, l'hystérésis le
+///   rendrait **muet** dès le premier tour de bruit — la consigne repasserait de
+///   46 à 45 sans jamais s'écarter d'un point de la dernière écrite, et un canal
+///   bloqué redeviendrait invisible ;
+/// - **elle n'ajoute aucun état**. Elle se calcule des deux arguments de
+///   [`Regulation::tour`], là où l'autre demanderait de retenir la dernière
+///   consigne *calculée* en plus du cache d'activation — deux mémoires qui se
+///   ressemblent finissent par diverger ;
+/// - **c'est la grandeur que l'utilisateur subit** : non pas de combien la
+///   consigne a bougé, mais de combien le ventilateur est loin de ce qu'on lui
+///   demande.
+///
+/// Trois exemptions, et exactement trois. La première n'est pas ici — « jamais
+/// écrit depuis son activation » se décide sur le cache, avant d'appeler cette
+/// fonction. Restent :
+///
+/// - ⚠️ **les bornes**. Une consigne de 0 % ou de 100 % part dès qu'elle diffère,
+///   sans seuil : c'est le sens même d'une borne. « À fond » ne doit pas
+///   s'arrêter à 99 — le README promet 100 % au-delà de 50 °C —, ni « à
+///   l'arrêt » s'immobiliser à 1 % pour toujours. **Quitter** une borne, en
+///   revanche, est une consigne ordinaire : rester une seconde de plus à plein
+///   régime ne coûte rien, ne jamais y arriver si ;
+/// - ⚠️ **le repli d'une sonde muette** ([`REPLI`], `liquide` à `None`). C'est la
+///   seule écriture du système qui **signale une panne** : le liquide illisible
+///   veut dire que le Kraken est en difficulté, donc que plus rien ne mesure la
+///   température du circuit. L'amortir la rendrait indistincte d'un régime
+///   normal. L'exemption ne devient pas « on écrit à chaque tour » pour autant —
+///   un canal qui porte déjà le repli n'a plus rien à recevoir.
+fn merite_une_ecriture(porte: u8, consigne: u8, sonde_muette: bool) -> bool {
+    if porte == consigne {
+        return false;
+    }
+    let sans_seuil = sonde_muette || consigne == 0 || consigne == 100;
+    // ⚠️ Le seuil est **atteint**, pas dépassé : `>=`, et non `>`. Un seuil
+    // strictement supérieur ferait de 2 un seuil de 3 en pratique, et le chiffre
+    // écrit dans `HYSTERESIS` ne voudrait plus dire ce qu'il dit.
+    //
+    // `abs_diff` et non une soustraction : les deux sens du bruit comptent, et
+    // une erreur de signe ne produit aucun message — juste un ventilateur qui ne
+    // redescend jamais.
+    sans_seuil || porte.abs_diff(consigne) >= HYSTERESIS
+}
+
 /// Ce qui empêche une suite de paliers d'être une courbe.
 #[derive(Debug)]
 pub struct CourbeInvalide {
@@ -411,14 +504,23 @@ impl Regulation {
     /// # La règle, en une ligne
     ///
     /// On écrit si le canal est **lisible** et (**jamais écrit depuis son
-    /// activation** ou **ce qu'il porte diffère de la consigne**).
+    /// activation** ou **l'écart entre ce qu'il porte et la consigne mérite une
+    /// écriture**) — voir `merite_une_ecriture`.
     ///
-    /// ⚠️ **La comparaison est exacte, sans tolérance**, et elle peut l'être :
-    /// `Percent::from_raw(Percent::raw(p)) == p` sur les 101 valeurs — un point
-    /// de pourcentage vaut 2,55 pas de duty, le pas est expansif, donc aucun
-    /// arrondi ne replie deux pourcentages sur le même duty. Un écart relu est
-    /// donc un écart réel, et une tolérance « au cas où l'arrondi » masquerait
-    /// une vraie dérive sans rien corriger.
+    /// ⚠️ **La comparaison reste exacte, mais elle n'est plus le critère**
+    /// (issue #111). Un écart relu est bien un écart réel — `Percent` ne replie
+    /// jamais deux pourcentages sur le même duty, un point valant 2,55 pas — et
+    /// c'est justement pourquoi le bruit de la sonde passait entier : la
+    /// consigne *changeait* vraiment d'un point, et la régulation ne se taisait
+    /// jamais pour autant. Ce qui décide désormais est la **taille** de l'écart,
+    /// pas son existence.
+    ///
+    /// ⚠️ **Contrepartie assumée : sous le seuil, un bruit d'un point et une
+    /// non-application d'un point deviennent indistinguables.** Un canal à qui
+    /// on a écrit 46 et qui n'en porte que 45 n'est plus rejoué. Les deux
+    /// situations produisent littéralement la même lecture, et rien dans
+    /// `portees` ne permet de les séparer. Le prix est d'**un point de duty sur
+    /// 255** ; le gain, les 86 400 trames par jour que #99 invoquait déjà.
     ///
     /// ⚠️ **Un canal qu'on ne sait pas relire n'est pas écrit.** Ni écriture à
     /// l'aveugle, ni « une fois pour voir » : écrire là où on ne mesure pas,
@@ -452,7 +554,7 @@ impl Regulation {
                 continue;
             };
             let jamais_ecrit = derniere.is_none();
-            if !jamais_ecrit && porte == consigne {
+            if !jamais_ecrit && !merite_une_ecriture(porte, consigne, liquide.is_none()) {
                 continue;
             }
             // Quand les deux motifs se disputent — la consigne change **et** le
