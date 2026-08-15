@@ -19,6 +19,7 @@ pub mod mode;
 pub mod position;
 pub mod profil;
 pub mod ram;
+pub mod regulation;
 pub mod screen;
 
 pub use color::{Brightness, Rgb, Tsl, TslInvalide};

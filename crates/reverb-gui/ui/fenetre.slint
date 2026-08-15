@@ -76,6 +76,41 @@ export struct LigneVentilateur {
     // ferme a chaque ouverture, un verrou qui se souviendrait d'avoir ete
     // ouvert ne protegerait plus rien le lendemain.
     deverrouille: bool,
+    // Le pilote de ce canal n'a AUCUN mode automatique, donc c'est a l'hote de
+    // le reguler s'il doit l'etre (#113). Vrai pour les trois canaux
+    // nzxtsmart2, faux pour les deux du Kraken — leur firmware regule deja, et
+    // #99 les met hors scope.
+    regulable: bool,
+    // Le demon regule ce canal, a ce tour-ci. Vient des lignes « regule » du
+    // meme tour, JAMAIS d'une memoire de fenetre : un « regule off » pose par
+    // le socket depuis un autre client doit se voir ici a la seconde suivante.
+    //
+    // ⚠️ Ce n'est PAS `regule-seul`, qui dit le contraire — le peripherique se
+    // regule tout seul (#112). Les deux grisent une barre pour des raisons
+    // OPPOSEES : ici on protege la boucle du demon, la on protege une
+    // regulation d'usine qu'aucune commande ne retablit. L'interface les
+    // distingue donc de trois facons — un temoin bleu qui ne parait que sur un
+    // canal regule, un bouton qui dit « Ne plus reguler » la ou l'autre dit
+    // « Deverrouiller », et la colonne MODE qui n'ecrit « non-pilote » que pour
+    // le second. Sans quoi « pourquoi je ne peux pas bouger cette barre »
+    // n'aurait pas de reponse lisible.
+    sous-regulation: bool,
+}
+
+// Un palier de la courbe de regulation, tel que l'editeur le montre (#113).
+//
+// Deux graphies pour la meme chose, et c'est voulu : `temperature` et
+// `consigne` sont ce qui se LIT — « 45,5 °C », « 60 % » —, `degres` et
+// `pourcent` ce que les deux poignees portent.
+//
+// ⚠️ L'unite du protocole reste le MILLIDEGRE entier (#99). Les poignees ne
+// graduent qu'en degres ; un demi-degre rendu par le socket survit donc tant
+// que personne ne touche a SON palier, et repart intact.
+export struct PalierCourbe {
+    temperature: string,
+    consigne: string,
+    degres: int,
+    pourcent: int,
 }
 
 // Un mode de la colonne MODE, et ce qu'il veut dire (#112).
@@ -280,6 +315,36 @@ export component Fenetre inherits Window {
     // Les couches de halo, de la plus large a la plus serree.
     in property <[PointHalo]> halos;
     in property <[LigneVentilateur]> ventilateurs;
+    // Les paliers de la courbe de regulation, tels que l'editeur les tient
+    // (#113). Vides tant que le demon n'a rien rendu : le panneau n'invente
+    // aucune courbe, comme une sonde muette n'invente aucune temperature.
+    in property <[PalierCourbe]> paliers;
+    // Le trace de ces paliers, en commandes SVG sur `trace-aspect` x 1.
+    //
+    // ⚠️ Il vient de `trace_de_courbe`, donc de `Courbe::consigne` — LA fonction
+    // que le demon execute. Une boucle ecrite ici dessinerait une courbe que le
+    // boitier n'applique pas, et rien ne le dirait (#113).
+    in property <string> trace-courbe;
+    // Le rapport largeur/hauteur dans lequel le trace ci-dessus est emis.
+    //
+    // ⚠️ **Slint met un `Path` a l'echelle UNIFORMEMENT et ne rogne pas au
+    // viewbox.** Un carre unite dans un cadre large et bas n'occupe donc que sa
+    // hauteur en largeur — 24 % du cadre, mesure au pixel le 2026-08-15. Ce
+    // rapport sert donc DEUX fois, au viewbox et a la hauteur du cadre, pour que
+    // la mise a l'echelle uniforme tombe juste. Il vient de `TRACE_ASPECT`, et
+    // jamais d'un chiffre ecrit ici : deux valeurs a tenir d'accord
+    // divergeraient, et le trace redeviendrait faux sans un mot.
+    in property <float> trace-aspect: 4.0;
+    // Les deux bornes de la plage tracee, telles qu'elles s'ecrivent.
+    in property <string> borne-froide;
+    in property <string> borne-chaude;
+    // Pourquoi la courbe en cours d'edition ne peut pas etre posee, s'il y a
+    // une raison. Vide quand elle est valide.
+    //
+    // ⚠️ Le juge est `Courbe::depuis`, celui du demon, et le refus arrive donc
+    // DEVANT la poignee qu'on vient de bouger plutot que dans un journal apres
+    // le geste.
+    in property <string> refus-courbe;
     // Les six modes et leur explication. La liste vient de la bibliotheque, pas
     // d'ici : elle est celle du protocole, et l'ecrire dans ce fichier la
     // mettrait hors de portee des tests.
@@ -410,6 +475,17 @@ export component Fenetre inherits Window {
     callback rendre-au-firmware(string);
     // Le geste explicite qui ouvre — ou referme — le cadenas d'un canal (#112).
     callback basculer-verrou(string);
+    // Prendre ce canal en charge, ou le rendre (#113).
+    //
+    // ⚠️ La fenetre n'ecrit aucun fichier et n'ouvre aucun peripherique
+    // (ADR-002) : ceci part sur le socket, en « regule <canal> on|off », et
+    // l'etat affiche revient du demon au tour suivant.
+    callback basculer-regulation(string);
+    // Deplacer un palier : son rang, puis sa valeur.
+    callback regler-palier-temperature(int, int);
+    callback regler-palier-consigne(int, int);
+    // Poser la courbe editee. Refusee EN LE DISANT si elle n'en est pas une.
+    callback appliquer-courbe();
 
     // La famille retenue, ou une famille vide quand c'est « aucune ». Evite de
     // repeter le decalage de rang — le menu commence par « aucune », le
@@ -1384,6 +1460,7 @@ export component Fenetre inherits Window {
                                 for canal in root.ventilateurs: VerticalLayout {
                                     spacing: 2px;
                                     HorizontalLayout {
+                                        spacing: 6px;
                                         Text {
                                             text: canal.position == "" ? canal.canal : canal.position;
                                             font-size: 12px;
@@ -1396,6 +1473,43 @@ export component Fenetre inherits Window {
                                             color: canal.lisible ? #e6e6ef : #8a8c9b;
                                             horizontal-stretch: 1;
                                             overflow: elide;
+                                        }
+                                        // ⚠️ LE temoin qui distingue les deux
+                                        // barres grisees. Un canal regule et un
+                                        // canal verrouille sont inertes pour
+                                        // des raisons opposees, et sans un
+                                        // signe qui ne parait que sur l'un des
+                                        // deux, « pourquoi je ne peux pas
+                                        // bouger cette barre » n'a pas de
+                                        // reponse.
+                                        //
+                                        // Il emprunte le bleu de tout ce que la
+                                        // fenetre montre comme RETENU — onglet
+                                        // actif, zone visee, ambiance rappelee.
+                                        // Un canal regule est exactement cela :
+                                        // tenu par le demon.
+                                        //
+                                        // ⚠️ `width: 0px` en plus de `visible` :
+                                        // un element invisible garde sa place en
+                                        // layout, et le laisser la creuserait un
+                                        // trou sur les onze canaux qui ne sont
+                                        // pas regules.
+                                        Rectangle {
+                                            visible: canal.sous-regulation;
+                                            width: canal.sous-regulation ? 54px : 0px;
+                                            height: 15px;
+                                            border-radius: 7px;
+                                            background: #2a3352;
+                                            border-width: 1px;
+                                            border-color: #4d7cff;
+                                            Text {
+                                                text: "régulé";
+                                                font-size: 10px;
+                                                font-weight: 700;
+                                                color: #cdd8ff;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
                                         }
                                         Text {
                                             text: canal.lisible ? canal.rpm + " tr/min · " + canal.mode : "illisible";
@@ -1428,7 +1542,18 @@ export component Fenetre inherits Window {
                                             // c'est `commande_verrouillable`
                                             // qui en décide vraiment — ceci
                                             // n'est que ce qui se voit.
-                                            enabled: canal.lisible && (!canal.regule-seul || canal.deverrouille);
+                                            // ⚠️ Ni celle d'un canal que le
+                                            // demon regule (#113), et celle-la
+                                            // ne s'ouvre par aucun cadenas : le
+                                            // verrou est une confirmation, la
+                                            // regulation une prise en charge, et
+                                            // seul « Ne plus reguler » la rend.
+                                            // C'est `commande_effective` qui en
+                                            // decide vraiment — ceci n'est que
+                                            // ce qui se voit.
+                                            enabled: canal.lisible
+                                                && !canal.sous-regulation
+                                                && (!canal.regule-seul || canal.deverrouille);
                                             changed(valeur) => {
                                                 root.regler-ventilateur(canal.canal, Math.round(valeur));
                                             }
@@ -1512,7 +1637,167 @@ export component Fenetre inherits Window {
                                             enabled: canal.lisible;
                                             clicked => { root.rendre-au-firmware(canal.canal); }
                                         }
+                                        // La regulation cote hote (#113). ⚠️ Elle
+                                        // ne parait QUE sur un canal dont le
+                                        // pilote n'a aucun mode automatique :
+                                        // les deux canaux du Kraken regulent
+                                        // deja par leur firmware, et #99 les met
+                                        // hors scope — leur proposer une boucle
+                                        // hote serait echanger une garantie qui
+                                        // tient sans demon contre une qui n'en
+                                        // tient pas.
+                                        //
+                                        // ⚠️ Le libelle dit ce que le CLIC FAIT,
+                                        // comme le cadenas : c'est aussi ce qui
+                                        // le distingue de lui a la lecture —
+                                        // « Ne plus reguler » et
+                                        // « Deverrouiller » ne se confondent
+                                        // pas, la ou deux barres grisees, si.
+                                        //
+                                        // ⚠️ Sur SHYNAEL les deux ne coexistent
+                                        // jamais sur une meme ligne : les trois
+                                        // canaux regulables lisent « manuel »,
+                                        // donc sans cadenas. La rangee garde sa
+                                        // poignee pleine largeur.
+                                        Button {
+                                            text: canal.sous-regulation ? "Ne plus réguler" : "Réguler";
+                                            visible: canal.regulable;
+                                            width: canal.regulable ? self.preferred-width : 0px;
+                                            // Inerte sur un canal muet (#100) :
+                                            // ni le prendre ni le rendre n'a de
+                                            // sens tant qu'on ne sait pas ce
+                                            // qu'il fait.
+                                            enabled: canal.lisible;
+                                            clicked => { root.basculer-regulation(canal.canal); }
+                                        }
                                     }
+                                }
+
+                                // ── La courbe de la regulation ─────────────
+                                //
+                                // Un seul reglage pour les trois canaux : tant
+                                // que la repartition physique des ventilateurs
+                                // par canal reste l'inconnue de
+                                // `docs/VENTILATEURS.md`, une courbe par canal
+                                // n'aurait rien de plus a dire (#99, #113).
+                                Titre { text: "COURBE DE RÉGULATION"; }
+                                Text {
+                                    text: "La température du liquide décide de la consigne des canaux régulés. "
+                                        + "Hors des paliers, elle est ramenée aux bornes — jamais prolongée.";
+                                    font-size: 11px;
+                                    color: #8a8c9b;
+                                    wrap: word-wrap;
+                                }
+                                // Le trace de ce que les paliers donnent. Il
+                                // vient de `Courbe::consigne`, celle que le
+                                // demon execute : ce qu'on voit ici est ce que
+                                // le boitier appliquera.
+                                Rectangle {
+                                    // ⚠️ **La hauteur suit la largeur**, par le
+                                    // meme rapport que le viewbox du trace. Une
+                                    // hauteur fixe rendrait le cadre et le
+                                    // trace de rapports differents, et la mise a
+                                    // l'echelle uniforme de Slint recollerait la
+                                    // courbe dans un carre centre — le defaut
+                                    // que `TRACE_ASPECT` corrige.
+                                    height: (parent.width - 16px) / root.trace-aspect + 16px;
+                                    background: #14141b;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: #24242e;
+                                    if root.trace-courbe != "": Path {
+                                        x: 8px;
+                                        y: 8px;
+                                        width: parent.width - 16px;
+                                        height: parent.height - 16px;
+                                        viewbox-width: root.trace-aspect;
+                                        viewbox-height: 1;
+                                        commands: root.trace-courbe;
+                                        stroke: #4d7cff;
+                                        stroke-width: 2px;
+                                    }
+                                    // Une courbe qui n'en est pas une ne se
+                                    // dessine pas : un trace plausible sous un
+                                    // refus serait le pire des deux.
+                                    if root.trace-courbe == "": Text {
+                                        text: "—";
+                                        color: #55566a;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    Text {
+                                        text: root.borne-froide;
+                                        font-size: 10px;
+                                        color: #6f7180;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: root.borne-chaude;
+                                        font-size: 10px;
+                                        color: #6f7180;
+                                        horizontal-alignment: right;
+                                    }
+                                }
+                                for palier[rang] in root.paliers: HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: palier.temperature;
+                                        font-size: 11px;
+                                        color: #b9bbc9;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right;
+                                        min-width: 52px;
+                                    }
+                                    Slider {
+                                        // ⚠️ Des degres entiers, et non des
+                                        // millidegres : la poignee gradue, elle
+                                        // ne mesure pas. Le millidegre reste
+                                        // l'unite du protocole, et un palier au
+                                        // demi-degre rendu par le socket reste
+                                        // intact tant qu'on ne touche pas a sa
+                                        // poignee.
+                                        minimum: 20;
+                                        maximum: 70;
+                                        value: palier.degres;
+                                        changed(valeur) => {
+                                            root.regler-palier-temperature(rang, Math.round(valeur));
+                                        }
+                                    }
+                                    Text {
+                                        text: palier.consigne;
+                                        font-size: 11px;
+                                        color: #b9bbc9;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right;
+                                        min-width: 34px;
+                                    }
+                                    Slider {
+                                        minimum: 0;
+                                        maximum: 100;
+                                        value: palier.pourcent;
+                                        changed(valeur) => {
+                                            root.regler-palier-consigne(rang, Math.round(valeur));
+                                        }
+                                    }
+                                }
+                                // ⚠️ Le refus est ecrit ICI, devant les
+                                // poignees, et non dans le bandeau de tete : une
+                                // courbe invalide est refusee EN LE DISANT et
+                                // sans etre posee (#113), et le dire ailleurs
+                                // qu'a l'endroit du geste reviendrait a
+                                // l'apprendre apres coup.
+                                if root.refus-courbe != "": Text {
+                                    text: root.refus-courbe;
+                                    font-size: 11px;
+                                    color: #ffb3b0;
+                                    wrap: word-wrap;
+                                }
+                                Button {
+                                    text: "Appliquer la courbe";
+                                    enabled: root.paliers.length > 0;
+                                    clicked => { root.appliquer-courbe(); }
                                 }
                                 Rectangle { vertical-stretch: 1; }
                             }

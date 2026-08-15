@@ -36,7 +36,10 @@ use std::time::Duration;
 use reverb_anim::{Animation, CATALOGUE, Direction, ReglageInvalide, Reglages};
 use reverb_proto::composition::{Ancre, Fond, Source};
 use reverb_proto::ipc::{ProfilAction, Request, ResponseLine, ScreenAction};
+use reverb_proto::regulation::Courbe;
 use reverb_proto::{Led, NomInvalide, NomProfil, Rgb};
+
+use crate::telemetrie::trace_de_courbe;
 
 /// Combien de temps une consigne l'emporte sur la mesure après le relâchement.
 ///
@@ -847,4 +850,137 @@ impl EcranChoisi {
         self.argument = argument.to_owned();
         change
     }
+}
+
+/// La courbe de régulation telle que l'éditeur la montre (issue #113).
+///
+/// Même arbitrage que [`Reglage::adopter`], et pour la même raison : le démon
+/// rend sa courbe à chaque tour, une fois par seconde, et la recopier sans
+/// condition remettrait les poignées en place au milieu d'un réglage.
+///
+/// ⚠️ **Ce n'est pas une mémoire de fenêtre pour autant.** Ce qui s'affiche est
+/// toujours ce que le démon a rendu, sauf tant qu'un geste est en cours. Un
+/// « Appliquer » remet les deux d'accord ; jusque-là, ce que l'éditeur montre est
+/// ce que l'utilisateur vient de poser, et non un état inventé.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CourbeEditee {
+    /// Les paliers que l'éditeur montre, en `(millidegrés, pourcent)`.
+    paliers: Vec<(i32, u8)>,
+    /// Les derniers paliers rendus par le démon, `None` avant le premier tour.
+    recue: Option<Vec<(i32, u8)>>,
+}
+
+impl CourbeEditee {
+    /// Les paliers en cours d'édition.
+    pub fn paliers(&self) -> &[(i32, u8)] {
+        &self.paliers
+    }
+
+    /// Reprend la courbe que le démon vient de rendre. Vrai s'il faut redessiner.
+    ///
+    /// Ne reprend rien tant que l'éditeur porte autre chose que ce que le démon
+    /// avait rendu la dernière fois : c'est le signe qu'un réglage est en cours,
+    /// et le lui reprendre effacerait les paliers sous les doigts.
+    pub fn adopter(&mut self, paliers: &[(i32, u8)]) -> bool {
+        if self.recue.as_deref() == Some(paliers) {
+            return false;
+        }
+        let intacte = self
+            .recue
+            .as_ref()
+            .is_none_or(|rendus| *rendus == self.paliers);
+        self.recue = Some(paliers.to_vec());
+        if !intacte {
+            return false;
+        }
+        self.paliers = paliers.to_vec();
+        true
+    }
+
+    /// Déplace la température d'un palier, en **degrés entiers**.
+    ///
+    /// ⚠️ **Le millidegré est l'unité, le degré n'est que la graduation de la
+    /// poignée.** Une courbe rendue par le socket peut porter un demi-degré
+    /// (`45500`) ; il reste intact tant que personne ne touche à *ce* palier-là.
+    pub fn regler_temperature(&mut self, rang: usize, degres: i32) {
+        if let Some((milli, _)) = self.paliers.get_mut(rang) {
+            *milli = degres.saturating_mul(1_000);
+        }
+    }
+
+    /// Déplace la consigne d'un palier, en pourcent.
+    pub fn regler_consigne(&mut self, rang: usize, pourcent: u8) {
+        if let Some((_, consigne)) = self.paliers.get_mut(rang) {
+            *consigne = pourcent.min(100);
+        }
+    }
+}
+
+/// La plage sur laquelle le panneau trace la courbe, en millidegrés.
+///
+/// Elle **déborde des deux côtés** des paliers par défaut — 20 °C est sous le
+/// premier, 70 °C au-dessus du dernier —, et c'est tout l'intérêt : c'est là que
+/// l'écrêtage se voit. Une plage collée aux paliers montrerait une droite qui
+/// monte, sans jamais dire ce que la courbe fait sur un circuit qui démarre.
+pub const TRACE_FROID: i32 = 20_000;
+/// L'autre borne de [`TRACE_FROID`].
+pub const TRACE_CHAUD: i32 = 70_000;
+/// Un point par degré : la courbe est faite de segments, et un point par palier
+/// suffirait à la dessiner — mais pas à prouver qu'elle vient de `consigne`.
+pub const TRACE_POINTS: usize = 51;
+
+/// Le rapport largeur/hauteur dans lequel le tracé est émis.
+///
+/// ⚠️ **Slint met un `Path` à l'échelle *uniformément*** — par
+/// `min(largeur / viewbox_largeur, hauteur / viewbox_hauteur)` — et il **ne
+/// rogne pas** au viewbox. Un carré unité dessiné dans un cadre de 359 × 88 px
+/// n'occupe donc que 88 px de large, centré : **24 % du cadre**, mesuré au pixel
+/// le 2026-08-15 sur l'image d'aperçu, les deux plateaux comprimés avec la
+/// rampe. Et ne corriger que le `viewbox-height` fait **déborder** la courbe par
+/// le haut au lieu de l'étirer, puisque rien ne la rogne — essayé, mesuré aussi.
+///
+/// Le tracé doit donc être émis dans un espace qui a **déjà** le rapport du
+/// cadre, et le cadre tenir ce rapport. Cette constante les accorde, et elle vit
+/// ici — non dans le `.slint` — pour n'exister qu'une fois : la fenêtre la lit
+/// dans `trace-aspect` et en déduit **et** son `viewbox` **et** sa hauteur. Deux
+/// chiffres à tenir d'accord finiraient par diverger, et le symptôme serait
+/// celui qu'on vient de corriger — un tracé faux que rien ne signale.
+pub const TRACE_ASPECT: f32 = 4.0;
+
+/// Une température en millidegrés, telle qu'elle s'écrit dans le panneau.
+///
+/// ⚠️ **Le millidegré reste l'unité**, et ceci n'est qu'un affichage : le dixième
+/// de degré est arrondi vers le bas pour la lecture, jamais dans la valeur qui
+/// part sur le socket. Un palier à 45 500 s'écrit « 45,5 °C » et repart 45 500.
+pub fn degres_lisibles(milli: i32) -> String {
+    let entier = milli.div_euclid(1_000);
+    let dixiemes = milli.rem_euclid(1_000) / 100;
+    if dixiemes == 0 {
+        format!("{entier} °C")
+    } else {
+        format!("{entier},{dixiemes} °C")
+    }
+}
+
+/// Le tracé d'une courbe, en commandes SVG sur `TRACE_ASPECT` × 1.
+///
+/// ⚠️ **Chaque point vient de [`trace_de_courbe`], donc de `Courbe::consigne`** —
+/// la fonction que le démon exécute. Une boucle écrite ici serait une seconde
+/// interpolation, et elle n'aurait aucune raison d'être la bonne : l'aperçu
+/// montrerait une courbe que le boîtier n'applique pas (#113).
+///
+/// ⚠️ **`x` court sur `0..=TRACE_ASPECT`, et non sur le carré unité**, pour la
+/// raison écrite sur [`TRACE_ASPECT`] : Slint ne sait pas étirer un `Path`.
+pub fn commandes_de_trace(courbe: &Courbe) -> String {
+    let largeur = f32::from(u16::try_from(TRACE_CHAUD - TRACE_FROID).unwrap_or(u16::MAX));
+    trace_de_courbe(courbe, TRACE_FROID, TRACE_CHAUD, TRACE_POINTS)
+        .into_iter()
+        .enumerate()
+        .map(|(rang, (milli, consigne))| {
+            let avance = f32::from(u16::try_from(milli - TRACE_FROID).unwrap_or(0)) / largeur;
+            let x = avance * TRACE_ASPECT;
+            let y = 1.0 - f32::from(consigne) / 100.0;
+            format!("{} {x:.4} {y:.4} ", if rang == 0 { "M" } else { "L" })
+        })
+        .collect()
 }

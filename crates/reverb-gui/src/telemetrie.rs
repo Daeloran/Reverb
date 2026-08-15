@@ -65,13 +65,14 @@
 //! cherche à la reconnaître, et ferait disparaître le bouton « auto » — donc
 //! bouger la ligne sous les doigts à chaque hoquet du Kraken.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use reverb_proto::Position;
 use reverb_proto::ipc::{
     FanAction, MODE_COURBE_DE_L_HOTE, MODE_INCONNU_PREFIXE, MODE_MANUEL, MODE_NON_PILOTE,
-    MODE_NON_REGLABLE, MODE_PLEIN_REGIME, Request, ResponseLine,
+    MODE_NON_REGLABLE, MODE_PLEIN_REGIME, ReguleAction, Request, ResponseLine,
 };
+use reverb_proto::regulation::{Courbe, CourbeInvalide};
 
 use crate::sondes::Releve;
 
@@ -88,6 +89,21 @@ pub struct LigneCanal {
     pub mode: String,
     pub sait_faire_auto: bool,
     pub lisible: bool,
+    /// **Fait matériel** : le pilote de ce canal n'a **aucun** mode automatique,
+    /// donc c'est à l'hôte de le réguler s'il doit l'être (#113). Vient du
+    /// dernier jeton de la ligne `chan`, et de nulle part ailleurs.
+    ///
+    /// ⚠️ **À ne pas confondre avec [`LigneCanal::regule_seul`]**, qui dit le
+    /// **contraire** : le périphérique se régule tout seul, et une consigne
+    /// écrite remplacerait sa régulation (#112).
+    pub regulable: bool,
+    /// **État rendu par le démon** : il régule ce canal, à ce tour-ci.
+    ///
+    /// Vient des lignes `regule <canal>` du même tour, et de nulle part
+    /// ailleurs — jamais d'une mémoire de fenêtre. C'est le critère
+    /// d'acceptation de #113 : un `regule off` posé par le socket depuis un
+    /// autre client, ou refusé par le démon, doit se voir ici au tour suivant.
+    pub sous_regulation: bool,
 }
 
 impl LigneCanal {
@@ -153,6 +169,120 @@ impl LigneCanal {
         }
         self.commande(action)
     }
+
+    /// La requête qu'une consigne produit, **tous les garde-fous appliqués**.
+    ///
+    /// Trois, dans cet ordre de sévérité : la quarantaine de #100, le verrou de
+    /// #112, et la régulation de #113. C'est **ce qui part vraiment quand la
+    /// barre bouge**, et c'est l'unique entonnoir des ordres de ventilateur de
+    /// la fenêtre.
+    ///
+    /// ⚠️ **Un canal régulé n'émet rien, verrou ouvert ou non.** Le verrou est
+    /// une confirmation — un geste l'ouvre ; la régulation est une **prise en
+    /// charge**, et seul `regule <canal> off` la rend. Faire passer la seconde
+    /// par le premier rendrait « ouvrir le cadenas » suffisant pour reprendre un
+    /// canal à la boucle du démon, sans que rien ne dise que c'est ce qui vient
+    /// d'arriver — et la régulation disparaîtrait en silence (#99).
+    ///
+    /// ⚠️ **Une troisième méthode plutôt qu'un garde ajouté aux deux autres** :
+    /// [`LigneCanal::commande`] est figée par #100 (« un canal illisible n'émet
+    /// rien ») et [`LigneCanal::commande_verrouillable`] par #112. Les élargir
+    /// changerait le sens de fonctions que des tests d'intention voisins
+    /// tiennent déjà. Le nom dit ce qu'elle répond, et non le garde-fou qu'elle
+    /// ajoute : il y en a maintenant trois, et une issue de plus épuiserait les
+    /// adjectifs.
+    pub fn commande_effective(&self, action: FanAction, deverrouille: bool) -> Option<Request> {
+        if self.sous_regulation {
+            return None;
+        }
+        self.commande_verrouillable(action, deverrouille)
+    }
+
+    /// L'ordre qu'une bascule de régulation produit (#113).
+    ///
+    /// `None` quand il n'y a rien à basculer : canal **non régulable** — son
+    /// firmware s'en charge, et #99 le met hors scope —, ou canal **illisible**
+    /// (#100), car ni le prendre ni le rendre n'a de sens tant qu'on ne sait pas
+    /// ce qu'il fait.
+    ///
+    /// ⚠️ **Elle ne regarde pas [`LigneCanal::sous_regulation`]**, et c'est le
+    /// corollaire de « jamais une mémoire de fenêtre » : entre le clic qui
+    /// active et celui qui coupe, la ligne dit **toujours** l'état d'avant,
+    /// puisqu'elle vient du démon et que le tour suivant n'est pas encore
+    /// arrivé. Une bascule qui filtrerait sur l'état courant avalerait donc le
+    /// second ordre, et le canal resterait régulé sans que rien ne l'explique.
+    pub fn ordre_de_regulation(&self, activer: bool) -> Option<Request> {
+        if !self.regulable || !self.lisible {
+            return None;
+        }
+        let canal = self.canal.clone();
+        Some(Request::Regule(if activer {
+            ReguleAction::Activer(canal)
+        } else {
+            ReguleAction::Couper(canal)
+        }))
+    }
+}
+
+/// La requête qu'une courbe éditée produit — refusée **en le disant**, avant
+/// tout envoi (#113).
+///
+/// Les paliers sont des `(millidegrés, pourcent)`, comme partout depuis #99.
+///
+/// # Erreurs
+///
+/// Exactement celles de [`Courbe::depuis`], et avec la même raison : c'est
+/// **elle** qui juge, la fenêtre ne décide de rien. Une fenêtre plus sévère
+/// refuserait une courbe que le socket accepte — l'utilisateur ne saurait pas
+/// laquelle des deux a raison ; une fenêtre plus laxiste laisserait partir une
+/// ligne que le démon rejettera, et le refus arriverait **après** le geste, dans
+/// un journal, au lieu d'arriver devant le champ qu'on vient de régler.
+///
+/// ⚠️ **Elle prend des paliers bruts, et non une [`Courbe`] déjà construite.**
+/// L'éditeur tient ce que l'utilisateur a posé ; s'il fallait d'abord bâtir une
+/// courbe pour obtenir une requête, le refus vivrait chez l'appelant — c'est-à-dire
+/// dans `main.rs`, où il ne se testerait pas.
+pub fn ordre_de_courbe(paliers: &[(i32, u8)]) -> Result<Request, CourbeInvalide> {
+    Courbe::depuis(paliers)?;
+    Ok(Request::Regule(ReguleAction::Courbe(paliers.to_vec())))
+}
+
+/// Le tracé d'une courbe : `points` couples `(millidegrés, consigne)`
+/// régulièrement répartis de `froid` à `chaud`.
+///
+/// ⚠️ **Chaque point vient de [`Courbe::consigne`], et d'elle seule.** C'est
+/// l'exigence de #113, mot pour mot : « le tracé de la courbe doit venir de la
+/// même fonction que celle qu'exécute le démon […] sinon l'aperçu montrerait une
+/// courbe que le boîtier n'applique pas ». L'écrêtage aux bornes et le refus
+/// d'extrapoler en découlent sans une ligne de plus — une seconde interpolation
+/// n'aurait aucune raison d'être la bonne.
+///
+/// ⚠️ **L'arithmétique passe par `i64`.** Les bornes viennent d'une fenêtre,
+/// donc d'un code qui peut se tromper : `chaud - froid` déborde sur les extrêmes
+/// de l'`i32`, et en `debug` ce serait une panique avant même qu'on ait tracé
+/// quoi que ce soit.
+///
+/// Zéro point rend une liste vide ; un seul rend la borne froide, puisqu'il n'y
+/// a pas de pas à répartir.
+pub fn trace_de_courbe(courbe: &Courbe, froid: i32, chaud: i32, points: usize) -> Vec<(i32, u8)> {
+    if points == 0 {
+        return Vec::new();
+    }
+    let derniers = i64::try_from(points - 1).unwrap_or(i64::MAX);
+    (0..points)
+        .map(|rang| {
+            let avance = i64::try_from(rang).unwrap_or(i64::MAX);
+            let milli = if derniers == 0 {
+                i64::from(froid)
+            } else {
+                i64::from(froid) + (i64::from(chaud) - i64::from(froid)) * avance / derniers
+            };
+            // Toujours entre `froid` et `chaud`, donc dans l'`i32` : le repli
+            // n'est là que parce que la conversion, elle, ne le sait pas.
+            let milli = i32::try_from(milli).unwrap_or(chaud);
+            (milli, courbe.consigne(milli))
+        })
+        .collect()
 }
 
 /// Le libellé sous lequel la table d'aide nomme la **famille** `inconnu-<n>`.
@@ -262,6 +392,15 @@ pub struct Telemetrie {
     pub canaux: Vec<LigneCanal>,
     /// Les relevés à noter dans l'historique des sondes.
     pub sondes: Vec<(String, Releve)>,
+    /// La courbe que le démon vient de rendre, `None` si le tour n'en portait
+    /// pas (#113).
+    ///
+    /// ⚠️ **Jamais complétée par [`Courbe::defaut`].** Un tour où la réponse à
+    /// `regule` n'est pas arrivée ne doit pas faire afficher une courbe
+    /// plausible et fausse : c'est la règle que le projet applique à toutes ses
+    /// valeurs manquantes — « une sonde muette affiche des tirets, jamais un
+    /// zéro ni la dernière valeur connue ».
+    pub courbe: Option<Courbe>,
 }
 
 /// Ce qu'on garde d'un canal entre deux tours.
@@ -272,6 +411,11 @@ pub struct Telemetrie {
 struct Habillage {
     position: Option<Position>,
     sait_faire_auto: bool,
+    /// Gardé au même titre que `sait_faire_auto` : « ce pilote n'a aucun mode
+    /// automatique » est une capacité du matériel, pas une mesure. L'oublier
+    /// ferait disparaître la commande de régulation à chaque hoquet du
+    /// contrôleur, donc bouger la ligne sous les doigts.
+    regulable: bool,
 }
 
 /// Le tri, qui se souvient des canaux déjà vus.
@@ -297,8 +441,33 @@ impl Tri {
     ///
     /// Les lignes qui ne sont ni un canal ni un relevé — l'éclairage, l'écran,
     /// la géométrie, `end` — ne vont dans aucune des deux listes.
+    ///
+    /// ⚠️ **Un tour porte la réponse à `status` *et* celle à `regule`** (#113).
+    /// L'état de régulation d'un canal est celui du tour où sa ligne `chan` est
+    /// arrivée, recalculé depuis les seules lignes `regule` reçues : c'est ce
+    /// qui rend vrai « l'état affiché est celui que le démon rend, jamais une
+    /// mémoire de fenêtre ». Une fenêtre qui poserait les deux réponses
+    /// séparément verrait, à chaque tour de `status`, tous ses canaux sortir de
+    /// régulation.
     pub fn poser(&mut self, lignes: &[ResponseLine]) -> Telemetrie {
         let mut vue = Telemetrie::default();
+
+        // Les lignes `regule` d'abord, parce qu'elles arrivent **après** les
+        // `chan` qu'elles qualifient : la réponse à `regule` suit celle à
+        // `status` dans le même tour.
+        let mut regules: HashSet<&str> = HashSet::new();
+        for ligne in lignes {
+            match ligne {
+                ResponseLine::Regule { canal } => {
+                    regules.insert(canal.as_str());
+                }
+                // La dernière l'emporte, comme partout ailleurs dans ce tri :
+                // un tour n'en porte qu'une.
+                ResponseLine::Courbe { paliers } => vue.courbe = Courbe::depuis(paliers).ok(),
+                _ => {}
+            }
+        }
+
         for ligne in lignes {
             match ligne {
                 ResponseLine::Channel {
@@ -308,12 +477,14 @@ impl Tri {
                     pwm,
                     mode,
                     sait_faire_auto,
+                    regulable,
                 } => {
                     self.connus.insert(
                         channel.clone(),
                         Habillage {
                             position: *position,
                             sait_faire_auto: *sait_faire_auto,
+                            regulable: *regulable,
                         },
                     );
                     vue.canaux.push(LigneCanal {
@@ -328,6 +499,8 @@ impl Tri {
                         // firmware. Cette règle était déjà celle de la fenêtre,
                         // et #100 lui ajoute un cas au lieu de la remplacer.
                         lisible: rpm.is_some(),
+                        regulable: *regulable,
+                        sous_regulation: regules.contains(channel.as_str()),
                     });
                 }
                 ResponseLine::Temp {
@@ -350,6 +523,11 @@ impl Tri {
                         mode: String::new(),
                         sait_faire_auto: habillage.sait_faire_auto,
                         lisible: false,
+                        regulable: habillage.regulable,
+                        // Dit ce que le démon dit, comme partout : la ligne
+                        // reste inerte par la quarantaine, pas en effaçant un
+                        // état qu'il vient de rendre.
+                        sous_regulation: regules.contains(subject.as_str()),
                     }),
                     // Une sonde débranchée le dit, et sa courbe garde la trace
                     // du trou : figer sa dernière valeur ferait croire qu'on la

@@ -32,21 +32,25 @@ use reverb_gui::plan::{
     Cible, Place, Plan, Vue, halo, nom_de_zone, places_des_ancres, rayon_du_disque,
 };
 use reverb_gui::reglages::{
-    AFFICHAGES, ChoixDeComposition, ChoixDeProfil, EcranChoisi, Limiteur, Poignee, Reglage,
-    consigne_affichee, directions_offertes, eclairage_lu, requete_d_animation,
+    AFFICHAGES, ChoixDeComposition, ChoixDeProfil, CourbeEditee, EcranChoisi, Limiteur, Poignee,
+    Reglage, TRACE_ASPECT, TRACE_CHAUD, TRACE_FROID, commandes_de_trace, consigne_affichee,
+    degres_lisibles, directions_offertes, eclairage_lu, requete_d_animation,
     requete_de_composition, requete_de_profil, requetes_pour_la_couleur,
 };
 use reverb_gui::sondes::{
     Historique, ModelesNvme, Releve, SondeRetenue, modeles_nvme, sondes_retenues,
 };
-use reverb_gui::telemetrie::{LigneCanal, Tri, aide_des_modes};
+use reverb_gui::telemetrie::{LigneCanal, Tri, aide_des_modes, ordre_de_courbe};
 use reverb_gui::{
     AideMode, AncreEcran, FamilleAnimation, Fenetre, LigneProfil, LigneTemperature,
-    LigneVentilateur, LigneZone, PointHalo, PointLed,
+    LigneVentilateur, LigneZone, PalierCourbe, PointHalo, PointLed,
 };
 use reverb_proto::composition::{Ancre, Fond, Source};
-use reverb_proto::ipc::{FanAction, LightTarget, Request, ResponseLine, ScreenAction};
+use reverb_proto::ipc::{
+    FanAction, LightTarget, ReguleAction, Request, ResponseLine, ScreenAction,
+};
 use reverb_proto::ram::{LEDS_PER_STICK, SLOT_COUNT};
+use reverb_proto::regulation::Courbe;
 use reverb_proto::{LEDS_PER_FAN, Led, Position, Rgb, Tsl};
 use slint::{Color, ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 
@@ -432,6 +436,17 @@ struct Pupitre {
     composition: RefCell<(String, Vec<(Ancre, String)>)>,
     /// L'ancre que le panneau de composition édite.
     ancre_visee: Cell<Ancre>,
+    /// La courbe de régulation que l'éditeur tient (#113).
+    ///
+    /// ⚠️ **Elle vient du démon, et y retourne.** Ce n'est pas une mémoire de
+    /// fenêtre : `adopter` reprend celle du socket à chaque tour, sauf tant
+    /// qu'un réglage est en cours — sinon les poignées reviendraient en place
+    /// une fois par seconde, sous les doigts.
+    courbe: RefCell<CourbeEditee>,
+    /// Le modèle des paliers, **gardé vivant** pour la raison qui vaut déjà
+    /// pour les lignes de ventilateur : le reconstruire à chaque cran recréerait
+    /// les poignées sous les doigts qui les tirent.
+    paliers: Rc<VecModel<PalierCourbe>>,
 }
 
 impl Pupitre {
@@ -465,6 +480,8 @@ impl Pupitre {
             rappele: RefCell::new(None),
             composition: RefCell::new((String::new(), Vec::new())),
             ancre_visee: Cell::new(Ancre::Haut),
+            courbe: RefCell::new(CourbeEditee::default()),
+            paliers: Rc::new(VecModel::default()),
         }
     }
 
@@ -489,18 +506,32 @@ impl Pupitre {
     /// tour de télémétrie ne l'a encore nommé — la liste est alors vide, et il
     /// n'y a rien à régler.
     ///
-    /// ⚠️ **`None` enfin quand le canal régule seul et que son cadenas est
-    /// fermé** (#112). C'est **l'unique entonnoir** des ordres de ventilateur —
-    /// la poignée comme le bouton « auto » y passent —, et donc le seul endroit
-    /// où le verrou se pose. Le doubler ailleurs ferait deux chemins d'émission,
-    /// dont le second n'aurait aucune raison d'être le bon.
+    /// ⚠️ **`None` quand le canal régule seul et que son cadenas est fermé**
+    /// (#112), et **`None` quand le démon le régule** (#113). C'est **l'unique
+    /// entonnoir** des ordres de ventilateur — la poignée comme le bouton
+    /// « auto » y passent —, et donc le seul endroit où les trois garde-fous se
+    /// posent. Les doubler ailleurs ferait deux chemins d'émission, dont le
+    /// second n'aurait aucune raison d'être le bon.
     fn commande_du_canal(&self, canal: &str, action: FanAction) -> Option<Request> {
         let deverrouille = self.deverrouilles.borrow().contains(canal);
         self.canaux_lus
             .borrow()
             .iter()
             .find(|ligne| ligne.canal == canal)?
-            .commande_verrouillable(action, deverrouille)
+            .commande_effective(action, deverrouille)
+    }
+
+    /// L'ordre que la bascule de régulation d'un canal produit (#113).
+    ///
+    /// ⚠️ **Le sens du geste vient de l'état que le démon a rendu**, et non
+    /// d'une mémoire de fenêtre : on demande le contraire de ce qu'il vient de
+    /// dire. Entre le clic et le tour suivant, la ligne dit encore l'état
+    /// d'avant — c'est voulu, et c'est ce qui garantit que l'affichage ne
+    /// devance jamais le démon.
+    fn ordre_de_regulation_du_canal(&self, canal: &str) -> Option<Request> {
+        let lues = self.canaux_lus.borrow();
+        let ligne = lues.iter().find(|ligne| ligne.canal == canal)?;
+        ligne.ordre_de_regulation(!ligne.sous_regulation)
     }
 
     /// Bascule le cadenas d'un canal, et rend son nouvel état.
@@ -562,6 +593,14 @@ fn main() -> ExitCode {
         i32::try_from(reverb_proto::composition::Composition::CHAMPS_MAX).unwrap_or(4),
     );
     fenetre.set_ventilateurs(ModelRc::from(pupitre.canaux.clone()));
+    fenetre.set_paliers(ModelRc::from(pupitre.paliers.clone()));
+    fenetre.set_borne_froide(SharedString::from(degres_lisibles(TRACE_FROID)));
+    fenetre.set_borne_chaude(SharedString::from(degres_lisibles(TRACE_CHAUD)));
+    // ⚠️ **Le rapport vient d'ici, jamais du `.slint`.** Le fichier d'interface
+    // en porte un défaut pour rester lisible seul ; c'est cette ligne qui fait
+    // foi, et c'est elle qui garantit que le viewbox du tracé et la hauteur du
+    // cadre sortent du même chiffre. Voir `TRACE_ASPECT`.
+    fenetre.set_trace_aspect(TRACE_ASPECT);
     poser_ancres(&fenetre, &pupitre);
     dessiner(&fenetre, &pupitre);
 
@@ -681,8 +720,33 @@ fn lancer_le_fil_des_ordres(
                 continue;
             };
             match ouvert.demander(&requete) {
-                Ok(lignes) => {
+                Ok(mut lignes) => {
                     let etait = matches!(requete, Request::Status);
+                    // ⚠️ **La régulation se demande dans le MÊME tour que
+                    // `status`, et les deux réponses se posent ensemble** (#113).
+                    // `sous_regulation` est recalculé à chaque tour depuis les
+                    // seules lignes `regule` reçues : c'est ce qui rend vrai
+                    // « l'état affiché est celui que le démon rend, jamais une
+                    // mémoire de fenêtre ». Les poser séparément ferait, à
+                    // chaque tour de `status`, sortir tous les canaux de
+                    // régulation pendant une fraction de seconde.
+                    if etait {
+                        match ouvert.demander(&Request::Regule(ReguleAction::Etat)) {
+                            // Une réponse en échec n'est pas concaténée : sa
+                            // ligne `err` deviendrait la dernière du tour, et
+                            // ferait jeter la télémétrie entière.
+                            Ok(regule) if matches!(regule.last(), Some(ResponseLine::End)) => {
+                                lignes.pop();
+                                lignes.extend(regule);
+                            }
+                            Ok(_) => {}
+                            Err(erreur) => {
+                                client = None;
+                                dire(&fenetre, false, format!("démon injoignable : {erreur}"));
+                                continue;
+                            }
+                        }
+                    }
                     repondre(&fenetre, &retours, &requete, lignes);
                     if !etait {
                         // Une commande qui passe est la meilleure preuve de vie
@@ -1741,6 +1805,73 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
     }
     {
         let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        fenetre.on_basculer_regulation(move |canal| {
+            // ⚠️ **Rien n'est affiché par anticipation** — ni le témoin, ni le
+            // grisé de la barre. L'état de régulation montré est celui que le
+            // démon rend (#113) : cocher, retenir qu'on a coché et l'afficher
+            // coché ferait mentir la fenêtre le jour où le démon refuse, ou
+            // qu'un `regule off` arrive par le socket depuis un autre client.
+            //
+            // Le `status` qui suit n'est donc pas une politesse : c'est ce qui
+            // met une seconde de moins à dire la vérité que le tour d'horloge.
+            let Some(requete) = pupitre.ordre_de_regulation_du_canal(&canal) else {
+                return;
+            };
+            let _ = envoi.send(requete);
+            let _ = envoi.send(Request::Status);
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_regler_palier_temperature(move |rang, degres| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            pupitre
+                .courbe
+                .borrow_mut()
+                .regler_temperature(usize::try_from(rang).unwrap_or(0), degres);
+            poser_la_courbe(&fenetre, &pupitre);
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_regler_palier_consigne(move |rang, pourcent| {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            pupitre.courbe.borrow_mut().regler_consigne(
+                usize::try_from(rang).unwrap_or(0),
+                u8::try_from(pourcent.clamp(0, 100)).unwrap_or(0),
+            );
+            poser_la_courbe(&fenetre, &pupitre);
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
+        let envoi = ordres.clone();
+        let faible = fenetre.as_weak();
+        fenetre.on_appliquer_courbe(move || {
+            let Some(fenetre) = faible.upgrade() else {
+                return;
+            };
+            // ⚠️ **Le juge est celui du démon** : `ordre_de_courbe` passe par
+            // `Courbe::depuis`, et rien ne part quand elle refuse. Le refus est
+            // écrit devant les poignées, pas dans un journal après coup.
+            match ordre_de_courbe(pupitre.courbe.borrow().paliers()) {
+                Ok(requete) => {
+                    let _ = envoi.send(requete);
+                    fenetre.set_refus_courbe(SharedString::new());
+                }
+                Err(erreur) => fenetre.set_refus_courbe(SharedString::from(erreur.raison)),
+            }
+        });
+    }
+    {
+        let pupitre = pupitre.clone();
         let envoi = ordres;
         fenetre.on_rendre_au_firmware(move |canal| {
             // ⚠️ **« auto » non plus ne part vers un canal en quarantaine**
@@ -1759,6 +1890,54 @@ fn brancher(fenetre: &Fenetre, pupitre: &Rc<Pupitre>, ordres: Sender<Request>) {
             let _ = envoi.send(requete);
         });
     }
+}
+
+/// Recopie la courbe éditée dans la fenêtre : ses paliers, son tracé, et le
+/// refus s'il y en a un.
+///
+/// ⚠️ **Le modèle des paliers est modifié en place**, jamais reconstruit : le
+/// remplacer recréerait les poignées sous les doigts qui les tirent, et remettrait
+/// leur rang à zéro. C'est le défaut que le menu des sondes a déjà eu, par une
+/// autre porte.
+fn poser_la_courbe(fenetre: &Fenetre, pupitre: &Pupitre) {
+    let courbe = pupitre.courbe.borrow();
+    let paliers = courbe.paliers();
+    let modele = &pupitre.paliers;
+
+    while modele.row_count() > paliers.len() {
+        modele.remove(modele.row_count() - 1);
+    }
+    while modele.row_count() < paliers.len() {
+        modele.push(PalierCourbe::default());
+    }
+    for (rang, (milli, pourcent)) in paliers.iter().enumerate() {
+        let ligne = PalierCourbe {
+            temperature: SharedString::from(degres_lisibles(*milli)),
+            consigne: SharedString::from(format!("{pourcent} %")),
+            degres: milli.div_euclid(1_000),
+            pourcent: i32::from(*pourcent),
+        };
+        if modele.row_data(rang).as_ref() != Some(&ligne) {
+            modele.set_row_data(rang, ligne);
+        }
+    }
+
+    // ⚠️ **Un panneau sans palier ne refuse rien.** Tant que le démon n'a pas
+    // répondu, il n'y a pas de courbe à juger : écrire « une courbe sans palier
+    // ne dit aucune consigne » avant la première réponse accuserait
+    // l'utilisateur de ce que la fenêtre n'a pas encore reçu.
+    let (trace, refus) = if paliers.is_empty() {
+        (String::new(), String::new())
+    } else {
+        match Courbe::depuis(paliers) {
+            Ok(courbe) => (commandes_de_trace(&courbe), String::new()),
+            // Rien à dessiner : un tracé plausible sous un refus serait le pire
+            // des deux, puisque c'est le tracé qu'on regarderait pour régler.
+            Err(erreur) => (String::new(), erreur.raison),
+        }
+    };
+    fenetre.set_trace_courbe(SharedString::from(trace));
+    fenetre.set_refus_courbe(SharedString::from(refus));
 }
 
 /// Recopie dans les réglages ce que la fenêtre affiche de la couleur, de la
@@ -2096,10 +2275,27 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
             // matériel, le second une mémoire de fenêtre (#112).
             regule_seul: ligne.regule_seul(),
             deverrouille: deverrouilles.contains(&ligne.canal),
+            // Les deux faits de #113, et ils ne se déduisent pas l'un de
+            // l'autre : le premier est du matériel — ce pilote n'a aucun mode
+            // automatique —, le second de l'état que le démon vient de rendre.
+            regulable: ligne.regulable,
+            sous_regulation: ligne.sous_regulation,
         });
     }
     drop(deverrouilles);
     *pupitre.canaux_lus.borrow_mut() = vue.canaux;
+
+    // ⚠️ **La courbe vient du démon, à chaque tour.** L'éditeur n'affiche pas
+    // `Courbe::defaut()` en dur : ce serait la bonne courbe sur une machine
+    // neuve et une courbe fausse sur la seule où le réglage a servi. Et un tour
+    // sans ligne `courbe` n'en invente aucune — le démon vient peut-être de
+    // tomber, et une courbe plausible et fausse est ce que le projet refuse
+    // partout ailleurs.
+    if let Some(rendue) = &vue.courbe
+        && pupitre.courbe.borrow_mut().adopter(rendue.paliers())
+    {
+        poser_la_courbe(fenetre, pupitre);
+    }
 
     {
         let mut historique = pupitre.historique.borrow_mut();

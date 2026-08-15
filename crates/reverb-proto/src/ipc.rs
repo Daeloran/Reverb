@@ -1157,7 +1157,7 @@ pub const MODE_NON_REGLABLE: &str = "non-réglable";
 /// Une ligne de réponse du démon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseLine {
-    /// `chan <canal> <position|-> <rpm|-> <pwm|-> <mode> <oui|non>`
+    /// `chan <canal> <position|-> <rpm|-> <pwm|-> <mode> <oui|non> <oui|non>`
     Channel {
         channel: String,
         position: Option<Position>,
@@ -1177,6 +1177,27 @@ pub enum ResponseLine {
         /// la question, et la fenêtre doit alors cacher le bouton plutôt que
         /// d'en montrer un qui ne peut qu'échouer.
         sait_faire_auto: bool,
+        /// Le pilote de ce canal n'a **aucun** mode automatique : c'est donc à
+        /// l'hôte de le réguler s'il doit l'être (issue #113).
+        ///
+        /// C'est un **fait matériel**, lu dans le nom du pilote (#50), et il ne
+        /// se déduit pas de `sait_faire_auto` — qui vaut, depuis #97, « le
+        /// pilote sait **et** une courbe a été posée », donc toujours `non` sur
+        /// cette machine. Les deux peuvent être faux ensemble : c'est le cas des
+        /// deux canaux du Kraken, dont le pilote sait faire auto mais dont
+        /// aucune courbe n'a été posée.
+        ///
+        /// Il traverse le socket parce que la fenêtre n'ouvre aucun périphérique
+        /// (ADR-002) et ne peut donc pas lire le nom du pilote elle-même : sans
+        /// ce jeton, elle ne saurait pas à quels canaux proposer `regule`.
+        ///
+        /// Même graphie et même règle d'absence que `sait_faire_auto` : `oui` ou
+        /// `non`, en **dernier** jeton, et **son absence vaut « non »**. Un démon
+        /// d'avant #113 ne sait rien de la question ; une fenêtre d'après ne
+        /// propose alors aucune régulation, ce qui est sûr, là où un refus de
+        /// parser lui rendrait la ligne entière illisible et la laisserait
+        /// aveugle à tous les canaux de la machine.
+        regulable: bool,
     },
     /// `temp <capteur> <millidegres>`
     ///
@@ -1322,8 +1343,9 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
             pwm,
             mode,
             sait_faire_auto,
+            regulable,
         } => format!(
-            "chan {} {} {} {} {} {}",
+            "chan {} {} {} {} {} {} {}",
             jeton(channel),
             position.map_or_else(|| ABSENT.to_owned(), Position::slug),
             rpm.map_or_else(|| ABSENT.to_owned(), |v| v.to_string()),
@@ -1336,6 +1358,7 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
             // conséquence.
             jeton(mode),
             if *sait_faire_auto { "oui" } else { "non" },
+            if *regulable { "oui" } else { "non" },
         ),
         ResponseLine::Temp {
             sensor,
@@ -1656,34 +1679,41 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
     }
 
     // `chan` a sa propre branche depuis #50 : c'est le **nombre de champs** qui
-    // dit si le drapeau « sait faire auto » est là — cinq pour un démon d'avant,
-    // six pour un démon d'après. Un découpage partagé avec les autres lignes
-    // n'aurait pas su compter.
+    // dit quels drapeaux sont là — cinq pour un démon d'avant #50, six pour un
+    // démon d'avant #113, sept depuis. Un découpage partagé avec les autres
+    // lignes n'aurait pas su compter.
     if let Some(champs) = line.strip_prefix("chan ") {
+        // ⚠️ Un drapeau qui n'est ni `oui` ni `non` est **refusé**, et non
+        // absorbé dans le mode : l'absorber ferait passer une incompatibilité de
+        // protocole pour un mode exotique, et l'erreur ne se verrait jamais.
+        let drapeau = |brut: &str| match brut {
+            "oui" => Ok(true),
+            "non" => Ok(false),
+            _ => Err(illisible(
+                "« chan » attend « oui » ou « non » dans ses drapeaux de fin",
+            )),
+        };
         let mots: Vec<&str> = champs.split(' ').collect();
-        let (canal, position, rpm, pwm, mode, sait_faire_auto) = match mots[..] {
-            // Cinq champs : un démon d'avant #50. Il ne sait rien de la
-            // question, donc on répond « non » — cacher un bouton qui marche se
-            // répare, en montrer un qui ne peut qu'échouer est la panne même que
-            // #50 corrige.
-            [canal, position, rpm, pwm, mode] => (canal, position, rpm, pwm, mode, false),
-            [canal, position, rpm, pwm, mode, drapeau] => {
-                // ⚠️ Un sixième champ qui n'est ni `oui` ni `non` est **refusé**,
-                // et non absorbé dans le mode : l'absorber ferait passer une
-                // incompatibilité de protocole pour un mode exotique, et
-                // l'erreur ne se verrait jamais.
-                let sait = match drapeau {
-                    "oui" => true,
-                    "non" => false,
-                    _ => {
-                        return Err(illisible(
-                            "« chan » attend « oui » ou « non » en dernier champ",
-                        ));
-                    }
-                };
-                (canal, position, rpm, pwm, mode, sait)
+        let (canal, position, rpm, pwm, mode, sait_faire_auto, regulable) = match mots[..] {
+            // Cinq champs : un démon d'avant #50. Six : un démon d'avant #113.
+            // Ni l'un ni l'autre ne sait rien de la question qu'il tait, donc on
+            // répond « non » — cacher une commande qui marcherait se répare, en
+            // montrer une qui ne peut qu'échouer est la panne même que #50
+            // corrige.
+            [canal, position, rpm, pwm, mode] => (canal, position, rpm, pwm, mode, false, false),
+            [canal, position, rpm, pwm, mode, auto] => {
+                (canal, position, rpm, pwm, mode, drapeau(auto)?, false)
             }
-            _ => return Err(illisible("« chan » attend cinq ou six champs")),
+            [canal, position, rpm, pwm, mode, auto, regule] => (
+                canal,
+                position,
+                rpm,
+                pwm,
+                mode,
+                drapeau(auto)?,
+                drapeau(regule)?,
+            ),
+            _ => return Err(illisible("« chan » attend cinq, six ou sept champs")),
         };
         return Ok(ResponseLine::Channel {
             channel: canal.to_owned(),
@@ -1695,6 +1725,7 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
             pwm: absent_ou(pwm).map_err(|r| illisible(&r))?,
             mode: mode.to_owned(),
             sait_faire_auto,
+            regulable,
         });
     }
 

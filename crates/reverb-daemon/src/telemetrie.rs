@@ -34,6 +34,20 @@ pub struct LectureCanal {
     /// (issue #97). C'est ce booléen que la ligne `chan` porte et que la fenêtre
     /// lit — elle n'ouvre aucun périphérique et ne décide donc rien elle-même.
     pub sait_faire_auto: bool,
+    /// Ce canal peut-il être **régulé par le démon** (issue #113) ?
+    ///
+    /// ⚠️ **Une seule condition, et c'est un fait matériel** : le pilote n'a
+    /// aucun mode automatique, donc personne d'autre que l'hôte ne peut réguler
+    /// ce canal. Il se lit dans le **nom du pilote** ([`FanChannel::sait_faire_auto`],
+    /// issue #50), jamais dans [`CourbesPosees::autorise_auto`] — celui-ci
+    /// répond à une autre question, « le bouton auto marcherait-il maintenant »,
+    /// et vaut donc toujours faux tant qu'aucune courbe n'a été posée (#97).
+    ///
+    /// Les deux faits sont complémentaires et aucun ne se déduit de l'autre :
+    /// les deux canaux du Kraken sont `sait_faire_auto = false` **et**
+    /// `regulable = false`, parce que leur pilote sait faire auto — donc #99 les
+    /// laisse à leur firmware — mais qu'aucune courbe n'y a encore été posée.
+    pub regulable: bool,
 }
 
 /// Ce qu'un tour de relevé des canaux a produit.
@@ -93,6 +107,7 @@ pub fn releve_canaux(
                 pwm: lu.pwm,
                 mode: lu.mode,
                 sait_faire_auto: lu.sait_faire_auto,
+                regulable: lu.regulable,
             }),
             ReleveMotive::Muette { signaler, raison } => {
                 if signaler {
@@ -148,6 +163,14 @@ pub fn lire_le_canal(canal: &FanChannel, posees: &CourbesPosees) -> Result<Lectu
         // le canal à plein régime, en silence (issue #50) — ou arrête sa
         // régulation, ce qui ne s'entend même pas (issue #97).
         sait_faire_auto: posees.autorise_auto(canal),
+        // ⚠️ **Le nom du pilote seul, et surtout pas le carnet** (issue #113).
+        // C'est ce qui distingue ce drapeau du précédent : « ce matériel ne sait
+        // pas se réguler seul » est un fait qui ne change jamais, là où « le
+        // bouton auto marcherait maintenant » dépend de ce qu'on a téléversé
+        // depuis le démarrage. Passer par `autorise_auto` ici ferait proposer la
+        // régulation sur les deux canaux du Kraken — dont le firmware régule
+        // déjà correctement, et que #99 met explicitement hors scope.
+        regulable: !canal.sait_faire_auto(),
     })
 }
 
