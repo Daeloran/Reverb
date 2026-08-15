@@ -324,6 +324,51 @@ impl Poignee {
     }
 }
 
+/// Ce qu'une ligne de canal écrit à côté de sa barre de consigne (issue #102).
+///
+/// # Le défaut que ceci corrige
+///
+/// Une barre sans repère chiffré rend une classe entière de défauts
+/// **invisible**. Le bouton « auto » du Kraken a été cru sans effet : il en avait
+/// un, très mauvais — il mettait la consigne à 0 % —, mais rien à l'écran ne
+/// montrait la valeur, donc rien ne distinguait « sans effet » de « effet
+/// désastreux ». Il a fallu lire sysfs à la main pour le voir.
+///
+/// ⚠️ **Le nombre vient de [`Poignee::affichee`], et de nulle part ailleurs.**
+/// C'est ce qui garde le texte et la barre d'accord pendant la saisie comme
+/// pendant la grâce : un texte branché sur la télémétrie brute afficherait 30 %
+/// pendant qu'on tire la poignée à 80, la barre et son chiffre se
+/// contrediraient, et on croirait la consigne perdue.
+///
+/// `mesure` est le `pwm` de la dernière ligne `chan` reçue du démon, `None`
+/// quand il a rendu le canal illisible. **Son absence dit que le canal ne répond
+/// pas ; sa valeur n'écrit jamais le nombre** — [`Poignee::mesurer`] l'a déjà
+/// portée.
+///
+/// ⚠️ **Un canal muet sans consigne n'écrit aucun chiffre.** Il ne reste alors
+/// qu'une mesure périmée, et l'afficher serait le mode de défaillance le plus
+/// coûteux du projet parce qu'il est rassurant : c'est déjà la règle du cadran,
+/// « une sonde muette affiche des tirets, jamais un zéro ni la dernière valeur
+/// connue ». Le texte reste **non vide** pour la même raison — une case vide se
+/// lit comme une ligne sans consigne, pas comme un canal qui ne répond pas.
+///
+/// ⚠️ **Une consigne tirée sur un canal muet garde son chiffre, marqué d'un
+/// `?`.** La barre le montre de toute façon : le cacher ferait diverger le texte
+/// de la poignée juste au-dessus, c'est-à-dire refaire le défaut d'à côté. Ce
+/// que le `?` dit, c'est que rien ne l'a confirmée.
+///
+/// L'unité est écrite, et c'est le `%` qui sépare cette grandeur du régime en
+/// tours par minute affiché sur la même ligne de canal : un nombre nu à côté
+/// d'un autre nombre nu ferait croire qu'une consigne à 50 % donne 50 % du
+/// régime maximal.
+pub fn consigne_affichee(poignee: &Poignee, mesure: Option<u8>) -> String {
+    match (mesure, poignee.consigne) {
+        (Some(_), _) => format!("{} %", poignee.affichee()),
+        (None, Some(_)) => format!("{} % ?", poignee.affichee()),
+        (None, None) => "-- %".to_owned(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Le limiteur de débit des jauges de couleur (issue #47)
 // ---------------------------------------------------------------------------

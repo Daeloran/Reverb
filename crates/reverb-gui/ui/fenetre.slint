@@ -51,6 +51,11 @@ export struct LigneVentilateur {
     position: string,
     rpm: string,
     pwm: int,
+    // La consigne ecrite, telle que `consigne_affichee` la rend (#102). Une
+    // chaine et non un `pwm` formate ici : la regle qui compte — « le nombre
+    // vient de la poignee, et de nulle part ailleurs » — se tient alors par un
+    // test qui tourne a chaque `cargo test`, et non par une relecture d'apercu.
+    consigne: string,
     mode: string,
     lisible: bool,
     // Ce canal sait-il rendre la main a une regulation automatique. Faux pour
@@ -1313,6 +1318,26 @@ export component Fenetre inherits Window {
                                             released(valeur) => {
                                                 root.relacher-ventilateur(canal.canal);
                                             }
+                                        }
+                                        // La consigne chiffree, contre la barre
+                                        // qui la porte. Elle se distingue du
+                                        // regime de trois facons plutot qu'une :
+                                        // son unite (« % » contre « tr/min »),
+                                        // sa ligne, et sa couleur — le regime est
+                                        // gris et petit, la consigne claire et de
+                                        // la taille du libelle de position.
+                                        //
+                                        // ⚠️ `min-width` : sans elle, le curseur
+                                        // se raccourcirait d'un pixel a chaque
+                                        // fois que le nombre change de largeur
+                                        // — sous le doigt qui le tire.
+                                        Text {
+                                            text: canal.consigne;
+                                            font-size: 12px;
+                                            color: canal.lisible ? #e6e6ef : #ffb3b0;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: right;
+                                            min-width: 40px;
                                         }
                                         // ⚠️ `width: 0px` en plus de `visible` : un
                                         // element invisible garde sa place en

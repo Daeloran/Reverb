@@ -22,6 +22,7 @@ use std::rc::Rc;
 
 use reverb_anim::{Animation, CATALOGUE, Direction, Geometrie};
 use reverb_gui::plan::{Plan, halo, places_des_ancres, rayon_du_disque};
+use reverb_gui::reglages::{Poignee, consigne_affichee};
 use reverb_gui::{
     AncreEcran, FamilleAnimation, Fenetre, LigneProfil, LigneTemperature, LigneVentilateur,
     LigneZone, PointHalo, PointLed,
@@ -383,12 +384,15 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
     }
     interface.set_ventilateurs(ModelRc::new(VecModel::from(vec![
         // Un canal de chaque espèce : celui qui n'a pas de mode automatique et
-        // n'affiche donc pas de bouton « auto », et celui qui en a un (#50).
+        // n'affiche donc pas de bouton « auto », celui qui en a un (#50), et
+        // celui qui ne répond plus — c'est la seule façon de regarder ce qu'un
+        // canal muet écrit à côté de sa barre sans débrancher un Kraken (#102).
         LigneVentilateur {
             canal: SharedString::from("nzxtsmart2:fan-1"),
             position: SharedString::from("radiateur haut"),
             rpm: SharedString::from("1180"),
             pwm: 60,
+            consigne: consigne(Some(60)),
             mode: SharedString::from("manuel"),
             lisible: true,
             sait_faire_auto: false,
@@ -398,8 +402,19 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
             position: SharedString::new(),
             rpm: SharedString::from("2400"),
             pwm: 75,
+            consigne: consigne(Some(75)),
             mode: SharedString::from("courbe-de-l'hôte"),
             lisible: true,
+            sait_faire_auto: true,
+        },
+        LigneVentilateur {
+            canal: SharedString::from("kraken2023elite:fan-speed"),
+            position: SharedString::new(),
+            rpm: SharedString::from("—"),
+            pwm: 0,
+            consigne: consigne(None),
+            mode: SharedString::from("—"),
+            lisible: false,
             sait_faire_auto: true,
         },
     ])));
@@ -459,6 +474,17 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
         Err(_) => "aperçu hors ligne — aucun démon interrogé".to_owned(),
     }));
     interface.set_connecte(true);
+}
+
+/// Ce qu'un canal écrit à côté de sa barre, par le même code que la fenêtre.
+///
+/// Un libellé écrit à la main ici montrerait une mise en page qui n'existe
+/// pas — et l'aperçu ne sert qu'à juger celle qui existe. `None` est le canal
+/// que le démon a rendu illisible.
+fn consigne(pwm: Option<u8>) -> SharedString {
+    let mut poignee = Poignee::nouvelle();
+    poignee.mesurer(pwm.unwrap_or(0), std::time::Duration::ZERO);
+    SharedString::from(consigne_affichee(&poignee, pwm))
 }
 
 /// La première image que le démon pousse, s'il y en a un.
