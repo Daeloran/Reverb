@@ -39,6 +39,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | La dalle n'arrête plus le boîtier | ✅ son propre fil, et toute question HID bornée dans le temps |
 | Un Kraken muet, le démon tente de le réparer | ✅ trois resets USB bornés, sur son propre fil, puis redécouverte |
 | Régulation des ventilateurs | ✅ les trois canaux sans mode auto, sur la courbe du liquide |
+| Un canal qui régule seul ne se défait pas d'un geste | ✅ verrou dans la fenêtre, refus en ligne de commande |
 
 ## Ce que les protocoles permettent
 
@@ -354,6 +355,44 @@ par canal reste l'inconnue documentée de [`docs/VENTILATEURS.md`](docs/VENTILAT
 en partagent une —, toute sonde autre que le liquide, les deux canaux du Kraken dont le firmware
 régule déjà correctement, et l'édition de la courbe depuis la fenêtre.
 
+### Un canal qui régule seul ne se défait pas d'un geste distrait
+
+```
+$ reverb fan --channel kraken2023elite:pump-speed --pwm 50
+erreur : « kraken2023elite:pump-speed » n'est piloté par personne côté hôte : c'est le
+périphérique qui régule, sur son propre profil. Lui imposer une consigne fixe l'en sortirait, et
+aucune commande ne l'y rend — seule une coupure d'alimentation complète. Ajoutez « --manual »
+si c'est voulu.
+```
+
+Rien n'est écrit — ni le mode, ni la consigne. `--manual` lève le refus, et lui seul.
+
+⚠️ **Le déclencheur est le mode, jamais le nom du contrôleur.** Deux modes refusent : `non-piloté`
+et `courbe-de-l'hôte`, les deux où **quelque chose d'autre que l'hôte** décide de la vitesse. Un
+canal du Kraken déjà passé en `manuel` n'a plus rien à protéger et laisse passer ; le jour où un
+`nzxtsmart2` lirait `non-piloté`, il refuserait comme les autres. Coder « Kraken » donnerait
+aujourd'hui le bon résultat sur SHYNAEL — seuls ses deux canaux lisent `non-piloté` — et casserait
+au premier pilote qui change, **en silence**.
+
+⚠️ **Ni le drapeau `sait_faire_auto`.** Depuis #97 il vaut « le pilote sait faire auto **et** une
+courbe a été posée », donc toujours `non` : il ne dit plus rien du matériel.
+
+⚠️ **Ce n'est pas théorique, et la moitié du garde manquait.** Il visait `0` jusqu'au 2026-08-02,
+en annonçant « suit sa courbe firmware et s'adapte à la température » d'un canal qui tournait en
+fait à 100 % sans rien réguler (#50) ; il a alors été déplacé sur `courbe-de-l'hôte`, en laissant
+derrière lui une exemption écrite noir sur blanc — « un canal en `0` n'a rien à perdre ». Elle ne
+valait que si `0` voulait dire 100 %. Or un `0` **lu** dit le contraire (#101) : le pilote n'a
+jamais touché ce canal, et le périphérique exécute son propre profil. Le 2026-08-15, la pompe y
+suivait le liquide de 35 à 60 %, et un `reverb fan --pwm` l'aurait remplacé sans un mot.
+
+⚠️ **Le refus est un calcul, pas une relecture.** `refus_de_consigne` ne reçoit ni descripteur, ni
+canal ouvert, ni chemin : « rien n'est écrit » devient une propriété de sa signature. C'est la règle
+du projet — ce qui est testable sans matériel est séparé de ce qui y touche — appliquée à un
+garde-fou.
+
+**Le même fait produit le même verdict dans la fenêtre**, où il prend la forme d'un
+[cadenas](#le-verrou-dun-canal-qui-régule-seul). Un seul fait matériel, deux portes.
+
 ### L'éclairage retrouvé
 
 Le boîtier retrouve seul, après un redémarrage, ce qu'il affichait — une couleur fixe comme une
@@ -564,6 +603,42 @@ mise en page sur une surface qui n'existe pas. C'est la règle de la maquette �
 dans le `.slint` — appliquée à la dalle : le jour où la mire de #77 mesurera le vrai bord, une
 constante changera et la fenêtre suivra.
 
+### Le verrou d'un canal qui régule seul
+
+Une barre dont le canal régule seul est **grisée** et porte un bouton qui dit ce que le clic fait —
+« Déverrouiller », puis « Verrouiller ». Tant qu'il n'a pas été pressé, ni la poignée ni « auto »
+n'émettent quoi que ce soit.
+
+⚠️ **C'est le même déclencheur qu'en [ligne de commande](#un-canal-qui-régule-seul-ne-se-défait-pas-dun-geste-distrait)** —
+le **mode**, `non-piloté` ou `courbe-de-l'hôte`, jamais le nom du contrôleur. Sur SHYNAEL les deux
+canaux du Kraken lisent `non-piloté` et les trois `nzxtsmart2` lisent `manuel` : le comportement
+obtenu est exactement celui qu'on voulait, sans que « Kraken » soit écrit nulle part. Sept
+ventilateurs sur dix n'ont donc aucun cadenas — leur en imposer un serait payer le prix du verrou
+sans en tirer la protection.
+
+⚠️ **Ce qu'il protège ne se répare pas.** Le 2026-08-15, un clic sur « auto » a mis la consigne de la
+pompe à 0 % (#97) ; le même jour, la mesure a montré la courbe d'usine parfaitement vivante — 35 % à
+37 °C, 60 % à 51 °C. **Ce qui régule bien est exactement ce qu'un geste distrait détruit**, et il
+n'existe aucune valeur de `pwm_enable` qui rende le Kraken à son profil d'usine : seule une coupure
+d'alimentation complète le fait ([`docs/VENTILATEURS.md`](docs/VENTILATEURS.md)).
+
+⚠️ **Le verrou repart fermé à chaque ouverture de la fenêtre.** C'est une mémoire de fenêtre, comme
+la pastille du profil rappelé : rien ne la persiste. Un verrou qui se souviendrait d'avoir été
+ouvert ne protégerait plus rien le lendemain.
+
+⚠️ **Un canal illisible reste inerte, cadenas ouvert ou fermé** (#100). Les deux règles se composent
+au lieu de se remplacer : le Kraken part périodiquement en quarantaine, et ouvrir son cadenas pendant
+ce temps rendrait sa barre manipulable vers un périphérique qui ne répond plus.
+
+Un **point d'interrogation**, en tête du panneau, ouvre ce que chacun des six modes veut dire — qui
+décide de la vitesse, et ce qu'on perd en y touchant. C'est l'information qui manquait le
+2026-08-15 : `non-piloté` et `plein-régime-100%` sont les deux sens opposés du **même** `0`, et rien
+ne le disait.
+
+`REVERB_ONGLET=ventilos` rend le panneau verrou fermé,
+`REVERB_ONGLET=ventilos REVERB_VERROU=ouvert` le rend verrou ouvert — les deux moitiés d'un même
+geste, dont celle qui laisse écrire ne se verrait sinon sur aucune image.
+
 ### Ce que la fenêtre ne fait pas
 
 - Elle **n'ouvre aucun périphérique** et **n'écrit aucun fichier**. Tout passe par le socket, qui
@@ -592,6 +667,15 @@ constante changera et la fenêtre suivra.
   ⚠️ Encore faut-il qu'il ait répondu **une fois depuis l'ouverture de la fenêtre** : une ligne
   `unreadable` ne dit pas la nature de son sujet, et la fenêtre reconnaît un canal à l'avoir vu en
   `chan`. Un Kraken déjà en rade au lancement manque donc à l'appel jusqu'à sa première réponse.
+- Le **cadenas** n'est pas un dessin : c'est un bouton qui dit ce que le clic fait. Un glyphe
+  tiendrait — U+1F512 sort bien de la police de repli du rendu logiciel, mesuré le 2026-08-15, là où
+  U+26BF sort en carré vide —, mais un cadenas seul ne dit pas dans quel sens il bascule : montre-t-il
+  l'état, ou l'action ? C'est l'arbitrage des dix pastilles d'animation contre un menu déroulant, et
+  ce projet écrit les mots. Le prix est en largeur de barre, et il tombe sur les seuls canaux qu'on
+  ne règle presque jamais — ceux qui régulent tout seuls.
+  ⚠️ L'aide sur les modes est **un** point d'interrogation pour le panneau, et non un par ligne :
+  le panneau qu'il ouvre liste les six modes quelle que soit la ligne d'où l'on part, et cinq icônes
+  ouvriraient cinq fois le même texte — dans la rangée même où le cadenas vient de prendre la place.
 - Une LED peinte à la main (`paint`) **ne survit pas à un redémarrage** : `eclairage.conf` garde
   une couleur par cible, pas une par LED (#21). La cible reprend sa couleur unie au démarrage.
   **Une zone, si** — c'est le moyen de rendre une peinture durable : sélectionner les LED, les
