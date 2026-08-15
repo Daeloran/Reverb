@@ -18,6 +18,7 @@ use reverb_daemon::peripheriques::{Consigne, Peripheriques, SOURCE_DU_KRAKEN};
 use reverb_daemon::persistance::{self, Eclairage};
 use reverb_daemon::profils::{self, Ecriture, Profil};
 use reverb_daemon::quarantaine::{Quarantaine, Releve};
+use reverb_daemon::regulation::{self, Courbe, Regulation};
 use reverb_daemon::reparation::{Constat, EtatSource, TENTATIVES_MAXIMALES};
 use reverb_daemon::serveur::{self, Ordre};
 use reverb_daemon::telemetrie;
@@ -25,7 +26,7 @@ use reverb_daemon::zones::{self, Rendu, Tampon, Zones};
 use reverb_hw::hwmon::Percent;
 use reverb_proto::composition::{Ancre, Composition, Fond, Source};
 use reverb_proto::ipc::{
-    FanAction, LightTarget, ProfilAction, Request, ResponseLine, ScreenAction,
+    FanAction, LightTarget, ProfilAction, ReguleAction, Request, ResponseLine, ScreenAction,
 };
 use reverb_proto::ram::{self, SlotAddress};
 use reverb_proto::{LEDS_PER_FAN, Position, Rgb};
@@ -106,6 +107,31 @@ fn main() -> ExitCode {
         eprintln!("attention : {souci}");
     }
 
+    let fichier_regulation = std::env::args().nth(7).map_or_else(
+        || PathBuf::from(regulation::CHEMIN_REGULATION),
+        PathBuf::from,
+    );
+    let (reguleur, souci) = regulation::charger_regulation(&fichier_regulation);
+    if let Some(souci) = souci {
+        eprintln!("attention : {souci}");
+    }
+    // Un canal conservé mais disparu du bus se dit **au démarrage**, une fois :
+    // la boucle, elle, ne le découvrirait qu'au prochain changement de palier,
+    // et l'écrirait dans le journal à ce moment-là — c'est-à-dire un jour de
+    // température stable, jamais.
+    for canal in reguleur.canaux() {
+        if !peripheriques
+            .canaux()
+            .iter()
+            .any(|connu| connu.name == canal)
+        {
+            eprintln!(
+                "attention : canal « {canal} » régulé mais introuvable — « regule {canal} off » \
+                 pour cesser de le viser"
+            );
+        }
+    }
+
     let mut etat = Etat::nouveau(
         eclairage,
         geometrie,
@@ -117,12 +143,14 @@ fn main() -> ExitCode {
             profils: std::env::args()
                 .nth(6)
                 .map_or_else(|| PathBuf::from(profils::CHEMIN_PROFILS), PathBuf::from),
+            regulation: fichier_regulation,
         },
         couches,
         sondes,
         lancer_le_fil_du_gpu(),
         dalle,
-    );
+    )
+    .avec_regulation(reguleur);
 
     // Les ambiances d'exemple, au tout premier démarrage : le répertoire est
     // absent, personne n'a encore rien enregistré, et une machine neuve a de
@@ -189,11 +217,11 @@ fn lancer_le_fil_du_gpu() -> CacheGpu {
     cache
 }
 
-/// Les quatre fichiers que le démon conserve, et leur nature.
+/// Les fichiers que le démon conserve, et leur nature.
 ///
 /// `geometrie.conf` décrit la **machine** — un montage, qu'un administrateur
-/// peut corriger — d'où `/etc`. Les trois autres décrivent l'**état du
-/// service**, écrit par le démon, d'où `/var/lib`.
+/// peut corriger — d'où `/etc`. Les autres décrivent l'**état du service**,
+/// écrit par le démon, d'où `/var/lib`.
 struct Fichiers {
     geometrie: PathBuf,
     eclairage: PathBuf,
@@ -202,6 +230,8 @@ struct Fichiers {
     /// Le **répertoire** des ambiances nommées, et non un fichier : un profil
     /// par fichier, pour qu'en supprimer un ne réécrive pas les autres (#74).
     profils: PathBuf,
+    /// Quels canaux le démon régule, et sur quelle courbe (#99).
+    regulation: PathBuf,
 }
 
 /// Ce que le démon pousse sur la dalle, et à quel rythme.
@@ -327,6 +357,15 @@ struct Etat {
     mesure: Option<f32>,
     /// Quand relire cette sonde.
     prochaine_mesure: Duration,
+    /// Les canaux de ventilation que le démon régule lui-même (#99).
+    regulation: Regulation,
+    /// Quand relire le liquide pour eux.
+    ///
+    /// ⚠️ **Ce n'est pas un réveil, c'est une échéance.** La boucle tourne déjà
+    /// — toutes les 250 ms au repos, à la cadence des images sous animation — et
+    /// la régulation ne fait que s'y greffer. Sans canal régulé, ce champ n'est
+    /// même pas consulté.
+    prochaine_regulation: Duration,
     /// L'instant du démarrage, seule origine de temps du démon.
     ///
     /// La quarantaine ne tient aucune horloge — c'est ce qui la rend
@@ -377,6 +416,13 @@ impl Etat {
             reprise: None,
             mesure: None,
             prochaine_mesure: Duration::ZERO,
+            // Celle d'un premier démarrage : aucun canal régulé.
+            // `avec_regulation` pose ensuite celle qu'on vient de relire.
+            regulation: Regulation::nouvelle(Courbe::defaut()),
+            // Zéro : les canaux régulés sont écrits au tout premier tour. Rien
+            // ne survit au redémarrage côté matériel, et `nzxtsmart2` repart de
+            // son défaut d'allumage — 25 %, le défaut que #99 corrige.
+            prochaine_regulation: Duration::ZERO,
             naissance: Instant::now(),
         }
     }
@@ -394,6 +440,16 @@ impl Etat {
         } else if !self.muettes.contains(cible) {
             self.muettes.insert(cible.to_owned());
         }
+    }
+
+    /// Pose la régulation relue au démarrage (#99).
+    ///
+    /// À part de [`Etat::nouveau`], qui porte déjà les sept paramètres que
+    /// clippy tolère — et parce que ce sont deux gestes distincts : construire
+    /// l'état courant, puis y verser ce qu'un fichier a rendu.
+    fn avec_regulation(mut self, regulation: Regulation) -> Etat {
+        self.regulation = regulation;
+        self
     }
 
     /// Prépare ce que la dalle doit montrer, depuis l'affichage conservé.
@@ -592,6 +648,74 @@ impl Etat {
         // ordinaire, et son démon doit voir la source tomber (#98).
         self.noter(&slug, self.mesure.is_some());
     }
+
+    /// Un tour de régulation des canaux que leur pilote ne régule pas (#99).
+    ///
+    /// ⚠️ **Aucun réveil ajouté, et c'est un critère d'acceptation.** Cette
+    /// fonction ne dort pas, ne pose pas de minuterie et ne raccourcit aucune
+    /// attente : elle se greffe sur les tours que la boucle fait déjà — un
+    /// toutes les 250 ms au repos, un par image sous animation. Sans canal
+    /// régulé, elle rend la main avant de lire l'horloge, et le démon reste au
+    /// repos absolu.
+    ///
+    /// ⚠️ **Le liquide est relu au plus une fois par seconde**, jamais à la
+    /// cadence des images, et **par la quarantaine** (#68) : une lecture sysfs
+    /// sur un périphérique muet bloque cinq secondes en sommeil non
+    /// interruptible, dans le fil qui sert aussi le socket. Une sonde écartée
+    /// rend `None`, donc le repli — jamais la dernière valeur connue.
+    fn tour_de_regulation(&mut self, peripheriques: &Peripheriques) {
+        if self.regulation.canaux().is_empty() {
+            return;
+        }
+
+        let maintenant = self.naissance.elapsed();
+        if maintenant < self.prochaine_regulation {
+            return;
+        }
+        self.prochaine_regulation = maintenant + INTERVALLE_MESURE;
+
+        let liquide = match self
+            .sondes
+            .iter()
+            .find(|sonde| sonde.slug == regulation::SONDE_DU_LIQUIDE)
+        {
+            Some(sonde) => match self
+                .quarantaine
+                .tour(&sonde.slug, maintenant, || sonde.lire().ok())
+            {
+                Releve::Valeur(millidegres) => Some(millidegres),
+                Releve::Muette { .. } => None,
+            },
+            // La sonde n'existe pas sur cette machine : c'est aussi un liquide
+            // illisible, et le repli s'applique. Le taire ferait tourner les
+            // sept ventilateurs à leur défaut d'allumage sans un mot.
+            None => None,
+        };
+
+        for regulation::Ecriture { canal, consigne } in self.regulation.tour(liquide) {
+            let ecrite = Percent::new(consigne)
+                .map_err(|erreur| erreur.to_string())
+                .and_then(|percent| {
+                    peripheriques
+                        .consigner(&canal, Consigne::Pwm(percent))
+                        .map_err(|erreur| erreur.to_string())
+                });
+            match ecrite {
+                // Une consigne qui change se dit : sept ventilateurs sur dix en
+                // dépendent, et c'est la trace qui manquait pendant les
+                // soixante-douze minutes mesurées le 2026-08-15.
+                Ok(()) => println!(
+                    "régulation : {canal} à {consigne} %{}",
+                    match liquide {
+                        Some(millidegres) =>
+                            format!(" (liquide {:.1} °C)", f64::from(millidegres) / 1000.0),
+                        None => " (liquide illisible — repli)".to_owned(),
+                    }
+                ),
+                Err(message) => eprintln!("attention : régulation de {canal} : {message}"),
+            }
+        }
+    }
 }
 
 /// Entre deux lectures de la sonde que `thermique` suit.
@@ -661,9 +785,20 @@ fn boucle(peripheriques: &mut Peripheriques, ordres: &Receiver<Ordre>, mut etat:
         // appelée trente fois par seconde.
         etat.rafraichir_la_mesure();
 
-        // Une source entièrement muette a droit à un reset USB, borné (#98). Ce
-        // tour ne fait que décider et ramasser : le geste vit sur son propre fil,
-        // comme la dalle depuis #83.
+        // La régulation des canaux que leur pilote ne régule pas (#99), au même
+        // endroit et pour la même raison que le reste : c'est le tour que la
+        // boucle fait déjà. Aucune minuterie, aucun sondage — sans canal régulé,
+        // elle rend la main sans rien lire.
+        etat.tour_de_regulation(peripheriques);
+
+        // Puis la réparation d'une source entièrement muette, par un reset USB
+        // borné (#98). Ce tour ne fait que décider et ramasser : le geste vit
+        // sur son propre fil, comme la dalle depuis #83.
+        //
+        // ⚠️ **Après la régulation, et non avant.** C'est elle qui vient de lire
+        // le liquide, donc de dire si la sonde du Kraken répond encore ; la
+        // réparation consomme cette observation, elle ne la produit pas.
+        // L'inverse la ferait décider sur un tour de retard.
         tour_de_reparation(&mut etat, peripheriques);
 
         let anime = etat.animation.is_some() || etat.zone_animee();
@@ -1350,15 +1485,46 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
                 FanAction::Auto => Ok(Consigne::Auto),
                 FanAction::Pwm(percent) => Percent::new(percent).map(Consigne::Pwm),
             };
-            match consigne.map_err(|e| e.to_string()).and_then(|consigne| {
+            let ecrite = consigne.map_err(|e| e.to_string()).and_then(|consigne| {
                 peripheriques
                     .consigner(&channel, consigne)
                     .map_err(|e| e.to_string())
-            }) {
+            });
+
+            // Une consigne posée à la main **reprend** le canal : sans cela la
+            // régulation la réécrirait au prochain changement de palier, et
+            // l'utilisateur verrait sa valeur disparaître sans explication.
+            // Après un échec, en revanche, le canal reste régulé — le rendre
+            // laisserait les ventilateurs à leur défaut d'allumage.
+            if ecrite.is_ok() && etat.regulation.canaux().contains(&channel) {
+                etat.regulation.couper(&channel);
+                if let Err(erreur) =
+                    regulation::enregistrer_regulation(&etat.fichiers.regulation, &etat.regulation)
+                {
+                    eprintln!("attention : régulation coupée mais non conservée : {erreur}");
+                }
+                println!("régulation : « {channel} » repris à la main par « fan »");
+            }
+
+            match ecrite {
                 Ok(()) => vec![ResponseLine::End],
+                // ⚠️ Le refus vient de `reverb-hw`, qui ne connaît pas le
+                // socket : « ce contrôleur n'a pas de mode automatique » (#50)
+                // est exact et n'apprend pas ce qu'il faut taper à la place.
+                // Le panneau indicateur est posé ici, où le protocole est connu.
+                Err(message) if matches!(action, FanAction::Auto) => {
+                    vec![ResponseLine::Error {
+                        message: format!(
+                            "{message} — « regule {channel} on » le régule depuis l'hôte, sur la \
+                             température du liquide"
+                        ),
+                    }]
+                }
                 Err(message) => vec![ResponseLine::Error { message }],
             }
         }
+
+        Request::Regule(action) => regule_commande(etat, peripheriques, action),
     };
 
     // Le client peut être parti entre l'ordre et la réponse : ce n'est pas une
@@ -1645,6 +1811,103 @@ fn poser_affichage(etat: &mut Etat, affichage: ecran::Affichage) -> Vec<Response
             let _ = etat.preparer_ecran();
             vec![ResponseLine::Error { message }]
         }
+    }
+}
+
+/// Ce qu'une commande `regule` fait de la régulation côté hôte (#99).
+///
+/// ⚠️ **Un canal dont le pilote sait faire auto est refusé.** Les deux verbes se
+/// partagent les canaux : `fan <canal> auto` pour ceux dont le firmware exécute
+/// une courbe — les deux du Kraken, qui régulent déjà correctement, mesuré —, et
+/// `regule` pour les autres. Remplacer une régulation qui marche par une boucle
+/// hôte, c'est écrire du code pour perdre une garantie : la courbe firmware,
+/// elle, tient sans démon.
+fn regule_commande(
+    etat: &mut Etat,
+    peripheriques: &Peripheriques,
+    action: ReguleAction,
+) -> Vec<ResponseLine> {
+    let echec = |message: String| vec![ResponseLine::Error { message }];
+
+    match action {
+        ReguleAction::Etat => {
+            let mut lignes = vec![ResponseLine::Courbe {
+                paliers: etat.regulation.courbe().paliers().to_vec(),
+            }];
+            lignes.extend(
+                etat.regulation
+                    .canaux()
+                    .into_iter()
+                    .map(|canal| ResponseLine::Regule { canal }),
+            );
+            lignes.push(ResponseLine::End);
+            lignes
+        }
+
+        ReguleAction::Activer(canal) => {
+            let Some(connu) = peripheriques.canaux().iter().find(|c| c.name == canal) else {
+                return echec(format!(
+                    "canal « {canal} » inconnu — « status » donne ceux de la machine"
+                ));
+            };
+            if connu.sait_faire_auto() {
+                return echec(format!(
+                    "le pilote de « {canal} » exécute déjà sa propre courbe : « fan {canal} auto » \
+                     la lui rend, et elle tient sans démon"
+                ));
+            }
+            etat.regulation.activer(&canal);
+            // Le canal est écrit au prochain tour de boucle, dans les
+            // millisecondes : il n'a jamais rien reçu, et le cache est par canal.
+            etat.prochaine_regulation = Duration::ZERO;
+            conserver_regulation(etat)
+        }
+
+        ReguleAction::Couper(canal) => {
+            if !etat.regulation.canaux().contains(&canal) {
+                return echec(format!(
+                    "canal « {canal} » non régulé — « regule » donne ceux qui le sont"
+                ));
+            }
+            // ⚠️ Le canal garde la dernière consigne écrite : rien n'a de
+            // watchdog, et le rendre au pilote demanderait un mode automatique
+            // qu'il n'a pas — c'est tout le sujet de #99. `fan <canal> pwm …`
+            // reprend la main.
+            etat.regulation.couper(&canal);
+            conserver_regulation(etat)
+        }
+
+        ReguleAction::Courbe(paliers) => {
+            // Le refus vient de la `Courbe` elle-même, seule à juger : le
+            // protocole transporte les paliers sans les interpréter, comme les
+            // réglages d'une animation.
+            match Courbe::depuis(&paliers) {
+                Ok(courbe) => {
+                    etat.regulation.regler(courbe);
+                    etat.prochaine_regulation = Duration::ZERO;
+                    conserver_regulation(etat)
+                }
+                Err(erreur) => echec(erreur.raison),
+            }
+        }
+    }
+}
+
+/// Écrit la régulation sur disque, et répond.
+///
+/// Même règle que l'éclairage : à **chaque** changement, et un échec est dit au
+/// client plutôt qu'avalé. Une régulation appliquée mais non conservée ne
+/// survivrait pas au redémarrage, et les sept ventilateurs repartiraient à leur
+/// défaut d'allumage — le défaut même que #99 corrige.
+fn conserver_regulation(etat: &Etat) -> Vec<ResponseLine> {
+    match regulation::enregistrer_regulation(&etat.fichiers.regulation, &etat.regulation) {
+        Ok(()) => vec![ResponseLine::End],
+        Err(erreur) => vec![ResponseLine::Error {
+            message: format!(
+                "régulation appliquée mais non conservée : {} ({erreur})",
+                etat.fichiers.regulation.display()
+            ),
+        }],
     }
 }
 

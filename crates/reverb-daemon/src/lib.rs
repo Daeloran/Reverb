@@ -21,6 +21,7 @@ pub mod peripheriques;
 pub mod persistance;
 pub mod profils;
 pub mod quarantaine;
+pub mod regulation;
 pub mod reparation;
 pub mod serveur;
 pub mod telemetrie;

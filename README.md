@@ -38,6 +38,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | La fenêtre expose tout le protocole | ✅ vérifié par des tests de couverture, pas à l'œil |
 | La dalle n'arrête plus le boîtier | ✅ son propre fil, et toute question HID bornée dans le temps |
 | Un Kraken muet, le démon tente de le réparer | ✅ trois resets USB bornés, sur son propre fil, puis redécouverte |
+| Régulation des ventilateurs | ✅ les trois canaux sans mode auto, sur la courbe du liquide |
 
 ## Ce que les protocoles permettent
 
@@ -67,6 +68,7 @@ reverb-gui  (fenêtre Slint — maquette du boîtier, animations, ventilateurs)
 reverb-daemon
    ├── write()      ──►  /dev/hidraw*        ventilateurs, GRB
    ├── I2C_SMBUS    ──►  /dev/i2c-8 0x18..1b RAM Corsair, RGB
+   ├── write()      ──►  sysfs pwm*          vitesse des canaux régulés
    ├── fil de l'écran ──► usbfs 1e71:300c    dalle du Kraken, BGR
    │      ▲ une image déposée, un verdict rendu — jamais d'attente
    └── fil de réparation ──► USBDEVFS_RESET  une source entièrement muette
@@ -260,6 +262,98 @@ tourne : c'est une donnée de montage (spec §5), relevée à l'œil et conserv�
 quelconque — d'où une commande plutôt qu'une recompilation. Le démon, qui est root, écrit le
 fichier ; **la fenêtre ne l'écrira jamais**, elle demandera par le socket.
 
+### La régulation — les sept ventilateurs que personne ne pilotait
+
+```bash
+echo 'regule'                                        # la courbe, et les canaux régulés
+echo 'regule nzxtsmart2:fan-1 on'                    # le démon prend ce canal
+echo 'regule nzxtsmart2:fan-1 off'                   # il le rend
+echo 'regule courbe 35000:30 45000:60 50000:100'     # la courbe, en millidegrés
+```
+
+Sept des dix ventilateurs sont sur les trois canaux `nzxtsmart2`, et **rien ne les régulait sous
+Linux** : le pilote `nzxt-smart2` n'a aucun mode automatique, sa vitesse est celle que l'hôte
+écrit, et personne ne l'écrivait. Mesuré sur SHYNAEL le 2026-08-15, 863 relevés sur 72 minutes de
+jeu :
+
+| | min | médiane | max |
+|---|---|---|---|
+| liquide | 36,9 | 50,7 | **51,3 °C** |
+| Tctl | 62,6 | 76,2 | **91,5 °C** |
+| duty des trois `nzxtsmart2` | 64 | 64 | **64** — soit 25 %, ~700 tr/min |
+
+**Une seule valeur sur 863 relevés**, pendant que le liquide passait quarante-cinq minutes au-dessus
+de 50 °C. Le problème n'était pas une consigne fausse, c'est qu'aucune n'était jamais écrite.
+
+Le démon calcule donc la sienne, sur une courbe réglable :
+
+| liquide | consigne |
+|---|---|
+| ≤ 35 °C | 30 % |
+| 45 °C | 60 % |
+| ≥ 50 °C | 100 % |
+
+interpolée entre les paliers, **ramenée aux bornes** au-delà — jamais extrapolée : prolonger la
+droite du premier segment donnerait 0 % à 25 °C, c'est-à-dire des ventilateurs à l'arrêt sur un
+circuit qui démarre.
+
+⚠️ **La sonde est celle du liquide, et elle seule.** C'est la logique d'un AIO : le liquide bouge
+lentement — il a mis quarante minutes à monter — donc les ventilateurs ne pompent pas. C'est aussi
+la sonde dont le Kraken se sert pour sa propre courbe firmware, donc les deux régulations restent
+cohérentes. Tctl saute de 20 °C entre deux secondes sur un Zen 5 et demanderait un lissage.
+
+⚠️ **Aucun réveil ajouté.** La régulation se greffe sur le tour que la boucle fait déjà — un toutes
+les 250 ms au repos, un par image sous animation — et relit le liquide au plus une fois par seconde.
+Sans canal régulé, elle rend la main avant même de lire l'horloge : le démon reste au repos absolu.
+
+⚠️ **On n'écrit que ce qui change**, comme le cache de LED : aucune de ces cibles n'a de watchdog, et
+le tour passe une fois par seconde — l'écart entre une régulation qui se tait et une qui réécrit,
+c'est 86 400 trames par jour pour rien.
+
+⚠️ **Un liquide illisible fait retomber la consigne à 50 %, jamais à la dernière valeur connue.**
+C'est le mode de défaillance rassurant que le projet refuse partout ailleurs : une consigne figée à
+30 % derrière une sonde morte, c'est un CPU qui chauffe sans que rien ne le signale — et le Kraken
+se plante périodiquement. Le repli part **une fois**, pas à chaque tour, et le retour de la sonde
+reprend la courbe sans redémarrage.
+
+⚠️ **`fan <canal> pwm …` reprend le canal**, et la régulation le lâche : sans cela elle réécrirait
+la valeur posée à la main au prochain changement de palier, et elle disparaîtrait sans explication.
+
+Les canaux régulés et la courbe vivent dans `/var/lib/reverb/regulation.conf`, relu au démarrage —
+et **le cache d'écriture n'y figure pas** : rien ne survit au redémarrage côté matériel, les canaux
+repartent à `pwm = 64`, et une régulation qui se souviendrait d'avoir déjà écrit 33 % les y
+laisserait jusqu'au prochain changement de palier. Un fichier tronqué ou répété est refusé **en
+nommant l'entrée fautive**, et n'empêche jamais le démarrage : le démon part alors sans réguler,
+et le dit. Sans canal, il ne décide rien — poser 50 % sur des canaux qu'on n'a pas su relire serait
+choisir à la place de l'utilisateur.
+
+#### Pourquoi `regule` et non `fan <canal> auto`
+
+L'issue posait la question : `auto` pourrait devenir « régule ce canal par le moyen disponible ».
+Le verbe est resté séparé, et les deux se **partagent** les canaux au lieu de se recouvrir — c'est
+le drapeau « sait faire auto » d'une ligne `chan` qui les départage :
+
+| | `fan <canal> auto` | `regule <canal> on` |
+|---|---|---|
+| canaux | les deux du Kraken | les trois `nzxtsmart2` |
+| qui régule | le **firmware**, `pwm_enable = 2` | la boucle du démon |
+| sans démon | **tient** | s'arrête |
+
+C'est la troisième ligne qui a tranché : un seul verbe pour les deux ferait disparaître du
+protocole la seule différence qui compte le jour où le service ne tourne plus. Deux raisons de
+plus : « ce contrôleur sait faire auto » est un fait matériel, lu dans le nom du pilote et figé par
+les tests d'intention de #50 — l'élargir, c'était les réécrire ; et `status` aurait contredit la
+commande dès la seconde suivante, en répondant `mode manuel` et `sait_faire_auto non` sur un canal
+qui venait d'accepter « auto ».
+
+Le sign-post, lui, est posé : `fan nzxtsmart2:fan-1 auto` refuse toujours — « ce contrôleur n'a pas
+de mode automatique » (#50) — et ajoute désormais où aller.
+
+**Ce qui n'y est pas** : une courbe par canal — tant que la répartition physique des ventilateurs
+par canal reste l'inconnue documentée de [`docs/VENTILATEURS.md`](docs/VENTILATEURS.md), les trois
+en partagent une —, toute sonde autre que le liquide, les deux canaux du Kraken dont le firmware
+régule déjà correctement, et l'édition de la courbe depuis la fenêtre.
+
 ### L'éclairage retrouvé
 
 Le boîtier retrouve seul, après un redémarrage, ce qu'il affichait — une couleur fixe comme une
@@ -267,11 +361,12 @@ animation avec ses réglages. Le démon écrit son état dans `/var/lib/reverb/e
 **chaque changement**, pas à l'arrêt : ce qu'on veut retrouver, c'est justement l'éclairage
 d'avant une coupure de courant, qui ne laisse le temps d'écrire nulle part.
 
-Deux natures, quatre fichiers et un répertoire. La géométrie est une donnée de montage, décidée une
-fois, et reste dans `/etc` ; l'éclairage, les zones, l'écran et [les profils](#les-profils--une-ambiance-sous-un-nom)
-sont l'état courant du service, réécrits à chaque commande, et vont dans `/var/lib`
-(`StateDirectory=reverb`). Les mêler ferait réécrire à chaque changement de couleur le fichier qui
-a coûté un relevé au sol.
+Deux natures, cinq fichiers et un répertoire. La géométrie est une donnée de montage, décidée une
+fois, et reste dans `/etc` ; l'éclairage, les zones, l'écran,
+[la régulation](#la-régulation--les-sept-ventilateurs-que-personne-ne-pilotait) et
+[les profils](#les-profils--une-ambiance-sous-un-nom) sont l'état courant du service, réécrits à
+chaque commande, et vont dans `/var/lib` (`StateDirectory=reverb`). Les mêler ferait réécrire à
+chaque changement de couleur le fichier qui a coûté un relevé au sol.
 
 L'écran suit la même règle : `ecran.conf` garde sa luminosité et **le chemin** de ce qu'il montre,
 jamais les pixels. Au redémarrage le démon relit le fichier ; s'il a disparu depuis, la dalle reste
@@ -481,7 +576,9 @@ constante changera et la fenêtre suivra.
   relevé.
 - Le bouton **« auto » n'apparaît que sur un canal qui peut l'exécuter maintenant**. Le pilote
   `nzxt-smart2` n'a aucun mode automatique — sa vitesse est celle que l'hôte écrit —, et montrer un
-  bouton qui ne peut qu'échouer vaut moins que ne pas le montrer.
+  bouton qui ne peut qu'échouer vaut moins que ne pas le montrer. Ce que le démon sait faire pour
+  ces trois canaux-là s'appelle [`regule`](#la-régulation--les-sept-ventilateurs-que-personne-ne-pilotait),
+  et ne se pilote pour l'instant que par le socket.
   ⚠️ **Depuis #97, il ne s'affiche donc nulle part** : « auto » écrit `pwm_enable = 2`, qui fait
   exécuter la courbe de l'**hôte** — zéro partout tant qu'aucune n'a été téléversée, ce qui arrête
   la régulation de la pompe au lieu de la rendre. Le démon n'ayant pas de verbe `curve` sur le

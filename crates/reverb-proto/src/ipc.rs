@@ -170,6 +170,20 @@ pub enum Request {
     Screen(ScreenAction),
     /// `profil <action>` — les ambiances nommées (#74).
     Profil(ProfilAction),
+    /// `regule <action>` — la régulation côté hôte des canaux de ventilation
+    /// dont le pilote n'en a aucune (#99).
+    ///
+    /// ⚠️ **Un verbe à part, et non un `fan <canal> auto` élargi.** Les deux
+    /// commandes se **partagent** les canaux au lieu de se recouvrir :
+    /// `fan … auto` écrit `pwm_enable = 2` et rend la main à une courbe que le
+    /// **firmware** exécute — elle tient sans hôte —, là où `regule` engage une
+    /// boucle du démon, qui s'arrête avec lui. Un seul verbe pour les deux
+    /// ferait disparaître du protocole la seule différence qui compte le jour où
+    /// le service ne tourne plus.
+    ///
+    /// Le drapeau `sait_faire_auto` d'une ligne `chan` (#50) départage les deux :
+    /// vrai, c'est `fan … auto` ; faux, c'est `regule`.
+    Regule(ReguleAction),
     /// `watch` — le démon pousse l'image courante, puis chaque nouvelle.
     ///
     /// Quatorze lignes `frame` puis `end`, et ainsi de suite tant que le client
@@ -258,6 +272,27 @@ pub enum ProfilAction {
 pub enum FanAction {
     Pwm(u8),
     Auto,
+}
+
+/// Ce qu'on demande à la régulation côté hôte (#99).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReguleAction {
+    /// `regule` — la courbe et les canaux régulés, sans rien changer.
+    Etat,
+    /// `regule <canal> on` — le démon prend ce canal en charge.
+    Activer(String),
+    /// `regule <canal> off` — le canal est rendu à l'utilisateur.
+    Couper(String),
+    /// `regule courbe <millidegrés>:<0-100> …` — règle la courbe commune.
+    ///
+    /// ⚠️ **En millidegrés, comme `hwmon` les rend et comme le fichier d'état
+    /// les écrit.** Deux unités dans le même protocole seraient la faute des
+    /// trois ordres de composantes : aucun message, juste un résultat faux.
+    ///
+    /// Les paliers sont transportés bruts — leur validité appartient à la
+    /// `Courbe` du démon, seule à en juger, comme les réglages d'`animate`
+    /// appartiennent à l'animation.
+    Courbe(Vec<(i32, u8)>),
 }
 
 /// Une ligne de requête n'a pas pu être comprise.
@@ -696,6 +731,43 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
             })
         }
 
+        "regule" => {
+            // Sans argument, c'est une lecture — comme `geometry` seul.
+            let [premier, suite @ ..] = arguments.as_slice() else {
+                return Ok(Request::Regule(ReguleAction::Etat));
+            };
+
+            // ⚠️ « courbe » est examiné **avant** le nom de canal. Un canal
+            // s'appelle toujours `<source>:<numéro>` (`hwmon::FanChannel::name`),
+            // donc aucun ne peut porter ce mot ; l'ordre inverse, lui, ferait
+            // chercher un canal nommé « courbe » et enverrait le message
+            // d'erreur sur une fausse piste.
+            if *premier == "courbe" {
+                if suite.is_empty() {
+                    return Err(mauvais(
+                        "« regule courbe » attend des paliers « millidegrés:pourcent », par \
+                         exemple « regule courbe 35000:30 45000:60 50000:100 »",
+                    ));
+                }
+                let mut paliers = Vec::with_capacity(suite.len());
+                for brut in suite {
+                    paliers.push(parse_palier(brut).map_err(|raison| mauvais(&raison))?);
+                }
+                return Ok(Request::Regule(ReguleAction::Courbe(paliers)));
+            }
+
+            match suite {
+                ["on"] => Ok(Request::Regule(ReguleAction::Activer(
+                    (*premier).to_owned(),
+                ))),
+                ["off"] => Ok(Request::Regule(ReguleAction::Couper((*premier).to_owned()))),
+                _ => Err(mauvais(
+                    "attend « <canal> on », « <canal> off », « courbe <paliers…> », ou rien pour \
+                     lire l'état",
+                )),
+            }
+        }
+
         autre => Err(RequestError::UnknownVerb {
             verb: autre.to_owned(),
         }),
@@ -723,6 +795,12 @@ pub fn encode_request(request: &Request) -> String {
         Request::Fan { channel, action } => match action {
             FanAction::Auto => format!("fan {channel} auto"),
             FanAction::Pwm(percent) => format!("fan {channel} pwm {percent}"),
+        },
+        Request::Regule(action) => match action {
+            ReguleAction::Etat => "regule".to_owned(),
+            ReguleAction::Activer(canal) => format!("regule {} on", jeton(canal)),
+            ReguleAction::Couper(canal) => format!("regule {} off", jeton(canal)),
+            ReguleAction::Courbe(paliers) => format!("regule courbe {}", encode_paliers(paliers)),
         },
         // Le nom est le dernier champ : il n'est ni neutralisé ni cité, ses
         // espaces étant justement ce qu'il faut transmettre. Il a traversé
@@ -986,6 +1064,41 @@ fn consigne(brut: &str) -> Result<u8, String> {
     Ok(valeur as u8)
 }
 
+/// Un palier de courbe, écrit `millidegrés:pourcent` (#99).
+///
+/// # Erreurs
+///
+/// Un jeton sans `:`, une température qui n'est pas un entier, une consigne
+/// au-delà de cent.
+///
+/// ⚠️ **Public, et c'est délibéré.** Le fichier d'état de la régulation écrit
+/// exactement ces jetons, et le démon s'en sert donc pour relire son propre
+/// fichier : deux analyseurs pour une seule syntaxe divergeraient au premier
+/// palier ajouté, et une courbe posée par le socket ne se relirait plus au
+/// démarrage suivant. C'est la règle déjà appliquée aux réglages d'`animate`,
+/// que le fichier d'éclairage et le socket font juger par le même code.
+pub fn parse_palier(brut: &str) -> Result<(i32, u8), String> {
+    let Some((temperature, pourcent)) = brut.split_once(':') else {
+        return Err(format!(
+            "palier « {brut} » : attendu « millidegrés:pourcent », par exemple « 45000:60 »"
+        ));
+    };
+    let millidegres: i32 = temperature.parse().map_err(|_| {
+        format!("palier « {brut} » : « {temperature} » n'est pas une température en millidegrés")
+    })?;
+    Ok((millidegres, consigne(pourcent)?))
+}
+
+/// Les paliers d'une courbe, tels qu'ils s'écrivent sur le fil et dans le
+/// fichier d'état.
+pub fn encode_paliers(paliers: &[(i32, u8)]) -> String {
+    paliers
+        .iter()
+        .map(|(millidegres, pourcent)| format!("{millidegres}:{pourcent}"))
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
 // ---------------------------------------------------------------------------
 // Réponses
 // ---------------------------------------------------------------------------
@@ -1100,6 +1213,17 @@ pub enum ResponseLine {
     /// Le nom est en **dernier champ** : il a le droit de porter des espaces,
     /// comme celui qu'on a tapé pour l'enregistrer.
     Profil { etat: String, nom: String },
+    /// `regule <canal>` — ce canal est régulé par le démon (#99).
+    ///
+    /// Une ligne par canal, et aucune quand rien n'est régulé : leur absence
+    /// *est* l'information, comme celle des lignes `layout-champ`.
+    Regule { canal: String },
+    /// `courbe <millidegrés>:<0-100> …` — la courbe de la régulation.
+    ///
+    /// Toujours présente dans la réponse à `regule`, même sans aucun canal
+    /// régulé : c'est ce qui s'appliquerait dès qu'un canal serait pris en
+    /// charge.
+    Courbe { paliers: Vec<(i32, u8)> },
     /// `end` — succès, fin de réponse.
     End,
     /// `err <message>` — échec, fin de réponse.
@@ -1242,6 +1366,10 @@ pub fn encode_response_line(line: &ResponseLine) -> String {
         ResponseLine::Profil { etat, nom } => {
             format!("profil {} {}", jeton(etat), sans_controle(nom))
         }
+        // Un nom de canal vient du matériel, comme celui d'une ligne `chan` : il
+        // se neutralise plutôt que de se refuser.
+        ResponseLine::Regule { canal } => format!("regule {}", jeton(canal)),
+        ResponseLine::Courbe { paliers } => format!("courbe {}", encode_paliers(paliers)),
         ResponseLine::End => "end".to_owned(),
         ResponseLine::Error { message } => format!("err {}", reste(message)),
     }
@@ -1337,6 +1465,28 @@ pub fn parse_response_line(line: &str) -> Result<ResponseLine, ResponseError> {
             etat: etat.to_owned(),
             nom: nom.to_owned(),
         });
+    }
+
+    // ⚠️ Le préfixe est « regule␣ » et le canal est un jeton unique : `regule`
+    // seul est une **requête**, et `regule <canal> on` aussi. Les lire ici
+    // donnerait un canal nommé « on » à la première réponse mal aiguillée.
+    if let Some(canal) = line.strip_prefix("regule ") {
+        if canal.trim().is_empty() || canal.contains(' ') {
+            return Err(illisible("« regule » attend un nom de canal, et lui seul"));
+        }
+        return Ok(ResponseLine::Regule {
+            canal: canal.to_owned(),
+        });
+    }
+    if let Some(reste) = line.strip_prefix("courbe ") {
+        let mut paliers = Vec::new();
+        for brut in reste.split_whitespace() {
+            paliers.push(parse_palier(brut).map_err(|raison| illisible(&raison))?);
+        }
+        if paliers.is_empty() {
+            return Err(illisible("« courbe » attend au moins un palier"));
+        }
+        return Ok(ResponseLine::Courbe { paliers });
     }
 
     if let Some(reste) = line.strip_prefix("unreadable ") {
