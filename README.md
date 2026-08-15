@@ -37,6 +37,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Composition de l'écran | ✅ un fond, quatre informations, cinq ancres dans le disque |
 | La fenêtre expose tout le protocole | ✅ vérifié par des tests de couverture, pas à l'œil |
 | La dalle n'arrête plus le boîtier | ✅ son propre fil, et toute question HID bornée dans le temps |
+| Un Kraken muet, le démon tente de le réparer | ✅ trois resets USB bornés, sur son propre fil, puis redécouverte |
 
 ## Ce que les protocoles permettent
 
@@ -66,8 +67,10 @@ reverb-gui  (fenêtre Slint — maquette du boîtier, animations, ventilateurs)
 reverb-daemon
    ├── write()      ──►  /dev/hidraw*        ventilateurs, GRB
    ├── I2C_SMBUS    ──►  /dev/i2c-8 0x18..1b RAM Corsair, RGB
-   └── fil de l'écran ──► usbfs 1e71:300c    dalle du Kraken, BGR
-          ▲ une image déposée, un verdict rendu — jamais d'attente
+   ├── fil de l'écran ──► usbfs 1e71:300c    dalle du Kraken, BGR
+   │      ▲ une image déposée, un verdict rendu — jamais d'attente
+   └── fil de réparation ──► USBDEVFS_RESET  une source entièrement muette
+          ▲ un état déposé, un constat rendu — trois gestes au plus
 
 reverb  (outil de validation, garde l'usbfs ──► 1e71:300c bulk, écran Kraken, BGR)
    │
@@ -880,6 +883,70 @@ une retente par minute laisserait le socket muet 8 % du temps.
 
 Une retente réussie la remet en service et remet le délai à zéro. L'écart est **par sonde** :
 celle qui répond continue d'être lue quand sa voisine du même contrôleur se tait.
+
+### Une source entièrement muette, le démon tente de la réparer
+
+La quarantaine ci-dessus est **purement défensive** : elle empêche une lecture muette de geler
+le service, et attend un rétablissement. Sur les deux effondrements du Kraken relevés en deux
+jours, il n'est jamais venu avant un redémarrage.
+
+```
+12:29:49  écran : pas de trame 37 02 en 2s — le contrôleur ne répond plus
+12:29:56  canal « kraken2023elite:fan-speed » écarté : Connection timed out
+12:29:56  canal « kraken2023elite:pump-speed » écarté : Connection timed out
+12:30:01  sonde « kraken2023elite:coolant-temp » écartée : Connection timed out
+12:30:41  3 échecs d'affilée sur la dalle → écran rendu au firmware
+```
+
+Ce n'est ni le lien USB — le périphérique reste énuméré, le journal noyau ne dit rien — ni le
+service : la lecture échoue hors de Reverb, dans un simple shell. **C'est le firmware du Kraken
+qui cesse de répondre en gardant son lien USB.**
+
+Quand **toutes** les cibles d'une même source `hwmon` se taisent, le démon tente donc un
+`USBDEVFS_RESET`, puis redécouvre ce que la source porte. **Trois tentatives, espacées de trente
+secondes**, puis il renonce et le dit une fois.
+
+⚠️ **Une seule cible muette ne déclenche rien.** C'est la moitié qui protège la machine : un
+reset USB fait disparaître puis réapparaître le périphérique, et le déclencher sur un contrôleur
+qui répond encore casse ce qui marchait.
+
+⚠️ **La source est jugée sur ce qui a été relevé**, et le démon ne relève **tout** qu'en servant
+un `status` — que la fenêtre demande une fois par seconde. Sans fenêtre ouverte, une composition
+ou l'animation `thermique` alimentent le constat pour leurs seules sondes ; l'effondrement d'une
+source entière ne se constate alors pas.
+
+⚠️ **C'est la source qui répond à nouveau qui remet le compteur à zéro, jamais l'`ioctl` qui rend
+`Ok`.** Un reset réussit dès que le noyau a réinitialisé le port ; il ne dit rien de ce que le
+firmware fait ensuite, et l'incident est précisément celui d'un périphérique **énuméré qui ne
+répond plus**. Sans cette règle le plafond serait écrit et inatteignable, et le démon secouerait
+le Kraken jusqu'au redémarrage.
+
+⚠️ **La tentative vit hors du fil qui sert le socket**, comme la dalle depuis #83 : c'est le
+quatrième chemin à porter le même défaut, après les sondes (#68), la dalle (#83) et les canaux
+(#88). Le fil principal dépose un état, ramasse un verdict, et n'attend ni l'un ni l'autre.
+
+Après un reset qui passe, **cinq secondes** sont laissées au périphérique pour revenir, puis :
+
+| | |
+|---|---|
+| les sondes et les canaux | **redécouverts par leur nom** — les numéros `hwmonN` ont pu s'échanger |
+| les quarantaines de cette source | **oubliées**, cible par cible : elles sont relues sans délai |
+| la poignée usbfs de la dalle | **lâchée puis rouverte** — un reset l'invalide |
+
+⚠️ **La redécouverte n'est pas une politesse.** Un `hwmon` qui disparaît puis revient reçoit le
+numéro libre, qui n'est pas forcément le sien. Garder l'ancienne poignée, c'est lire le fichier
+d'un **autre** périphérique et l'afficher sous le nom du premier : une température plausible sous
+le mauvais nom, et rien pour le signaler.
+
+⚠️ **Le périphérique se résout par VID:PID *et série*** — `1e71:300c`, série `BB8C90820E900630`
+sur SHYNAEL — et jamais par un chemin conservé : `devnum` est réattribué à chaque énumération,
+donc le nœud `/dev/bus/usb/BBB/DDD` change à chaque reset. C'est la règle des `hidraw` du
+CLAUDE.md, appliquée à l'USB.
+
+⚠️ **La cause du plantage reste inconnue**, et ceci en traite la conséquence. Deux pistes
+ouvertes : l'émission de la dalle est le seul trafic que Reverb envoie au Kraken — mais l'un des
+deux incidents a eu lieu émission arrêtée —, et `nzxt-kraken3` parle au même périphérique en HID
+noyau pendant que Reverb lui parle en hidraw et en usbfs.
 
 ## La RAM Corsair
 

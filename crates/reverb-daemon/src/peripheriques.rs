@@ -24,6 +24,7 @@
 
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use reverb_hw::hidraw::{self, OpenController};
 use reverb_hw::hwmon::{self, CourbesPosees, FanChannel, Mode, Percent};
@@ -34,9 +35,19 @@ use reverb_proto::{Apply, Brightness, LEDS_PER_FAN, Position, Rgb, frame, screen
 
 use crate::ecran::{Dalle, Verdict};
 use crate::fil_ecran::{Afficheur, FilEcran};
+use crate::fil_reparation::{FilReparation, Reparateur};
+use crate::reparation::{Constat, EtatSource};
 
 /// L'identifiant produit du Kraken Elite 2023.
 const KRAKEN: u16 = 0x300c;
+
+/// Le nom que le pilote `nzxt-kraken3` donne au `hwmon` du Kraken.
+///
+/// Relevé dans le journal de l'incident du 2026-08-15 (issue #98) :
+/// `kraken2023elite:fan-speed`, `kraken2023elite:pump-speed`,
+/// `kraken2023elite:coolant-temp`. C'est le seul lien entre une source qui se
+/// tait et le périphérique USB qu'il faudrait secouer.
+pub const SOURCE_DU_KRAKEN: &str = "kraken2023elite";
 
 /// Couleurs des huit LED d'un ventilateur.
 pub type CouleursVentilateur = [Rgb; LEDS_PER_FAN as usize];
@@ -69,6 +80,12 @@ pub struct Peripheriques {
     /// branché, ou si la règle udev manque — une machine sans lui doit continuer
     /// de s'éclairer, et aucun fil n'est alors démarré.
     ecran: Option<FilEcran>,
+    /// Le fil qui pose les `USBDEVFS_RESET`, et lui seul (#98).
+    ///
+    /// ⚠️ Toujours présent, même sans Kraken branché : sans périphérique il n'y a
+    /// pas de source `kraken2023elite` dans `hwmon`, donc aucune cible, donc aucun
+    /// effondrement à constater — le fil dort et ne coûte rien.
+    reparation: FilReparation,
     /// Ce qui a été écrit en dernier, pour ne pas le réécrire.
     ///
     /// **Aucune de ces cibles n'a de watchdog** : l'état écrit tient
@@ -152,11 +169,16 @@ impl Peripheriques {
         // dire **une fois**, sans boucler à le chercher. Le fil dédié n'est
         // lancé que si le périphérique a été ouvert — un fil qui n'aurait rien à
         // tenir dormirait pour rien jusqu'à l'arrêt du démon.
-        let ecran = match Kraken::ouvrir() {
-            Ok(kraken) => Some(FilEcran::demarrer(kraken)),
+        let (ecran, serie_du_kraken) = match Kraken::ouvrir() {
+            Ok(kraken) => {
+                // Relevée **avant** de confier le Kraken à son fil : après, plus
+                // personne ne peut le lui demander, et c'est bien le but (#83).
+                let serie = kraken.bulk.serie().map(str::to_owned);
+                (Some(FilEcran::demarrer(kraken)), serie)
+            }
             Err(erreur) => {
                 soucis.push(format!("écran du Kraken injoignable : {erreur}"));
-                None
+                (None, None)
             }
         };
 
@@ -167,6 +189,9 @@ impl Peripheriques {
                 canaux,
                 courbes: CourbesPosees::vide(),
                 ecran,
+                reparation: FilReparation::demarrer(ReparateurUsb {
+                    serie: serie_du_kraken,
+                }),
                 dernier: Dernier::default(),
             },
             soucis,
@@ -218,6 +243,68 @@ impl Peripheriques {
         if let Some(ecran) = &self.ecran {
             ecran.relancer();
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // La réparation d'une source muette (issue #98)
+    // -----------------------------------------------------------------------
+
+    /// Les sources dont il vaut la peine de soumettre l'état.
+    pub fn sources_reparables(&self) -> &[String] {
+        self.reparation.sources()
+    }
+
+    /// Confie l'état d'une source au fil de réparation. **Ne bloque pas.**
+    pub fn soumettre_reparation(&self, etat: EtatSource, maintenant: Duration) {
+        self.reparation.soumettre(etat, maintenant);
+    }
+
+    /// Ce que le fil de réparation a décidé depuis le dernier tour. **N'attend
+    /// rien.**
+    pub fn constats_reparation(&self) -> Vec<(String, Constat)> {
+        self.reparation.constats()
+    }
+
+    /// Lâche la poignée usbfs de la dalle, sans attendre son fil.
+    ///
+    /// ⚠️ **Un `USBDEVFS_RESET` invalide toute poignée ouverte sur le
+    /// périphérique**, y compris celle que le fil de l'écran détient : ses
+    /// `ioctl` rendront `ENODEV` jusqu'à ce qu'on rouvre. On la lâche donc dès que
+    /// le geste a réussi, sans attendre — joindre le fil remettrait, dans le
+    /// chemin critique des LED, l'envoi de 1,2 Mo que #83 en a sorti. Son `Drop`
+    /// lui demande de sortir, il termine ce qu'il avait en main et s'en va.
+    ///
+    /// Entre ce moment et [`Peripheriques::rouvrir_ecran`], la dalle est rendue au
+    /// firmware et les dépôts d'image sont sans effet.
+    ///
+    /// Rend `true` s'il y avait bien une poignée à lâcher — donc s'il y en aura
+    /// une à rouvrir.
+    pub fn lacher_ecran(&mut self) -> bool {
+        self.ecran.take().is_some()
+    }
+
+    /// Rouvre la poignée usbfs de la dalle après un reset.
+    ///
+    /// À n'appeler qu'une fois le périphérique réénuméré : ouvert trop tôt, le
+    /// nœud n'existe pas encore et l'ouverture échoue pour une raison qui n'a rien
+    /// à voir avec l'état du Kraken.
+    pub fn rouvrir_ecran(&mut self) -> Result<(), String> {
+        let kraken = Kraken::ouvrir().map_err(|erreur| erreur.to_string())?;
+        self.ecran = Some(FilEcran::demarrer(kraken));
+        Ok(())
+    }
+
+    /// Redécouvre les canaux de vitesse, par leur nom.
+    ///
+    /// ⚠️ **Les chemins changent, les noms non.** Un `hwmon` qui disparaît puis
+    /// revient reçoit le numéro libre, qui n'est pas forcément le sien : garder les
+    /// anciennes poignées après un reset, c'est lire le fichier d'un **autre**
+    /// périphérique et l'afficher sous le nom du premier. Le mode de défaillance
+    /// le plus coûteux du projet est celui qui rassure.
+    pub fn redecouvrir_canaux(&mut self) -> Result<usize, String> {
+        let canaux = hwmon::discover().map_err(|erreur| erreur.to_string())?;
+        self.canaux = canaux;
+        Ok(self.canaux.len())
     }
 
     /// Peint les huit LED d'un ventilateur.
@@ -354,6 +441,61 @@ impl Peripheriques {
 pub enum Consigne {
     Pwm(Percent),
     Auto,
+}
+
+/// Le seul geste de réparation que le projet connaisse (issue #98).
+///
+/// ⚠️ **Le mécanisme n'est pas propre au Kraken, mais le geste l'est.** L'issue met
+/// hors scope « réparer autre chose que le Kraken » tout en demandant que le
+/// mécanisme ne lui soit pas propre : la décision est donc écrite par source
+/// (`crate::reparation`), et c'est ici, au dernier moment, que la seule
+/// correspondance connue apparaît. Le jour où un autre contrôleur se tait de la
+/// même façon, c'est cette structure qui grandit, pas la décision.
+struct ReparateurUsb {
+    /// La série du Kraken, relevée à l'ouverture de sa poignée. `None` quand
+    /// aucun n'a été ouvert, ou qu'il n'en expose pas — la résolution retombe
+    /// alors sur VID:PID seuls, ce qui suffit tant qu'il n'y en a qu'un.
+    ///
+    /// ⚠️ **Elle est figée au démarrage du démon**, ce fil détenant le réparateur
+    /// seul. C'est sans conséquence : une série est dans le descripteur du
+    /// périphérique et ne change pas d'une énumération à l'autre. Un Kraken
+    /// **remplacé** par un autre pendant la vie du démon ferait viser l'ancienne,
+    /// donc échouer proprement en la nommant — et un redémarrage du service la
+    /// relève.
+    serie: Option<String>,
+}
+
+impl Reparateur for ReparateurUsb {
+    fn sources(&self) -> Vec<String> {
+        vec![SOURCE_DU_KRAKEN.to_owned()]
+    }
+
+    fn reinitialiser(&mut self, source: &str) -> io::Result<()> {
+        if source != SOURCE_DU_KRAKEN {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("aucun geste de réparation connu pour « {source} »"),
+            ));
+        }
+
+        // ⚠️ **Journalisé avant, parce qu'un reset USB est visible sur la
+        // machine.** Le périphérique disparaît du bus puis y revient ; d'autres
+        // programmes peuvent s'en apercevoir, et le noyau va journaliser sa
+        // réénumération. Une ligne qui n'apparaîtrait qu'après ferait chercher la
+        // cause du côté du matériel.
+        eprintln!(
+            "réparation : reset USB de « {source} »{} — le périphérique va quitter le bus puis y \
+             revenir",
+            match &self.serie {
+                Some(serie) => format!(" (série {serie})"),
+                None => String::new(),
+            }
+        );
+
+        let noeud = usbfs::reset(self.serie.as_deref())?;
+        eprintln!("réparation : reset passé sur {}", noeud.display());
+        Ok(())
+    }
 }
 
 /// L'écran du Kraken, ses deux interfaces tenues ouvertes.
