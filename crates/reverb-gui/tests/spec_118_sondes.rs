@@ -247,6 +247,16 @@ fn les_reperes_de_ce_fichier_ne_sont_aucun_defaut() {
 // 1 — le rapport est public, et il est plus large que haut
 // ---------------------------------------------------------------------------
 
+// ⚠️ `assertions_on_constants` reproche aux trois assertions ci-dessous d'avoir
+// une valeur connue à la compilation, donc d'être « toujours vraies ». C'est
+// précisément ce que ce test existe pour garantir : elles sont vraies de la
+// valeur d'aujourd'hui, et le test est là pour qu'elles le restent de celle de
+// demain. L'exception est donc posée ici plutôt que l'assertion réécrite — un
+// `const { assert!(…) }` perdrait le message, qui nomme le chiffre fautif.
+//
+// Seule modification apportée à ce fichier après son écriture, et elle ne touche
+// aucune assertion.
+#[allow(clippy::assertions_on_constants)]
 #[test]
 fn le_rapport_de_la_tuile_est_public_et_plus_large_que_haut() {
     // Critère d'acceptation n° 3 : « le rapport largeur/hauteur n'est écrit qu'à un seul endroit ».

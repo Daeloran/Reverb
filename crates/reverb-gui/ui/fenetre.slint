@@ -335,6 +335,13 @@ export component Fenetre inherits Window {
     // jamais d'un chiffre ecrit ici : deux valeurs a tenir d'accord
     // divergeraient, et le trace redeviendrait faux sans un mot.
     in property <float> trace-aspect: 4.0;
+    // Le meme rapport, pour les courbes des tuiles de SONDES (#118).
+    //
+    // ⚠️ Une SECONDE constante, et non `trace-aspect` reutilise : une tuile de
+    // sonde fait 81 x 57,8 px la ou le cadre de la courbe de regulation fait
+    // 359 x 88. Les confondre remettrait le defaut sur l'un des deux. Elle vient
+    // de `COURBE_ASPECT`, jamais d'un chiffre ecrit ici.
+    in property <float> courbe-aspect: 2.0;
     // Les deux bornes de la plage tracee, telles qu'elles s'ecrivent.
     in property <string> borne-froide;
     in property <string> borne-chaude;
@@ -1008,7 +1015,12 @@ export component Fenetre inherits Window {
                                             if sonde.courbe != "": Path {
                                                 width: parent.width;
                                                 height: parent.height;
-                                                viewbox-width: 1;
+                                                // ⚠️ `courbe-aspect` et non 1 :
+                                                // Slint met un Path a l'echelle
+                                                // uniformement, donc un carre
+                                                // unite ne couvrait que 71 % de
+                                                // la largeur du cadre (#118).
+                                                viewbox-width: root.courbe-aspect;
                                                 viewbox-height: 1;
                                                 commands: sonde.courbe;
                                                 stroke: sonde.lisible ? #e6a24d : #55566a;

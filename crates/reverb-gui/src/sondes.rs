@@ -31,6 +31,54 @@ use std::collections::{BTreeMap, VecDeque};
 /// le démon. Plus long ne se lirait plus dans la largeur d'une carte.
 pub const MEMOIRE: usize = 120;
 
+/// Le rapport largeur/hauteur dans lequel le tracé d'une sonde est émis.
+///
+/// ⚠️ **C'est le défaut corrigé en #113 sur la courbe de régulation, sur un
+/// second tracé** : un `Path` dessiné dans le **carré unité** ne couvrait qu'une
+/// partie de sa tuile, le reste restant vide. Mesuré au pixel sur l'image
+/// d'aperçu : **60 px de tracé pour 81 px de cadre, soit 74 %** ; 67 % sur la
+/// tuile qu'un libellé de NVMe élargit. À 2,0, on passe à **98 %**.
+///
+/// Comme [`crate::reglages::TRACE_ASPECT`], cette constante vit **ici** et non
+/// dans le `.slint`, pour n'exister qu'une fois : la fenêtre la lit dans
+/// `courbe-aspect` et en tire son `viewbox`. Deux chiffres à tenir d'accord
+/// finiraient par diverger, et le symptôme serait celui qu'on corrige — un tracé
+/// faux que rien ne signale.
+///
+/// ⚠️ **La valeur a été trouvée en balayant, pas en la déduisant.** Le calcul
+/// « largeur du cadre / hauteur du cadre » donnait 1,4 et laissait 16 % de vide :
+/// le rendu de Slint ne s'y ramène pas exactement, et une dérivation géométrique
+/// aurait été plus convaincante que juste. Le balayage relevé le 2026-08-15 :
+///
+/// | rapport | largeur du tracé | hauteur |
+/// |---|---|---|
+/// | 1,0 *(avant)* | 60 px — 74 % | 55 px |
+/// | 1,4 | 68 px — 84 % | 55 px |
+/// | 1,7 | 73 px — 90 % | 55 px |
+/// | **2,0** | **79 px — 98 %** | **55 px** |
+/// | 2,1 | 80 px — 99 % | 54 px |
+/// | 2,4 | 80 px — 99 % | 52 px |
+///
+/// **2,0 est le genou** : au-delà, le tracé gagne un pixel de large et en perd un
+/// de haut. C'est donc le rapport qui dessine la plus grande courbe, et non le
+/// plus grand nombre.
+///
+/// ⚠️ **Elle est distincte de `TRACE_ASPECT` (4,0), et doit le rester.** Une
+/// tuile de sonde et le cadre de la courbe de régulation n'ont pas la même
+/// forme ; les confondre remettrait le défaut sur l'un des deux.
+///
+/// ⚠️ **Les tuiles n'ont pas toutes la même largeur** — 93 px pour trois d'entre
+/// elles, 124 et 113 pour les deux qu'un libellé de NVMe élargit —, si bien que
+/// le tracé ne remplit au mieux que les premières. Les autres y gagnent quand
+/// même. Égaliser les tuiles serait un changement de mise en page et non de
+/// tracé : hors du périmètre de #118.
+pub const COURBE_ASPECT: f32 = 2.0;
+
+/// La marge laissée en haut et en bas du cadre, en fraction de sa hauteur.
+///
+/// Un trait collé au bord se fait rogner par sa propre épaisseur.
+const MARGE_VERTICALE: f64 = 0.05;
+
 /// Un relevé : une valeur, ou l'aveu qu'on n'a pas pu lire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Releve {
@@ -108,6 +156,57 @@ impl Historique {
             (bas.min(valeur), haut.max(valeur))
         }))
     }
+}
+
+/// Le tracé d'une sonde, en commandes SVG sur [`COURBE_ASPECT`] × 1.
+///
+/// Une polyligne absolue — `M` puis des `L` —, **un point par relevé lisible**.
+/// Rend la chaîne vide quand il n'y a rien à tracer : moins de deux relevés, ou
+/// une sonde qu'on n'a jamais su lire.
+///
+/// ⚠️ **`x` court sur `0..=COURBE_ASPECT`, et non sur le carré unité** (#118),
+/// pour la raison écrite sur [`COURBE_ASPECT`] : Slint ne sait pas étirer un
+/// `Path`, il ne sait que le mettre à l'échelle uniformément.
+///
+/// ⚠️ **Un trou dans les relevés coupe le trait**, il ne l'enjambe pas. Relier
+/// les deux bords d'une absence dessinerait une pente que personne n'a mesurée
+/// — c'est le second piège écrit en tête de ce module.
+///
+/// ⚠️ **Une série plate se dessine au milieu du cadre**, jamais en haut ni en
+/// bas : un trait collé à un bord se lirait comme un extrême, alors qu'il ne dit
+/// que « rien n'a bougé ». C'est aussi le seul cas où l'étendue est nulle, donc
+/// celui où la division rendrait `NaN`.
+pub fn commandes_de_courbe(historique: &Historique, sonde: &str) -> String {
+    let releves = historique.courbe(sonde);
+    if releves.len() < 2 {
+        return String::new();
+    }
+    let Some((bas, haut)) = historique.bornes(sonde) else {
+        return String::new();
+    };
+    let etendue = f64::from(haut - bas);
+    let dernier = (releves.len() - 1) as f64;
+    let utile = 1.0 - 2.0 * MARGE_VERTICALE;
+    let mut commandes = String::new();
+    let mut pose = false;
+    for (rang, releve) in releves.iter().enumerate() {
+        let Releve::Valeur(valeur) = releve else {
+            pose = false;
+            continue;
+        };
+        let x = rang as f64 / dernier * f64::from(COURBE_ASPECT);
+        // ⚠️ `y` descend quand la mesure monte : le repère de Slint a son axe
+        // vertical vers le bas, comme celui de SVG.
+        let y = if etendue > 0.0 {
+            1.0 - f64::from(valeur - bas) / etendue
+        } else {
+            0.5
+        };
+        let y = MARGE_VERTICALE + y * utile;
+        commandes.push_str(&format!("{} {x:.4} {y:.4} ", if pose { "L" } else { "M" }));
+        pose = true;
+    }
+    commandes
 }
 
 // ---------------------------------------------------------------------------

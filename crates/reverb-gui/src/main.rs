@@ -39,7 +39,8 @@ use reverb_gui::reglages::{
     requete_de_composition, requete_de_profil, requetes_pour_la_couleur,
 };
 use reverb_gui::sondes::{
-    Historique, ModelesNvme, Releve, SondeRetenue, modeles_nvme, sondes_retenues,
+    COURBE_ASPECT, Historique, ModelesNvme, Releve, SondeRetenue, commandes_de_courbe,
+    modeles_nvme, sondes_retenues,
 };
 use reverb_gui::telemetrie::{LigneCanal, Tri, aide_des_modes, ordre_de_courbe};
 use reverb_gui::{
@@ -602,6 +603,7 @@ fn main() -> ExitCode {
     // foi, et c'est elle qui garantit que le viewbox du tracé et la hauteur du
     // cadre sortent du même chiffre. Voir `TRACE_ASPECT`.
     fenetre.set_trace_aspect(TRACE_ASPECT);
+    fenetre.set_courbe_aspect(COURBE_ASPECT);
     poser_ancres(&fenetre, &pupitre);
     dessiner(&fenetre, &pupitre);
 
@@ -2344,7 +2346,7 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
                     }
                     _ => "illisible".to_owned(),
                 }),
-                courbe: SharedString::from(courbe(&historique, &sonde)),
+                courbe: SharedString::from(commandes_de_courbe(&historique, &sonde)),
                 lisible,
             });
         }
@@ -2375,40 +2377,6 @@ fn poser_telemetrie(fenetre: &Fenetre, pupitre: &Pupitre, lignes: &[ResponseLine
 /// Les relevés `Illisible` **coupent** le trait au lieu d'être sautés : une
 /// ligne qui enjambe le trou dirait qu'on a mesuré pendant qu'on ne mesurait
 /// pas.
-fn courbe(historique: &Historique, sonde: &str) -> String {
-    let releves = historique.courbe(sonde);
-    if releves.len() < 2 {
-        return String::new();
-    }
-    let Some((bas, haut)) = historique.bornes(sonde) else {
-        return String::new();
-    };
-    // Une courbe plate se dessine au milieu : la mettre en haut ou en bas ferait
-    // croire à un extrême.
-    let etendue = f64::from(haut - bas);
-    let dernier = (releves.len() - 1) as f64;
-    let mut commandes = String::new();
-    let mut pose = false;
-    for (rang, releve) in releves.iter().enumerate() {
-        let Releve::Valeur(valeur) = releve else {
-            pose = false;
-            continue;
-        };
-        let x = rang as f64 / dernier;
-        let y = if etendue > 0.0 {
-            1.0 - f64::from(valeur - bas) / etendue
-        } else {
-            0.5
-        };
-        // Une marge d'un vingtième en haut et en bas : un trait collé au bord se
-        // fait rogner par l'épaisseur du trait.
-        let y = 0.05 + y * 0.9;
-        commandes.push_str(&format!("{} {x:.4} {y:.4} ", if pose { "L" } else { "M" }));
-        pose = true;
-    }
-    commandes
-}
-
 /// Écrit un état de connexion dans la fenêtre, depuis n'importe quel fil.
 fn dire(fenetre: &Weak<Fenetre>, connecte: bool, message: String) {
     let _ = fenetre.upgrade_in_event_loop(move |fenetre| {
