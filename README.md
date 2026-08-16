@@ -1451,6 +1451,32 @@ même principe que le cache de LED du démon — à température stable, il n'y 
 battement de 25 s, lui, ne se négocie pas : identique ou non, l'image repart avant que le firmware
 ne reprenne la main.
 
+⚠️ **La trame de mode ne part qu'à l'ouverture, et c'est un correctif, pas une optimisation.**
+`38 01 02 00` est indispensable avant la **première** image — sans elle, la dalle reste sur son
+affichage intégré et ignore l'image en silence (spec §2.2.1). Mais c'est aussi une commande
+d'affichage, donc elle **réinitialise le pipeline** (spec §3.4) : émise avant chaque envoi, elle
+faisait passer l'écran au noir toutes les vingt-cinq secondes — observé devant le boîtier, et pris
+d'abord pour le repli du firmware, qu'elle imite. La capture ne laisse pourtant aucun doute : sur
+les cinquante images de CAM, « aucune trame `32` ni `38` entre deux images » (spec §3.6).
+
+⚠️ **Ce n'était pas cosmétique.** Une image fixe réémise toutes les 25 s, c'était ~3 456
+réinitialisations de pipeline par jour sur un contrôleur dont l'implémentation de référence n'en
+inflige qu'une par session — la **seule divergence connue** entre ce que Reverb envoie au Kraken et
+ce que CAM lui envoie, sur un périphérique qui se bloque périodiquement pour une raison qui reste
+[inconnue](#une-source-entièrement-muette-le-démon-tente-de-la-réparer). Ça n'en fait pas la cause ;
+ça en fait la piste qu'on pouvait suivre en **cessant** de faire quelque chose.
+
+⚠️ **Une réouverture réarme, et rien n'a eu à être écrit pour ça** : `Default` est le seul
+constructeur du drapeau, donc la poignée lâchée puis rouverte après un reset USB (#98) repart d'un
+mode neuf. Un drapeau qui aurait survécu à l'ouverture rendrait la dalle définitivement muette après
+la première réparation.
+
+⚠️ **Le mode de défaillance est silencieux, donc la vérification est à l'œil.** Sans la trame,
+« l'envoi réussit, aucun code d'erreur, mais rien n'apparaît » (§2.2.1) : aucun accusé ne le dit, et
+aucun test automatisé ne peut l'attraper. Ce qui *est* figé sans matériel, c'est la décision
+elle-même — `fil_ecran::ModeDeDiffusion` ne reçoit ni descripteur, ni chemin, ni trame, sur le motif
+de `refus_de_consigne` (#101).
+
 ### Ce qui reste en direct
 
 `reverb screen --mire` affiche quatre quadrants de couleurs connues. C'est la mire qui a confirmé
