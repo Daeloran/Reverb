@@ -91,8 +91,11 @@
 //! /// Pourquoi une demande `repare` est refusée.
 //! #[derive(Debug, Clone, PartialEq, Eq)]
 //! pub enum RefusDeReparation {
-//!     /// Aucune source relevée ne porte ce nom. `connues` les liste **toutes**.
-//!     SourceInconnue { demandee: String, connues: Vec<String> },
+//!     /// Aucune source **réparable** ne porte ce nom. `reparables` les liste **toutes**.
+//!     ///
+//!     /// ⚠️ Renommé de `connues` par #142 : la liste est celle de `Reparateur::sources()`,
+//!     /// jamais celle des sources `hwmon` de la machine.
+//!     SourceInconnue { demandee: String, reparables: Vec<String> },
 //!     /// La source existe, mais au moins une de ses cibles répond encore.
 //!     /// `vivantes` nomme celles qui répondent.
 //!     SourceRepond { source: String, vivantes: Vec<String> },
@@ -628,7 +631,7 @@ fn repare_sur_une_source_inconnue_est_refuse_en_listant_les_sources() {
     ] {
         let RefusDeReparation::SourceInconnue {
             demandee: nommee,
-            connues,
+            reparables,
         } = refus(demandee, &sources)
         else {
             panic!(
@@ -649,15 +652,15 @@ fn repare_sur_une_source_inconnue_est_refuse_en_listant_les_sources() {
         // faute de frappe.
         for attendue in [KRAKEN, SMART2, CPU] {
             assert!(
-                connues.iter().any(|c| c == attendue),
+                reparables.iter().any(|c| c == attendue),
                 "« {attendue} » manque à la liste rendue par le refus de « repare {demandee} » : \
-                 {connues:?}"
+                 {reparables:?}"
             );
         }
         assert_eq!(
-            connues.len(),
+            reparables.len(),
             sources.len(),
-            "la liste doit porter chaque source une fois et une seule : {connues:?}"
+            "la liste doit porter chaque source une fois et une seule : {reparables:?}"
         );
 
         // Et le message rendu à l'utilisateur porte vraiment cette liste : la ranger dans une
@@ -678,13 +681,17 @@ fn repare_sans_aucune_source_relevee_est_refuse_sans_paniquer() {
     // relevé quoi que ce soit, ou tourner sur une machine dont aucun `hwmon` connu n'est présent.
     // Une liste vide est un refus parfaitement légitime — ce qui ne l'est pas, c'est de paniquer,
     // ou de tomber dans la branche « cette source répond encore » faute d'avoir trouvé la première.
-    let RefusDeReparation::SourceInconnue { demandee, connues } = refus(KRAKEN, &[]) else {
+    let RefusDeReparation::SourceInconnue {
+        demandee,
+        reparables,
+    } = refus(KRAKEN, &[])
+    else {
         panic!("sans aucune source relevée, aucun nom n'en désigne une");
     };
     assert_eq!(demandee, KRAKEN);
     assert!(
-        connues.is_empty(),
-        "aucune source relevée, donc aucune à lister : {connues:?}"
+        reparables.is_empty(),
+        "aucune source relevée, donc aucune à lister : {reparables:?}"
     );
 }
 
@@ -1034,10 +1041,10 @@ fn le_refus_est_un_calcul_et_la_veille_ne_connait_aucun_chemin() {
         );
     }
 
-    let RefusDeReparation::SourceInconnue { connues, .. } = refus(INCONNUE, &sources) else {
+    let RefusDeReparation::SourceInconnue { reparables, .. } = refus(INCONNUE, &sources) else {
         panic!("« {INCONNUE} » ne désigne aucune source");
     };
-    for connue in &connues {
+    for connue in &reparables {
         assert!(
             !connue.contains('/'),
             "la liste des sources connues porte un chemin : « {connue} »"

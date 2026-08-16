@@ -181,12 +181,20 @@ impl Veille {
 /// Pourquoi une demande `repare` est refusée (#136).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefusDeReparation {
-    /// Aucune source relevée ne porte ce nom. `connues` les liste **toutes** —
-    /// pas seulement les muettes : celui qui se trompe de nom ne sait pas encore
-    /// laquelle est en cause.
+    /// Aucune source **réparable** ne porte ce nom.
+    ///
+    /// ⚠️ **Le champ ne s'appelle pas `connues`, et c'est un correctif** (#142).
+    /// Ce que porte cette variante est la liste de `Reparateur::sources()` — les
+    /// sources que le démon sait résoudre par VID:PID et série —, jamais celle
+    /// des sources `hwmon` de la machine. Le nom `connues` a suffi à produire
+    /// « aucune source « nzxtsmart2 ». Sources connues : … » sur un contrôleur
+    /// bien vivant qui porte sept des dix ventilateurs.
+    ///
+    /// Elle les liste **toutes**, pas seulement les muettes : celui qui se trompe
+    /// de nom ne sait pas encore laquelle est en cause.
     SourceInconnue {
         demandee: String,
-        connues: Vec<String>,
+        reparables: Vec<String>,
     },
     /// La source existe, mais au moins une de ses cibles répond encore.
     /// `vivantes` nomme celles qui répondent — « la source répond encore »
@@ -209,22 +217,29 @@ pub enum RefusDeReparation {
 impl std::fmt::Display for RefusDeReparation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RefusDeReparation::SourceInconnue { demandee, connues } if connues.is_empty() => {
-                write!(
-                    f,
-                    "aucune source « {demandee} » : aucune source n'a encore été relevée",
-                )
-            }
-            RefusDeReparation::SourceInconnue { demandee, connues } => write!(
+            RefusDeReparation::SourceInconnue {
+                demandee,
+                reparables,
+            } if reparables.is_empty() => write!(
                 f,
-                "aucune source « {demandee} ». Sources connues : {}",
-                connues.join(", "),
+                "aucune source réparable « {demandee} » : le démon n'en connaît aucune. Le reset \
+                 USB ne vise que les sources qu'il sait résoudre par VID:PID et série",
+            ),
+            RefusDeReparation::SourceInconnue {
+                demandee,
+                reparables,
+            } => write!(
+                f,
+                "aucune source réparable « {demandee} ». Le reset USB ne vise que les sources que \
+                 le démon sait résoudre par VID:PID et série ; les autres n'ont aucun nœud à \
+                 réinitialiser. Réparables : {}",
+                reparables.join(", "),
             ),
             RefusDeReparation::SourceRepond { source, vivantes } if vivantes.is_empty() => write!(
                 f,
-                "« {source} » n'a aucune cible relevée : elle n'a montré aucun symptôme, et un \
-                 reset USB sur la foi d'une découverte ratée ferait quitter le bus à un \
-                 périphérique qui va bien",
+                "« {source} » n'a aucune cible relevée : ou bien le périphérique n'est pas sur le \
+                 bus, ou bien sa découverte a échoué. Dans les deux cas il n'y a rien à \
+                 réinitialiser",
             ),
             RefusDeReparation::SourceRepond { source, vivantes } => write!(
                 f,
@@ -259,7 +274,7 @@ pub fn demande_de_reparation(
     let Some(etat) = sources.iter().find(|etat| etat.source == source) else {
         return Err(RefusDeReparation::SourceInconnue {
             demandee: source.to_owned(),
-            connues: sources.iter().map(|etat| etat.source.clone()).collect(),
+            reparables: sources.iter().map(|etat| etat.source.clone()).collect(),
         });
     };
     if entierement_muette(etat) {
