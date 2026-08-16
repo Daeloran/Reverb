@@ -19,7 +19,10 @@ use reverb_daemon::persistance::{self, Eclairage};
 use reverb_daemon::profils::{self, Ecriture, Profil};
 use reverb_daemon::quarantaine::{Quarantaine, Releve, ReleveMotive};
 use reverb_daemon::regulation::{self, Courbe, Regulation};
-use reverb_daemon::reparation::{Constat, EtatSource, TENTATIVES_MAXIMALES};
+use reverb_daemon::reparation::{
+    Alerte, Constat, DELAI_ENTRE_TENTATIVES, EtatSource, TENTATIVES_MAXIMALES, Veille,
+    demande_de_reparation,
+};
 use reverb_daemon::serveur::{self, Ordre};
 use reverb_daemon::telemetrie;
 use reverb_daemon::zones::{self, Rendu, Tampon, Zones};
@@ -346,8 +349,10 @@ struct Etat {
     ///
     /// Seule une lecture qui **réussit** en retire une cible.
     muettes: HashSet<String>,
-    /// Quand soumettre le prochain état des sources au fil de réparation (#98).
+    /// Quand refaire le constat sur l'état des sources (#98, désarmé par #136).
     prochaine_soumission: Duration,
+    /// Ce qui constate qu'une source s'est tue, et le dit une seule fois (#136).
+    veille: Veille,
     /// Ce qu'il reste à faire après un reset qui a réussi, et à partir de quand.
     reprise: Option<Reprise>,
     /// La dernière valeur de la sonde que `thermique` suit, en degrés (#75).
@@ -426,6 +431,7 @@ impl Etat {
             quarantaine: Quarantaine::nouvelle(),
             muettes: HashSet::new(),
             prochaine_soumission: Duration::ZERO,
+            veille: Veille::nouvelle(),
             reprise: None,
             mesure: None,
             prochaine_mesure: Duration::ZERO,
@@ -1181,38 +1187,21 @@ fn tour_de_reparation(etat: &mut Etat, peripheriques: &mut Peripheriques) {
 
     if maintenant >= etat.prochaine_soumission {
         etat.prochaine_soumission = maintenant + INTERVALLE_REPARATION;
-        for source in peripheriques.sources_reparables().to_vec() {
-            let cibles = cibles_de(etat, peripheriques, &source);
-            // ⚠️ **Une source dont on ne connaît aucune cible n'est pas soumise du
-            // tout**, et ce n'est pas la même chose que la soumettre à vide.
-            //
-            // Un reset fait quitter le bus au périphérique : entre la
-            // redécouverte et son retour, il n'a plus ni canal ni sonde. Soumis à
-            // vide, il rendrait `Rien` — « pas de symptôme » —, ce qui **clôt
-            // l'épisode** et remet le compte de tentatives à zéro. Un contrôleur
-            // qui met plus longtemps que prévu à revenir serait alors resecoué au
-            // premier essai, indéfiniment : la boucle exacte que #98 interdit,
-            // atteinte par le chemin qu'elle ne nomme pas.
-            //
-            // En ne soumettant rien, l'épisode est **gelé** : il reprend au rang
-            // suivant si la source revient encore muette, et se clôt normalement
-            // dès qu'une de ses cibles répond.
-            if cibles.is_empty() {
-                continue;
+        // ⚠️ **Ce tour ne dépose plus rien** (#136). Il constate, et il le dit une
+        // fois. La fermeture qui portait le geste a disparu de `Veille::tour` :
+        // « ne provoque plus aucun reset » est devenu une propriété de signature,
+        // pas une promesse de ce corps-ci.
+        for etat_source in etats_des_sources(etat, peripheriques) {
+            if etat.veille.tour(&etat_source) == Alerte::Signaler {
+                eprintln!(
+                    "attention : « {} » ne répond plus sur aucune de ses cibles ({}).\n→ un reset \
+                     USB peut être tenté : « repare {} » — il fait quitter le bus au \
+                     périphérique, et sur les incidents relevés il ne l'a jamais ramené",
+                    etat_source.source,
+                    etat_source.cibles.join(", "),
+                    etat_source.source,
+                );
             }
-            let muettes = cibles
-                .iter()
-                .filter(|cible| etat.muettes.contains(*cible))
-                .cloned()
-                .collect();
-            peripheriques.soumettre_reparation(
-                EtatSource {
-                    source,
-                    cibles,
-                    muettes,
-                },
-                maintenant,
-            );
         }
     }
 
@@ -1714,6 +1703,8 @@ fn traiter(ordre: Ordre, etat: &mut Etat, peripheriques: &mut Peripheriques) {
         }
 
         Request::Regule(action) => regule_commande(etat, peripheriques, action),
+
+        Request::Repare { source } => repare_commande(etat, peripheriques, &source),
     };
 
     // Le client peut être parti entre l'ordre et la réponse : ce n'est pas une
@@ -2011,6 +2002,69 @@ fn poser_affichage(etat: &mut Etat, affichage: ecran::Affichage) -> Vec<Response
 /// `regule` pour les autres. Remplacer une régulation qui marche par une boucle
 /// hôte, c'est écrire du code pour perdre une garantie : la courbe firmware,
 /// elle, tient sans démon.
+/// Le verbe `repare <source>` (#136).
+///
+/// ⚠️ **Il accuse la prise en compte, il ne rend pas le résultat.** Le geste de
+/// #98 est trois tentatives espacées de trente secondes : une requête qui
+/// attendrait l'issue tiendrait la connexion une minute et bloquerait le fil qui
+/// sert les autres clients — le défaut que #83, #88 et #98 ont chacun corrigé sur
+/// leur chemin. C'est aussi la règle de `curve` (#104) : une ligne qui suivrait
+/// la fin des tentatives se lirait « réparé » alors qu'elle ne dirait que « j'ai
+/// fini d'essayer ». Le déroulé va au journal, et `status` dit si les cibles sont
+/// revenues.
+///
+/// Les **refus**, eux, sont immédiats : ce sont des calculs.
+fn repare_commande(
+    etat: &mut Etat,
+    peripheriques: &Peripheriques,
+    source: &str,
+) -> Vec<ResponseLine> {
+    let sources = etats_des_sources(etat, peripheriques);
+    match demande_de_reparation(source, &sources) {
+        Err(refus) => vec![ResponseLine::Error {
+            message: refus.to_string(),
+        }],
+        Ok(depose) => {
+            eprintln!(
+                "réparation demandée sur « {} » : {TENTATIVES_MAXIMALES} tentatives au plus, \
+                 espacées de {} s. La suite est dans ce journal ; « status » dira si ses cibles \
+                 sont revenues",
+                depose.source,
+                DELAI_ENTRE_TENTATIVES.as_secs()
+            );
+            peripheriques.soumettre_reparation(depose, etat.naissance.elapsed());
+            vec![ResponseLine::End]
+        }
+    }
+}
+
+/// Ce que chaque source réparable porte et ce qui s'y tait, à cet instant.
+///
+/// ⚠️ **Une source dont on ne connaît aucune cible y figure quand même**, avec sa
+/// liste vide. C'est ce qui permet à `demande_de_reparation` de la refuser en la
+/// nommant plutôt que de prétendre qu'elle est inconnue — elle existe, elle n'a
+/// simplement montré aucun symptôme.
+fn etats_des_sources(etat: &Etat, peripheriques: &Peripheriques) -> Vec<EtatSource> {
+    peripheriques
+        .sources_reparables()
+        .to_vec()
+        .into_iter()
+        .map(|source| {
+            let cibles = cibles_de(etat, peripheriques, &source);
+            let muettes = cibles
+                .iter()
+                .filter(|cible| etat.muettes.contains(*cible))
+                .cloned()
+                .collect();
+            EtatSource {
+                source,
+                cibles,
+                muettes,
+            }
+        })
+        .collect()
+}
+
 fn regule_commande(
     etat: &mut Etat,
     peripheriques: &Peripheriques,

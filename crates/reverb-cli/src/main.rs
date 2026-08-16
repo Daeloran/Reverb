@@ -65,6 +65,7 @@ fn main() -> ExitCode {
         } => poser_courbe(&canal, &points, force, activer),
         Command::Screen { action } => piloter_ecran(action),
         Command::Ram { action } => piloter_ram(action),
+        Command::Repare { source } => demander_reparation(&source),
     };
 
     match resultat {
@@ -331,6 +332,39 @@ fn regler_ventilateur(cible: &CibleCanal, action: ActionVentilateur) -> Result<(
 /// ⚠️ **Le plancher et l'interpolation restent ici**, en amont du socket : ce
 /// sont les garde-fous de la ligne de commande, et les déplacer côté démon les
 /// imposerait aussi à la fenêtre, qui a les siens.
+/// `reverb repare <source>` — la demande de #136, relayée au démon.
+///
+/// ⚠️ **Aucun mode direct, et c'est le seul verbe dans ce cas.** Le geste est
+/// trois tentatives espacées de trente secondes, portées par le fil de
+/// réparation du démon ; les rejouer ici serait réécrire cette mécanique dans un
+/// processus qui rend la main avant la deuxième.
+///
+/// ⚠️ **La réussite rendue ici est celle de la *prise en compte*, jamais celle de
+/// la réparation.** La règle de `curve` (#104) : dire « réparé » quand on ne sait
+/// que « j'ai fini d'essayer » serait le message qui ment — et sur les incidents
+/// relevés, le Kraken n'est jamais revenu.
+fn demander_reparation(source: &str) -> Result<(), String> {
+    let Some(lignes) = parler_au_demon(&Request::Repare {
+        source: source.to_owned(),
+    })?
+    else {
+        return Err(format!(
+            "le démon ne tourne pas : « {SOCKET_DU_DEMON} » ne répond pas. La réparation vit sur \
+             son fil, elle n'a pas de mode direct."
+        ));
+    };
+    for ligne in &lignes {
+        if let ResponseLine::Error { message } = ligne {
+            return Err(message.clone());
+        }
+    }
+    println!(
+        "Réparation demandée sur « {source} ». Le démon la mène sur son propre fil ; suivez « \
+         journalctl -u reverbd -f », et « status » dira si ses cibles sont revenues."
+    );
+    Ok(())
+}
+
 fn poser_courbe(
     nom: &str,
     points: &[(usize, Percent)],

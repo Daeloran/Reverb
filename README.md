@@ -37,7 +37,7 @@ le firmware, le pilotage LED par LED, l'écran 640×640 et les barrettes de RAM.
 | Composition de l'écran | ✅ un fond, quatre informations, cinq ancres dans le disque |
 | La fenêtre expose tout le protocole | ✅ vérifié par des tests de couverture, pas à l'œil |
 | La dalle n'arrête plus le boîtier | ✅ son propre fil, et toute question HID bornée dans le temps |
-| Un Kraken muet, le démon tente de le réparer | ✅ trois resets USB bornés, sur son propre fil, puis redécouverte |
+| Un Kraken muet, le démon le dit et attend qu'on demande | ✅ `repare <source>` — trois resets USB bornés, sur son propre fil, puis redécouverte |
 | Régulation des ventilateurs | ✅ les trois canaux sans mode auto, sur la courbe du liquide |
 | Un canal qui régule seul ne se défait pas d'un geste | ✅ verrou dans la fenêtre, refus en ligne de commande |
 | La régulation se pilote à la souris | ✅ prise en charge, courbe éditée **par points sur son tracé** |
@@ -73,7 +73,7 @@ reverb-daemon
    ├── write()      ──►  sysfs pwm*          vitesse des canaux régulés
    ├── fil de l'écran ──► usbfs 1e71:300c    dalle du Kraken, BGR
    │      ▲ une image déposée, un verdict rendu — jamais d'attente
-   └── fil de réparation ──► USBDEVFS_RESET  une source entièrement muette
+   └── fil de réparation ──► USBDEVFS_RESET  sur demande « repare », jamais seul
           ▲ un état déposé, un constat rendu — trois gestes au plus
 
 reverb  (outil de validation, garde l'usbfs ──► 1e71:300c bulk, écran Kraken, BGR)
@@ -1625,11 +1625,11 @@ une retente par minute laisserait le socket muet 8 % du temps.
 Une retente réussie la remet en service et remet le délai à zéro. L'écart est **par sonde** :
 celle qui répond continue d'être lue quand sa voisine du même contrôleur se tait.
 
-### Une source entièrement muette, le démon tente de la réparer
+### Une source entièrement muette, le démon le dit — et attend qu'on lui demande
 
 La quarantaine ci-dessus est **purement défensive** : elle empêche une lecture muette de geler
-le service, et attend un rétablissement. Sur les deux effondrements du Kraken relevés en deux
-jours, il n'est jamais venu avant un redémarrage.
+le service, et attend un rétablissement. Sur les trois effondrements du Kraken relevés, il n'est
+jamais venu avant un redémarrage.
 
 ```
 12:29:49  écran : pas de trame 37 02 en 2s — le contrôleur ne répond plus
@@ -1639,17 +1639,78 @@ jours, il n'est jamais venu avant un redémarrage.
 12:30:41  3 échecs d'affilée sur la dalle → écran rendu au firmware
 ```
 
-Ce n'est ni le lien USB — le périphérique reste énuméré, le journal noyau ne dit rien — ni le
-service : la lecture échoue hors de Reverb, dans un simple shell. **C'est le firmware du Kraken
-qui cesse de répondre en gardant son lien USB.**
+Sur les deux premiers incidents, ce n'était ni le lien USB — le périphérique restait énuméré, le
+journal noyau ne disait rien — ni le service : la lecture échouait hors de Reverb, dans un simple
+shell. **C'est le firmware du Kraken qui cesse de répondre en gardant son lien USB.**
 
-Quand **toutes** les cibles d'une même source `hwmon` se taisent, le démon tente donc un
-`USBDEVFS_RESET`, puis redécouvre ce que la source porte. **Trois tentatives, espacées de trente
-secondes**, puis il renonce et le dit une fois.
+Quand **toutes** les cibles d'une même source `hwmon` se taisent, le démon le **dit une fois**, en
+nommant la commande à taper — et n'écrit rien :
 
-⚠️ **Une seule cible muette ne déclenche rien.** C'est la moitié qui protège la machine : un
-reset USB fait disparaître puis réapparaître le périphérique, et le déclencher sur un contrôleur
-qui répond encore casse ce qui marchait.
+```
+attention : « kraken2023elite » ne répond plus sur aucune de ses cibles (kraken2023elite:fan-speed,
+kraken2023elite:pump-speed, kraken2023elite:coolant-temp).
+→ un reset USB peut être tenté : « repare kraken2023elite » — il fait quitter le bus au
+  périphérique, et sur les incidents relevés il ne l'a jamais ramené
+```
+
+```bash
+reverb repare kraken2023elite
+echo 'repare kraken2023elite' | socat - UNIX-CONNECT:/run/reverb/reverbd.sock
+```
+
+Le geste, lui, n'a pas changé : `USBDEVFS_RESET`, **trois tentatives espacées de trente
+secondes**, sur le fil de réparation, puis redécouverte de ce que la source porte.
+
+#### ⚠️ Pourquoi il ne part plus tout seul
+
+**Le 2026-08-16, il a été suivi de la disparition définitive du Kraken.** Le déclenchement
+automatique a été retiré ce jour-là (#136).
+
+```
+12:53:37  reverbd  écran : pas de trame 37 02 en 2s — le contrôleur ne répond plus
+12:53:50  reverbd  réparation : reset USB de « kraken2023elite » (BB8C90820E900630)
+12:53:55  kernel   usb 1-9.1: device descriptor read/64, error -110
+12:54:53  kernel   usb 1-9.1: USB disconnect, device number 5
+12:55:35  kernel   usb 1-9-port1: attempt power cycle
+12:55:56  kernel   usb 1-9-port1: unable to enumerate USB device
+```
+
+`lsusb` ne voyait plus `1e71:300c`, `hwmon5` avait disparu, et **seule une coupure d'alimentation
+complète l'a ramené** — le cycle d'alimentation du port par le noyau n'a pas suffi.
+
+⚠️ **Ce que la chronologie établit, et ce qu'elle n'établit pas.** Le blocage précède le reset de
+treize secondes : le reset n'a pas causé la panne. Mais le noyau ne se plaint qu'**après** lui, et
+il n'a jamais récupéré le périphérique. Sur un seul incident, « le firmware s'est enfoncé seul » et
+« notre reset a transformé un blocage récupérable en un périphérique inénumérable » sont
+indiscernables.
+
+Ce qui, lui, est établi sur les **trois** incidents : aucun reset n'a jamais ramené le Kraken. Le
+geste ne guérit rien de mesuré, et il est le seul `ioctl` du projet qui fasse **disparaître un
+périphérique du bus**. Il garde sa place — sous la main de l'utilisateur, pas dans une boucle.
+
+⚠️ **Le refus est un calcul, pas une relecture.** `demande_de_reparation` ne reçoit que des noms et
+des listes : ni descripteur, ni chemin, ni périphérique. « Rien n'est écrit » se lit dans sa
+signature — la règle de `refus_de_consigne` (#101), et elle vaut plus encore ici, puisque ce qu'on
+refuse est un geste qui fait quitter le bus.
+
+⚠️ **De même, `Veille::tour` ne prend aucune fermeture.** #98 lui en donnait une pour que ce tour
+**soit** l'endroit du reset ; on veut l'inverse, et la façon la plus forte de l'obtenir est de ne
+pas lui donner de quoi le faire. C'est la règle de `SlotAddress` (#15) et de `NomProfil` (#74),
+appliquée à un geste plutôt qu'à une adresse.
+
+⚠️ **`repare` accuse la prise en compte, il ne rend pas le résultat.** Trois tentatives espacées de
+trente secondes ne tiennent pas dans une requête socket, et une ligne qui suivrait la fin des
+essais se lirait « réparé » alors qu'elle ne dirait que « j'ai fini d'essayer ». Le déroulé va au
+journal ; `status` dit si les cibles sont revenues. C'est la règle posée pour `curve` (#104).
+
+⚠️ **Une seule cible muette est refusée, et le geste manuel n'y déroge pas.** C'est la moitié qui
+protège la machine : un reset fait disparaître puis réapparaître le périphérique, et le déclencher
+sur un contrôleur qui répond encore casse ce qui marchait. « Manuel » ne veut pas dire « sous la
+responsabilité de celui qui tape ». Le refus **nomme ce qui répond encore** — « la source répond
+encore » invite à réessayer plus tard, « la pompe répond encore » dit ce qu'on aurait cassé.
+
+⚠️ **Une source sans aucune cible relevée est refusée aussi.** « Toutes ses cibles se taisent » est
+vrai à vide, et un périphérique dont on n'a jamais rien lu n'a montré aucun symptôme.
 
 ⚠️ **La source est jugée sur ce qui a été relevé**, et le démon ne relève **tout** qu'en servant
 un `status` — que la fenêtre demande une fois par seconde. Sans fenêtre ouverte, une composition

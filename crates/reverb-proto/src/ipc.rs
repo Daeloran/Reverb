@@ -236,6 +236,15 @@ pub enum Request {
     /// construction : la fenêtre affiche les images calculées par le code même
     /// qui écrit sur les bus, au lieu de les recalculer de son côté.
     Watch,
+    /// Demande un reset USB sur une source `hwmon` **entièrement muette** (#136).
+    ///
+    /// ⚠️ **Deux jetons exactement, et la source ne va pas jusqu'au bout de la
+    /// ligne.** Un nom de source `hwmon` n'a pas d'espace — contrairement à un
+    /// nom de profil ou à un chemin d'image, qui sont les deux endroits où la
+    /// règle du dernier champ s'applique. Un jeton de trop est donc un argument
+    /// mal compris, et il fait refuser la ligne entière plutôt que d'être avalé
+    /// en silence.
+    Repare { source: String },
 }
 
 /// Ce que vise une commande d'éclairage.
@@ -415,6 +424,19 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
                 Err(mauvais("n'attend aucun argument"))
             }
         }
+
+        "repare" => match arguments.as_slice() {
+            [source] => Ok(Request::Repare {
+                source: (*source).to_owned(),
+            }),
+            [] => Err(mauvais(
+                "attend une source, par exemple « repare kraken2023elite »",
+            )),
+            _ => Err(mauvais(
+                "attend une source et rien d'autre — « repare <source> ». Le geste n'a aucune \
+                 variante : il tente les resets bornés de #98, et c'est tout",
+            )),
+        },
 
         "zone" => {
             let [action, reste @ ..] = arguments.as_slice() else {
@@ -1001,6 +1023,14 @@ pub fn encode_request(request: &Request) -> String {
             }
         },
         Request::Watch => "watch".to_owned(),
+
+        // ⚠️ **Par `jeton`, jamais brut.** Un nom de source vient du fichier
+        // `name` d'un `hwmon`, donc du matériel et non de ce qu'on écrit : rien
+        // ne garantit qu'il soit d'un seul tenant. Un saut de ligne dedans
+        // scinderait la commande, et la seconde moitié serait lue comme une
+        // requête à part — sur ce verbe-là, ce serait un `USBDEVFS_RESET` sur un
+        // périphérique qu'on n'a pas nommé.
+        Request::Repare { source } => format!("repare {}", jeton(source)),
     }
 }
 

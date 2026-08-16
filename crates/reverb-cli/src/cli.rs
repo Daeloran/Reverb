@@ -59,6 +59,13 @@ pub enum Command {
     Screen { action: ActionEcran },
     /// Pilote l'éclairage de la RAM Corsair.
     Ram { action: ActionRam },
+    /// Demande au démon un reset USB sur une source entièrement muette (#136).
+    ///
+    /// ⚠️ **Seul verbe du lot qui n'ait aucun mode direct.** Le geste vit sur le
+    /// fil de réparation du démon, qui l'espace de trente secondes et le borne à
+    /// trois tentatives ; le rejouer ici serait réécrire cette mécanique dans un
+    /// processus qui rend la main entre-temps.
+    Repare { source: String },
 }
 
 /// Ce qu'on demande à la RAM.
@@ -159,6 +166,7 @@ USAGE :
     reverb ram   --all|--slot <0-3> --color <HEX>
     reverb ram   --slot <0-3> --colors <11 HEX>
     reverb ram   --all --animate
+    reverb repare <SOURCE>
 
 OPTIONS de « ram » — RAM Corsair sur SMBus (aucun droit root nécessaire) :
     (sans option)         énumère les barrettes et leurs adresses.
@@ -284,6 +292,19 @@ where
         "curve" => parse_curve(args),
         "screen" => parse_screen(args),
         "ram" => parse_ram(args),
+        "repare" => match (args.next(), args.next()) {
+            (Some(source), None) => Ok(Command::Repare { source }),
+            (None, _) => Err(
+                "« repare » attend une source, par exemple « reverb repare kraken2023elite ». \
+                 « echo status | socat - UNIX-CONNECT:/run/reverb/reverbd.sock » en donne les \
+                 noms."
+                    .to_owned(),
+            ),
+            (Some(_), Some(en_trop)) => Err(format!(
+                "« repare » attend une source et rien d'autre — « {en_trop} » est en trop. Le \
+                 geste n'a aucune variante."
+            )),
+        },
         autre => Err(format!(
             "sous-commande « {autre} » inconnue. \
              Attendu : list, modes, set, paint, fans, fan, curve, screen, ram."
