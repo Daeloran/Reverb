@@ -34,7 +34,7 @@ use reverb_proto::ram::{self, SlotAddress};
 use reverb_proto::{Apply, Brightness, LEDS_PER_FAN, Position, Rgb, frame, screen};
 
 use crate::ecran::{Dalle, Verdict};
-use crate::fil_ecran::{Afficheur, FilEcran};
+use crate::fil_ecran::{Afficheur, FilEcran, ModeDeDiffusion};
 use crate::fil_reparation::{FilReparation, Reparateur};
 use crate::reparation::{Constat, EtatSource};
 
@@ -549,6 +549,8 @@ impl Reparateur for ReparateurUsb {
 struct Kraken {
     hidraw: PathBuf,
     bulk: usbfs::Screen,
+    /// Émise une fois par ouverture, jamais entre deux images (#137).
+    mode: ModeDeDiffusion,
 }
 
 impl Kraken {
@@ -556,6 +558,7 @@ impl Kraken {
         Ok(Kraken {
             hidraw: hidraw::find_path(KRAKEN)?,
             bulk: usbfs::Screen::open()?,
+            mode: ModeDeDiffusion::default(),
         })
     }
 }
@@ -582,8 +585,17 @@ impl Afficheur for Kraken {
         screen::check_image(image)
             .map_err(|erreur| io::Error::new(io::ErrorKind::InvalidInput, erreur.to_string()))?;
 
-        // INDISPENSABLE : sans cette trame, l'image est ignorée en silence.
-        hidraw::write_frame(&self.hidraw, &screen::broadcast_mode())?;
+        // INDISPENSABLE avant la **première** image : sans cette trame, l'écran
+        // reste sur son affichage intégré et l'ignore en silence (spec §2.2.1).
+        //
+        // ⚠️ **Et interdite entre deux images.** C'est une commande d'affichage,
+        // donc elle réinitialise le pipeline (spec §3.4) : émise à chaque envoi,
+        // elle faisait passer la dalle au noir toutes les vingt-cinq secondes.
+        // La capture le dit sans ambiguïté — « aucune trame `32` ni `38` entre
+        // deux images » sur les cinquante de CAM (spec §3.6).
+        if self.mode.faut_il_armer() {
+            hidraw::write_frame(&self.hidraw, &screen::broadcast_mode())?;
+        }
 
         let longueur = u32::try_from(image.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "image trop volumineuse"))?;

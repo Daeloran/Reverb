@@ -87,6 +87,48 @@ pub trait Afficheur: Send {
     fn image(&mut self, dalle: &Dalle) -> io::Result<()>;
 }
 
+/// Le mode de diffusion a-t-il déjà été armé sur ce périphérique ?
+///
+/// La trame `38 01 02 00` est **indispensable avant tout envoi d'image** — sans
+/// elle, l'écran reste sur son affichage intégré et ignore l'image en silence
+/// (spec §2.2.1). Elle est aussi une commande d'affichage, donc elle
+/// **réinitialise le pipeline** (spec §3.4) : émise avant chaque image, elle
+/// faisait passer la dalle au noir toutes les vingt-cinq secondes.
+///
+/// La capture tranche : sur les cinquante images de CAM, « aucune trame `32` ni
+/// `38` entre deux images » (spec §3.6). Elle ne part qu'une fois.
+///
+/// ⚠️ **Ni descripteur, ni chemin, ni trame.** C'est ce qui rend « la trame ne
+/// part qu'une fois » vérifiable sans matériel : la décision est un calcul, et
+/// non une relecture. C'est le motif de `refus_de_consigne` (#101), où « rien
+/// n'est écrit » est devenu une propriété de signature — et la raison pour
+/// laquelle ce type vit ici plutôt que dans `peripheriques`, qui ouvre les nœuds
+/// et que rien ne teste.
+#[derive(Debug, Default)]
+pub struct ModeDeDiffusion {
+    arme: bool,
+}
+
+impl ModeDeDiffusion {
+    /// Rend `true` la première fois, `false` ensuite.
+    ///
+    /// ⚠️ **Une réouverture réarme sans une ligne de plus**, parce que `Default`
+    /// est le seul constructeur : la poignée lâchée puis rouverte après un reset
+    /// USB (#98) repart d'un mode neuf. Rien à penser au moment du reset, et
+    /// donc rien à y oublier — un drapeau partagé entre les ouvertures rendrait
+    /// la dalle définitivement muette après la première réparation.
+    ///
+    /// ⚠️ **Pas de lecteur séparé.** « Un mode neuf n'est pas armé » s'observe
+    /// entièrement par sa première réponse ; un accesseur de plus donnerait deux
+    /// façons de poser la même question, dont une seule serait consultée par
+    /// l'appelant.
+    pub fn faut_il_armer(&mut self) -> bool {
+        let premier = !self.arme;
+        self.arme = true;
+        premier
+    }
+}
+
 /// Ce qu'on dépose à l'intention de la dalle.
 enum Ordre {
     Luminosite(u8),
