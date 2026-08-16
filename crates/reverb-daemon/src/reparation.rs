@@ -55,6 +55,7 @@
 //! cibles — et le démon réinitialiserait un périphérique dont il n'a jamais rien
 //! lu.
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::io;
 use std::time::Duration;
@@ -103,6 +104,185 @@ pub struct EtatSource {
     /// ferait repartir le compte de tentatives à chaque reset, et le plafond
     /// serait inatteignable.
     pub muettes: Vec<String>,
+}
+
+/// Ce qu'un tour de **constat** apprend d'une source (#136).
+///
+/// ⚠️ **Distinct de [`Constat`], et pas par élégance.** `Constat` dit ce qu'une
+/// tentative a produit ; `Alerte` dit seulement ce qu'il y a à écrire dans le
+/// journal. Les mêler ferait porter au même type le compteur qu'on veut manuel
+/// et l'épisode qu'on veut automatique — exactement la confusion que cette issue
+/// défait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Alerte {
+    /// La source répond, au moins par une cible. L'épisode en cours, s'il y en
+    /// avait un, est clos.
+    Rien,
+    /// La source vient de se taire entièrement. À journaliser **une fois**, en
+    /// nommant la commande à taper.
+    Signaler,
+    /// Elle se tait toujours, et c'est déjà dit. Rien à faire, rien à écrire.
+    DejaDite,
+}
+
+/// Ce qui constate qu'une source s'est tue, et le dit une seule fois (#136).
+///
+/// # Le défaut que ceci corrige
+///
+/// Jusqu'à #136, ce constat **déclenchait** un `USBDEVFS_RESET`. Le 2026-08-16,
+/// le Kraken a cessé de répondre à 12:53:37 ; le démon a tenté son reset à
+/// 12:53:50 ; cinq secondes plus tard le noyau signalait
+/// `device descriptor read/64, error -110`, puis `USB disconnect`, puis — cycle
+/// d'alimentation du port compris — `unable to enumerate USB device`. Le
+/// périphérique a quitté le bus et n'y est pas revenu.
+///
+/// Le blocage précède le reset de treize secondes, donc le reset n'a pas causé
+/// la panne. Mais sur les **trois** incidents connus, aucun reset n'a jamais
+/// ramené le Kraken : le geste ne guérit rien de mesuré, et il est le seul
+/// `ioctl` du projet qui fasse disparaître un périphérique du bus. Il garde sa
+/// place, sous la main de l'utilisateur.
+///
+/// ⚠️ **[`Veille::tour`] ne prend aucune fermeture, et c'est tout l'objet de
+/// #136.** #98 lui en donnait une pour que `tour` **soit** l'endroit du reset ;
+/// on veut l'inverse, et la façon la plus forte de l'obtenir est de ne pas lui
+/// donner de quoi le faire. « Ne provoque plus aucun reset » cesse d'être une
+/// promesse de corps pour devenir une propriété de signature — la règle de
+/// `SlotAddress` (#15) et de `NomProfil` (#74), appliquée à un geste.
+#[derive(Debug, Default)]
+pub struct Veille {
+    /// Les sources dont l'effondrement a déjà été dit. Un épisode par source.
+    dites: BTreeSet<String>,
+}
+
+impl Veille {
+    pub fn nouvelle() -> Veille {
+        Veille::default()
+    }
+
+    /// Un tour de constat, pour **une** source.
+    ///
+    /// ⚠️ **Une source sans cible ne se signale jamais.** « Toutes ses cibles se
+    /// taisent » est vrai à vide, et un périphérique dont on n'a jamais rien lu
+    /// n'a montré aucun symptôme — le signaler inviterait à réinitialiser sur la
+    /// foi d'une découverte ratée.
+    pub fn tour(&mut self, etat: &EtatSource) -> Alerte {
+        if !entierement_muette(etat) {
+            self.dites.remove(&etat.source);
+            return Alerte::Rien;
+        }
+        if self.dites.insert(etat.source.clone()) {
+            Alerte::Signaler
+        } else {
+            Alerte::DejaDite
+        }
+    }
+}
+
+/// Pourquoi une demande `repare` est refusée (#136).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefusDeReparation {
+    /// Aucune source relevée ne porte ce nom. `connues` les liste **toutes** —
+    /// pas seulement les muettes : celui qui se trompe de nom ne sait pas encore
+    /// laquelle est en cause.
+    SourceInconnue {
+        demandee: String,
+        connues: Vec<String>,
+    },
+    /// La source existe, mais au moins une de ses cibles répond encore.
+    /// `vivantes` nomme celles qui répondent — « la source répond encore »
+    /// invite à réessayer plus tard, « la pompe répond encore » dit ce qu'on
+    /// aurait cassé.
+    ///
+    /// ⚠️ **Une source sans aucune cible passe par ici, `vivantes` vide.** Elle
+    /// figure bien dans la liste, donc « inconnue » mentirait ; et elle n'a
+    /// montré aucun symptôme, donc elle n'est pas déposable. Aucune des deux
+    /// formulations ne la décrit exactement, et [`Display`] lui écrit sa propre
+    /// phrase plutôt que de la faire passer pour l'un des deux cas.
+    ///
+    /// [`Display`]: std::fmt::Display
+    SourceRepond {
+        source: String,
+        vivantes: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for RefusDeReparation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RefusDeReparation::SourceInconnue { demandee, connues } if connues.is_empty() => {
+                write!(
+                    f,
+                    "aucune source « {demandee} » : aucune source n'a encore été relevée",
+                )
+            }
+            RefusDeReparation::SourceInconnue { demandee, connues } => write!(
+                f,
+                "aucune source « {demandee} ». Sources connues : {}",
+                connues.join(", "),
+            ),
+            RefusDeReparation::SourceRepond { source, vivantes } if vivantes.is_empty() => write!(
+                f,
+                "« {source} » n'a aucune cible relevée : elle n'a montré aucun symptôme, et un \
+                 reset USB sur la foi d'une découverte ratée ferait quitter le bus à un \
+                 périphérique qui va bien",
+            ),
+            RefusDeReparation::SourceRepond { source, vivantes } => write!(
+                f,
+                "« {source} » répond encore par {} : un reset USB lui ferait quitter le bus, et \
+                 sur les incidents relevés il n'en est jamais revenu. Rien n'est écrit",
+                vivantes.join(", "),
+            ),
+        }
+    }
+}
+
+/// La demande `repare <source>`, jugée sur ce qui a été relevé (#136).
+///
+/// Rend l'état à déposer sur le fil de réparation, ou le refus qui dit pourquoi.
+///
+/// ⚠️ **Ni descripteur, ni chemin, ni périphérique : le refus est un calcul**,
+/// exactement comme `refus_de_consigne` (#101) — et la règle vaut plus encore
+/// ici, puisque ce qu'on refuse est un geste qui fait quitter le bus à un
+/// périphérique. « Rien n'est écrit » se lit dans la signature.
+///
+/// ⚠️ **La garde de #98 vaut aussi pour le geste manuel** : une source dont une
+/// seule cible répond encore est refusée. « Manuel » ne veut pas dire « sous la
+/// responsabilité de celui qui tape » — c'est la moitié qui protège la machine.
+///
+/// ⚠️ **Elle rend l'`EtatSource` relevé, jamais un `bool`.** C'est ce que
+/// `FilReparation::soumettre` prend, et le reconstruire depuis des noms serait la
+/// seule façon de déposer un état qui ne corresponde plus au constat.
+pub fn demande_de_reparation(
+    source: &str,
+    sources: &[EtatSource],
+) -> Result<EtatSource, RefusDeReparation> {
+    let Some(etat) = sources.iter().find(|etat| etat.source == source) else {
+        return Err(RefusDeReparation::SourceInconnue {
+            demandee: source.to_owned(),
+            connues: sources.iter().map(|etat| etat.source.clone()).collect(),
+        });
+    };
+    if entierement_muette(etat) {
+        return Ok(etat.clone());
+    }
+    Err(RefusDeReparation::SourceRepond {
+        source: etat.source.clone(),
+        vivantes: etat
+            .cibles
+            .iter()
+            .filter(|cible| !etat.muettes.contains(cible))
+            .cloned()
+            .collect(),
+    })
+}
+
+/// Toutes ses cibles se taisent — et elle en a au moins une.
+///
+/// ⚠️ **Le « au moins une » n'est pas une précaution de style.** « Toutes ses
+/// cibles se taisent » est vrai à vide, et une source dont on n'a jamais rien lu
+/// deviendrait éligible au reset sans avoir montré le moindre symptôme.
+fn entierement_muette(etat: &EtatSource) -> bool {
+    !etat.cibles.is_empty() && etat.cibles.iter().all(|cible| etat.muettes.contains(cible))
 }
 
 /// Ce qu'un tour de décision a produit pour une source.
