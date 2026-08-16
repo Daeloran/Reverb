@@ -809,16 +809,57 @@ impl Animation {
         // deux couleurs : la palette y serait invisible.
         let teinte_de = |place_du_motif: f32| -> Rgb {
             match reglages.palette {
-                Some(palette) => palette.echantillon(fraction(place_du_motif) * 255.0),
+                //
+                // ⚠️ **Bornée, jamais enroulée** (#138). `Palette::echantillon`
+                // documente « hors bornes, la couleur de borne » ; un
+                // `fraction` défait cette garantie précisément **à** la borne,
+                // `fraction(1.0)` valant `0.0`. Les trois familles de #127
+                // atteignent exactement 1,0 : une bougie à plein niveau rendait
+                // donc le **premier** arrêt de la palette au lieu du dernier —
+                // sous `lava`, du noir au lieu du blanc, l'inverse de ce que le
+                // motif veut dire. Les cinq autres familles à index borné n'en
+                // sortent jamais, et leurs images sont identiques à l'octet
+                // près.
+                Some(palette) => palette.echantillon(place_du_motif.clamp(0.0, 1.0) * 255.0),
                 None => reglages.couleur,
             }
+        };
+
+        // Le même dégradé, pour un scalaire qui **défile** au lieu de placer.
+        //
+        // ⚠️ **Une palette n'est pas un cercle** : son premier et son dernier
+        // arrêt sont deux couleurs différentes — jusqu'à 255 d'écart sur `lava`,
+        // `glace` et `orange-teal`. Un index cyclique projeté droit dessus
+        // repassait de 255 à 0 une fois par cycle, et la LED sautait de tout
+        // l'écart : mesuré à **254 sur 255** pour `vague`, contre 20 sans
+        // palette. C'est le « rafraîchissement à chaque tour » relevé devant le
+        // boîtier.
+        //
+        // ⚠️ **Le parcours est donc replié, pas la palette.** Boucler le dégradé
+        // inventerait une rampe que WLED n'a pas, et demanderait de choisir
+        // quelle part du cycle lui donner. L'aller-retour est continu et
+        // périodique par construction, sans réglage et sans toucher aux données
+        // reprises. C'est l'analogue exact de [`cycle`] : la luminosité passait
+        // déjà par une fonction périodique, la teinte non.
+        //
+        // ⚠️ **Le prix est une traversée deux fois plus rapide**, donc les rampes
+        // internes raides sont franchies deux fois plus vite : sur `nuit-avril`,
+        // dont les deux bouts sont *déjà* identiques, le pire saut passe de 92 à
+        // 138. Il tombe sur la seule palette qui n'avait pas le défaut.
+        let teinte_cyclique_de = |place_du_motif: f32| -> Rgb {
+            let avance = fraction(place_du_motif);
+            teinte_de(if avance < 0.5 {
+                2.0 * avance
+            } else {
+                2.0 - 2.0 * avance
+            })
         };
 
         match self.famille {
             // Une sinusoïde le long de la direction, et rien d'autre : le seul
             // motif du lot dont la couleur ne dépende que de la projection.
             Famille::Vague => teinter(
-                teinte_de(spatiale - temps),
+                teinte_cyclique_de(spatiale - temps),
                 (1.0 + cycle(spatiale - temps)) / 2.0,
             ),
 
@@ -838,7 +879,7 @@ impl Animation {
             // retard, la direction n'aurait aucun effet et le réglage mentirait.
             Famille::Respiration => {
                 let onde = (1.0 + cycle(temps - 0.2 * place)) / 2.0;
-                teinter(teinte_de(temps - 0.2 * place), 0.15 + 0.85 * onde)
+                teinter(teinte_cyclique_de(temps - 0.2 * place), 0.15 + 0.85 * onde)
             }
 
             // Le spectre déroulé le long de la direction. Seule famille à ne pas
@@ -930,7 +971,10 @@ impl Animation {
             // LED dont plusieurs valent le même noir ne portent pas huit valeurs
             // distinctes — le motif serait bien là, mais la rotation
             // illisible : on ne voit tourner que ce qui a huit nuances.
-            Famille::Rotation => teinter(teinte_de(angle - temps), 1.0 - fraction(angle - temps)),
+            Famille::Rotation => teinter(
+                teinte_cyclique_de(angle - temps),
+                1.0 - fraction(angle - temps),
+            ),
 
             // La couleur suit une sonde, et rien d'autre — ni le temps, ni la
             // place. À température constante le boîtier est constant : c'est
