@@ -289,6 +289,62 @@ toujours, elle change seulement de teinte en chemin. Indexer sur la *luminosité
 `balayage`, dont l'intensité ne vaut que 0 ou 1, un motif à deux couleurs — la palette y serait
 invisible.
 
+##### Un index qui défile parcourt le dégradé en aller-retour
+
+⚠️ **Une palette n'est pas un cercle**, et c'est ce qui faisait sauter la couleur une fois par
+cycle — « on voit clairement un rafraîchissement à chaque tour », relevé devant le boîtier. Son
+premier et son dernier arrêt sont deux couleurs différentes ; un index **cyclique** projeté droit
+dessus repassait de 255 à 0, et la LED sautait de tout l'écart :
+
+| palette | écart entre ses deux bouts | | palette | écart |
+|---|---|---|---|---|
+| `lava`, `glace`, `orange-teal` | **255** | | `couchant` | 207 |
+| `paysage` | 225 | | `sorbet` | 153 |
+| `atlantica` | 142 | | `light-pink` | 119 |
+| `ocean` | 101 | | `sakura` | 27 |
+| `aurore`, `nuit-avril` | **0** | | | |
+
+Sur onze palettes sur douze, le saut mesuré d'une image à la suivante **égalait cet écart à deux
+unités près**. Le pire saut d'une LED, sur un cycle entier :
+
+| famille | sans palette | avant | après |
+|---|---|---|---|
+| `vague` | 20 | **254** | **138** — et 25 sur `lava`, 26 sur `glace`, 19 sur `orange-teal` |
+| `respiration` | 17 | **254** | **138** |
+
+Les trois familles dont l'index défile — `vague`, `respiration`, `rotation` — parcourent donc le
+dégradé **dans un sens puis dans l'autre**. C'est l'analogue exact de la fonction périodique par
+laquelle la luminosité passait déjà, et que la teinte n'avait pas.
+
+⚠️ **On replie le parcours, jamais la palette.** Boucler le dégradé — un arrêt virtuel qui ramène à
+la couleur de départ — inventerait une rampe que WLED n'a pas, et obligerait à choisir quelle part
+du cycle lui donner : un réglage arbitraire de plus. L'aller-retour est continu et périodique par
+construction, sans réglage, et il ne touche pas aux données reprises.
+
+⚠️ **Le prix est une traversée deux fois plus rapide**, donc les rampes internes raides sont
+franchies deux fois plus vite. Sur `nuit-avril`, dont les deux bouts sont **déjà identiques**, le
+pire saut passe de 92 à 138 : la correction tombe à côté sur la seule palette qui n'avait pas le
+défaut. Les onze autres y gagnent.
+
+⚠️ **`rotation` saute toujours de 248 sans qu'aucune palette y soit pour rien** : son arête de
+luminosité (`1 - fraction(angle - temps)`) est voulue, et reste. La teinte, elle, est continue.
+
+⚠️ **Sur `vague`, une extrémité du dégradé est rendue noire** — son enveloppe d'intensité s'annule
+pile au point de rebroussement. C'est une conséquence de la correction, pas un défaut.
+
+⚠️ **Les huit familles à index borné ne parcourent rien : leur 0 et leur 1 sont les deux bouts du
+motif**, pas deux instants successifs. Cinq sont inchangées à l'octet près — `comete`, `balayage`,
+`braise`, `pouls`, `scintillement`. Trois ont été **recadrées**, et c'est le même défaut pris par
+l'autre bout : `fraction(1.0)` vaut `0.0`, si bien qu'une **bougie à plein niveau** rendait le
+*premier* arrêt de la palette au lieu du dernier — sous `lava`, du noir au lieu du blanc. `bougie`,
+`nuee` et `artifice` atteignent exactement 1,0 ; elles rendent désormais la fin du dégradé.
+`Palette::echantillon` promettait déjà « hors bornes, la couleur de borne », et c'est le `fraction`
+qui défaisait cette garantie précisément à la borne.
+
+⚠️ **Sans palette, rien n'a changé du tout** — un test d'intention fige les treize familles, huit
+directions et soixante pas, octet pour octet. La correction ne touche que le chemin qui échantillonne
+un dégradé.
+
 ⚠️ **`couleur` et `palette` ensemble sont refusés**, et la commande entière avec. Ce n'est pas une
 clé de trop — les deux sont acceptées séparément — mais une **ambiguïté** : rien ne dirait laquelle
 décide de la teinte, et en choisir une en silence serait le réglage qui ment. La même exclusion
