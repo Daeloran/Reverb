@@ -108,6 +108,9 @@ pub enum ActionEcran {
     MireCercle { once: bool },
     /// Joue un GIF en boucle. **Passe par le démon**, qui seul décode.
     Gif { chemin: std::path::PathBuf },
+    /// Affiche un gabarit SVG, températures insérées (#144). **Passe par le
+    /// démon**, qui seul lit les sondes.
+    Gabarit { chemin: std::path::PathBuf },
     /// Affiche un cadran sur une sonde. **Passe par le démon**, qui seul lit.
     Cadran { sonde: String },
     /// Rend la dalle au firmware.
@@ -402,6 +405,7 @@ fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String>
     let mut luminosite: Option<u8> = None;
     let mut image: Option<std::path::PathBuf> = None;
     let mut gif: Option<std::path::PathBuf> = None;
+    let mut gabarit: Option<std::path::PathBuf> = None;
     let mut sonde: Option<String> = None;
     let mut eteindre = false;
     let mut mire = false;
@@ -423,6 +427,12 @@ fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String>
                     .next()
                     .ok_or_else(|| "« --gif » attend un chemin de fichier.".to_owned())?;
                 gif = Some(std::path::PathBuf::from(brut));
+            }
+            "--template" => {
+                let brut = args
+                    .next()
+                    .ok_or_else(|| "« --template » attend un chemin de fichier SVG.".to_owned())?;
+                gabarit = Some(std::path::PathBuf::from(brut));
             }
             "--gauge" => {
                 sonde = Some(
@@ -455,17 +465,27 @@ fn parse_screen(mut args: std::vec::IntoIter<String>) -> Result<Command, String>
     let demandes = usize::from(luminosite.is_some())
         + usize::from(image.is_some())
         + usize::from(gif.is_some())
+        + usize::from(gabarit.is_some())
         + usize::from(sonde.is_some())
         + usize::from(eteindre)
         + usize::from(mire)
         + usize::from(cercle);
     if demandes > 1 {
         return Err(
-            "« --brightness », « --image », « --gif », « --gauge », « --off » et \
+            "« --brightness », « --image », « --gif », « --template », « --gauge », « --off » et \
              les mires s'excluent. Régler la luminosité AVANT d'envoyer l'image, en deux \
              commandes : un changement de luminosité réinitialise l'affichage."
                 .to_owned(),
         );
+    }
+
+    if let Some(chemin) = gabarit {
+        if once {
+            return Err("« --once » ne s'applique qu'à « --image » ou à une mire.".to_owned());
+        }
+        return Ok(Command::Screen {
+            action: ActionEcran::Gabarit { chemin },
+        });
     }
 
     let action = match (luminosite, image, gif, sonde, eteindre, mire, cercle) {

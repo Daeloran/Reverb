@@ -748,7 +748,10 @@ fn piloter_ecran(action: ActionEcran) -> Result<(), String> {
         ActionEcran::Luminosite(percent) => regler_luminosite(percent),
         // Ces trois-là n'existent que par le démon : lui seul décode un GIF et
         // lit les sondes, et l'extinction n'est que le fait de cesser d'émettre.
-        ActionEcran::Gif { .. } | ActionEcran::Cadran { .. } | ActionEcran::Eteindre => Err(
+        ActionEcran::Gif { .. }
+        | ActionEcran::Gabarit { .. }
+        | ActionEcran::Cadran { .. }
+        | ActionEcran::Eteindre => Err(
             "cette action passe par le démon, qui seul décode les images et lit les \
                  sondes.\n  Le démarrer :\n    sudo systemctl start reverbd"
                 .to_owned(),
@@ -839,6 +842,9 @@ fn requete_d_ecran(action: &ActionEcran) -> Result<Option<Request>, String> {
             Some(Request::Screen(ScreenAction::Image(absolu(chemin)?)))
         }
         ActionEcran::Gif { chemin } => Some(Request::Screen(ScreenAction::Gif(absolu(chemin)?))),
+        ActionEcran::Gabarit { chemin } => {
+            Some(Request::Screen(ScreenAction::Gabarit(absolu(chemin)?)))
+        }
         ActionEcran::Cadran { sonde } => Some(Request::Screen(ScreenAction::Gauge(sonde.clone()))),
         ActionEcran::Eteindre => Some(Request::Screen(ScreenAction::Off)),
         ActionEcran::Mire { .. } | ActionEcran::MireCercle { .. } => None,
