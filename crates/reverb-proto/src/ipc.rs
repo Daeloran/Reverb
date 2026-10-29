@@ -281,6 +281,11 @@ pub enum ScreenAction {
     Gauge(String),
     /// `screen gif <chemin>` — une animation, jouée en boucle.
     Gif(String),
+    /// `screen template <chemin>` — un SVG rendu tel quel, ses marqueurs
+    /// `{{sonde:<slug>}}` remplacés par les températures (issue #144).
+    ///
+    /// Chemin absolu, pour la même raison qu'`Image`.
+    Gabarit(String),
     /// `screen layout` — la composition courante, sans rien changer.
     LayoutState,
     /// `screen layout fond noir` · `screen layout fond image <chemin>`.
@@ -633,7 +638,7 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
                     };
                     Ok(Request::Screen(ScreenAction::Gauge((*sonde).to_owned())))
                 }
-                "image" | "gif" => {
+                "image" | "gif" | "template" => {
                     // ⚠️ Le chemin est le **dernier champ de sa ligne**, et va
                     // jusqu'au bout, espaces comprises — la règle du dernier
                     // champ de #17. On repart donc de `line`, que
@@ -657,15 +662,15 @@ pub fn parse_request(line: &str) -> Result<Request, RequestError> {
                         )));
                     }
                     let chemin = chemin.to_owned();
-                    Ok(Request::Screen(if *action == "image" {
-                        ScreenAction::Image(chemin)
-                    } else {
-                        ScreenAction::Gif(chemin)
+                    Ok(Request::Screen(match *action {
+                        "image" => ScreenAction::Image(chemin),
+                        "gif" => ScreenAction::Gif(chemin),
+                        _ => ScreenAction::Gabarit(chemin),
                     }))
                 }
                 autre => Err(mauvais(&format!(
-                    "action « {autre} » inconnue : state, brightness, off, image, gauge, gif ou \
-                     layout"
+                    "action « {autre} » inconnue : state, brightness, off, image, gauge, gif, \
+                     template ou layout"
                 ))),
             }
         }
@@ -970,6 +975,9 @@ pub fn encode_request(request: &Request) -> String {
             // scinderaient la commande en deux.
             ScreenAction::Image(chemin) => format!("screen image {}", sans_controle(chemin)),
             ScreenAction::Gif(chemin) => format!("screen gif {}", sans_controle(chemin)),
+            ScreenAction::Gabarit(chemin) => {
+                format!("screen template {}", sans_controle(chemin))
+            }
             // La sonde, elle, est un jeton : ses blancs tombent aussi.
             ScreenAction::Gauge(sonde) => format!("screen gauge {}", sur_une_ligne(sonde)),
             ScreenAction::LayoutState => "screen layout".to_owned(),
