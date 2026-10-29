@@ -60,6 +60,8 @@ pub enum Affichage {
     Gif(String),
     /// Un fond, et jusqu'à quatre informations posées dessus (#80).
     Composition(Composition),
+    /// Un SVG rendu tel quel, ses marqueurs remplacés par les sondes (#144).
+    Gabarit(String),
 }
 
 /// L'état de l'écran : sa luminosité et ce qu'il montre.
@@ -115,6 +117,7 @@ impl Etat {
             Affichage::Cadran(sonde) => format!("gauge {sonde}"),
             Affichage::Image(chemin) => format!("image {chemin}"),
             Affichage::Gif(chemin) => format!("gif {chemin}"),
+            Affichage::Gabarit(chemin) => format!("template {chemin}"),
             Affichage::Composition(_) => "layout".to_owned(),
         };
         let mut texte = format!("brightness {}\naffiche {affichage}\n", self.luminosite);
@@ -236,7 +239,7 @@ fn affichage_de(ligne: &str) -> Result<Affichage, EtatInvalide> {
         Some(autre) => {
             return Err(refus(format!(
                 "« {autre} » inconnu : la seconde ligne est « affiche \
-                 <rien|gauge|image|gif|layout> »"
+                 <rien|gauge|image|gif|template|layout> »"
             )));
         }
         None => {
@@ -285,8 +288,9 @@ fn affichage_de(ligne: &str) -> Result<Affichage, EtatInvalide> {
         "gauge" => Ok(Affichage::Cadran(argument.to_owned())),
         "image" => Ok(Affichage::Image(argument.to_owned())),
         "gif" => Ok(Affichage::Gif(argument.to_owned())),
+        "template" => Ok(Affichage::Gabarit(argument.to_owned())),
         autre => Err(refus(format!(
-            "« {autre} » inconnu : la dalle affiche rien, gauge, image, gif ou layout"
+            "« {autre} » inconnu : la dalle affiche rien, gauge, image, gif, template ou layout"
         ))),
     }
 }
@@ -409,6 +413,19 @@ pub fn verifier_format(affichage: &Affichage, octets: &[u8]) -> Result<(), Image
             &[ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Gif][..],
         ),
         Affichage::Gif(chemin) => (chemin, &[ImageFormat::Gif][..]),
+        // Un gabarit n'est pas une image : son verdict est celui du rendu SVG,
+        // sur le texte entier, et non une signature d'en-tête.
+        Affichage::Gabarit(chemin) => {
+            let texte = std::str::from_utf8(octets).map_err(|_| ImageInvalide {
+                raison: format!("« {chemin} » n'est pas un texte UTF-8 : pas un SVG"),
+            })?;
+            let dossier = Path::new(chemin).parent();
+            return crate::gabarit::Gabarit::nouveau(texte, dossier)
+                .map(|_| ())
+                .map_err(|erreur| ImageInvalide {
+                    raison: format!("« {chemin} » : {erreur}"),
+                });
+        }
     };
 
     // Reconnaître, et non décoder : l'en-tête suffit, et un fichier de plusieurs
@@ -446,6 +463,15 @@ pub fn verifier_fichier(affichage: &Affichage) -> Result<(), ImageInvalide> {
             Fond::Image(chemin) => chemin,
         },
         Affichage::Image(chemin) | Affichage::Gif(chemin) => chemin,
+        // Le gabarit est lu **en entier** : c'est son rendu qui le valide, et un
+        // en-tête de 64 octets ne dit rien d'un SVG.
+        Affichage::Gabarit(chemin) => {
+            return crate::gabarit::charger(Path::new(chemin))
+                .map(|_| ())
+                .map_err(|erreur| ImageInvalide {
+                    raison: erreur.to_string(),
+                });
+        }
     };
     let mut fichier = std::fs::File::open(chemin).map_err(|erreur| ImageInvalide {
         raison: format!("« {chemin} » illisible : {erreur}"),
@@ -565,6 +591,23 @@ impl Dalle {
             let a_recopier = (screen::IMAGE_LEN - octets.len()).min(octets.len());
             octets.extend_from_within(..a_recopier);
         }
+        Dalle { octets }
+    }
+
+    /// Une dalle depuis des pixels RGB, rangés ligne par ligne (#144).
+    ///
+    /// `rgb` doit compter `WIDTH × HEIGHT × 3` octets ; ce qui manque reste noir,
+    /// ce qui dépasse est ignoré. La conversion vers l'ordre de l'écran vit
+    /// **ici**, et nulle part ailleurs : c'est `screen::pixel` qui la porte.
+    pub fn depuis_rgb(rgb: &[u8]) -> Dalle {
+        let mut octets = Vec::with_capacity(screen::IMAGE_LEN);
+        for pixel in rgb
+            .chunks_exact(3)
+            .take(screen::IMAGE_LEN / screen::PIXEL_LEN)
+        {
+            octets.extend_from_slice(&screen::pixel(pixel[0], pixel[1], pixel[2]));
+        }
+        octets.resize(screen::IMAGE_LEN, 0);
         Dalle { octets }
     }
 

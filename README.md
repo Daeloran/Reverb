@@ -1429,6 +1429,50 @@ pour six centimètres de dalle ne vaut pas son coût — un `.gif` posé en fond
 première image), les tours/minute et l'heure en champ, un positionnement au pixel. La **fenêtre**
 ne l'expose pas encore : #76 s'en charge.
 
+### Le gabarit — un SVG rendu tel quel (#144)
+
+Le cadran et la composition **dessinent eux-mêmes** : arcs sur la couronne, boîte assombrie sous
+chaque champ, chiffres en Nunito. Ils ne savent pas reproduire une maquette faite ailleurs. Le
+gabarit, si : c'est un SVG complet, et le démon n'y touche qu'à ses **marqueurs**.
+
+```bash
+reverb screen --template /home/nico/ecran/ecran.svg   # chemin complété en absolu, comme --image
+```
+
+```xml
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640">
+  <rect width="640" height="640" fill="#000"/>
+  <circle cx="320" cy="320" r="280" fill="none" stroke="#d10a1e" stroke-width="5"/>
+  <text x="320" y="454" text-anchor="middle" font-family="Rajdhani" font-weight="500"
+        font-size="40" fill="#8d8a85">CPU {{sonde:k10temp:tctl}}° · LIQ {{sonde:kraken2023elite:coolant-temp}}°</text>
+</svg>
+```
+
+- `{{sonde:<slug>}}` devient la valeur de la sonde, **arrondie à l'entier, sans unité** : le gabarit
+  écrit lui-même son « ° ». Le slug va jusqu'à `}}`, deux-points compris — c'est le slug du
+  protocole, celui que `status` liste.
+- ⚠️ **Une sonde muette ou inconnue s'écrit `--`**, jamais `0`. Même règle que le cadran.
+- **Les polices viennent du dossier du gabarit** : ses `.ttf`/`.otf`, et ceux de son sous-dossier
+  `fonts/`. Aucune police du système n'est lue — le démon est root, et ce qu'il affiche ne doit pas
+  changer avec l'image Bazzite du mois. Une famille introuvable retombe sur la Nunito embarquée.
+- Le viewBox est mis à l'échelle **sans déformation**, centré sur du noir, comme `--image`.
+- Le rendu n'est refait que si le **texte substitué** a changé : à température stable, ni rendu ni
+  envoi, seulement la réémission qui précède le repli du firmware.
+- Le mode est conservé dans `ecran.conf` et dans les profils : `affiche template <chemin>`.
+
+```bash
+cargo run --release --example gabarit -p reverb-daemon -- ecran.svg /tmp/gabarit.ppm \
+    k10temp:tctl=38 kraken2023elite:coolant-temp=31
+```
+
+rend le gabarit **sans matériel**, octet pour octet ce que la dalle recevrait : c'est ainsi qu'on le
+compare à sa maquette.
+
+⚠️ **Le prix, mesuré : `reverbd` passe de 2 699 952 à 6 671 416 octets** (profil `release`, non
+strippé). C'est `resvg` et sa pile de texte (`fontdb`, `skrifa`, `harfrust`) — du Rust pur, aucune
+bibliothèque système, l'ADR-001 tient. Le cadran et la composition gardent `fontdue`, plus léger,
+pour ce qu'ils font déjà.
+
 ### Ce que le démon réémet, et pourquoi
 
 Rien de ce que la dalle affiche ne tient sans réémission — **pas même une image fixe**. Le firmware

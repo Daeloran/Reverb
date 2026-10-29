@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use reverb_anim::{Animation, Geometrie, Orientation, Reglages, Sens};
 use reverb_daemon::cadence::{Cadence, Tick};
 use reverb_daemon::ecran;
+use reverb_daemon::gabarit::{self, Gabarit};
 use reverb_daemon::peripheriques::{Consigne, Peripheriques, SOURCE_DU_KRAKEN};
 use reverb_daemon::persistance::{self, Eclairage};
 use reverb_daemon::profils::{self, Ecriture, Profil};
@@ -276,6 +277,17 @@ enum Diffusion {
         /// même identique, l'image doit repartir avant les trente secondes.
         dernier_envoi: Option<Instant>,
     },
+    /// Un gabarit SVG (#144) : préparé une fois, rendu quand son texte change.
+    Gabarit {
+        /// Le SVG et ses polices, chargés **une seule fois**.
+        gabarit: Box<Gabarit>,
+        /// Le texte substitué du dernier rendu. Deux textes égaux donnent deux
+        /// dalles égales : le rendu est alors sauté, pas seulement l'envoi.
+        dernier_texte: Option<String>,
+        /// La dernière image poussée, réémise telle quelle avant le repli.
+        derniere: Option<Box<ecran::Dalle>>,
+        dernier_envoi: Option<Instant>,
+    },
 }
 
 /// Entre deux images d'un cadran.
@@ -505,6 +517,19 @@ impl Etat {
                     Some(Instant::now()),
                 )
             }
+            ecran::Affichage::Gabarit(chemin) => {
+                let gabarit =
+                    gabarit::charger(Path::new(chemin)).map_err(|erreur| erreur.to_string())?;
+                (
+                    Diffusion::Gabarit {
+                        gabarit: Box::new(gabarit),
+                        dernier_texte: None,
+                        derniere: None,
+                        dernier_envoi: None,
+                    },
+                    Some(Instant::now()),
+                )
+            }
             ecran::Affichage::Gif(chemin) => {
                 let (dalles, ecrits) = ecran::Dalle::animee_depuis_fichier(Path::new(chemin))
                     .map_err(|erreur| erreur.to_string())?;
@@ -536,6 +561,7 @@ impl Etat {
                 ecran::Affichage::Cadran(sonde) => format!("gauge:{sonde}"),
                 ecran::Affichage::Image(chemin) => format!("image:{chemin}"),
                 ecran::Affichage::Gif(chemin) => format!("gif:{chemin}"),
+                ecran::Affichage::Gabarit(chemin) => format!("template:{chemin}"),
                 // Un jeton, et le détail sur les lignes qui suivent : un fond
                 // et quatre champs ne tiennent pas sur une ligne, et les y
                 // tasser demanderait un échappement que ce protocole n'a pas.
@@ -1041,6 +1067,7 @@ fn tour_d_ecran(etat: &mut Etat, peripheriques: &mut Peripheriques) -> Duration 
     // lisible. Un relevé vide quand la dalle ne porte pas de composition : rien
     // n'est lu, et le cas le plus courant ne coûte rien.
     let champs = champs_du_moment(etat);
+    let valeurs = valeurs_du_gabarit(etat);
 
     // Le délai jusqu'à l'image suivante est décidé **avant** le dépôt : un
     // envoi qui échoue ne doit pas figer l'horloge, sinon un Kraken débranché
@@ -1085,6 +1112,54 @@ fn tour_d_ecran(etat: &mut Etat, peripheriques: &mut Peripheriques) -> Duration 
                 *derniere = Some(Box::new(image.clone()));
                 *dernier_envoi = Some(maintenant);
                 (Some(image), prochain)
+            }
+        }
+        Diffusion::Gabarit {
+            gabarit,
+            dernier_texte,
+            derniere,
+            dernier_envoi,
+        } => {
+            let texte = gabarit.texte(&|slug| {
+                valeurs
+                    .iter()
+                    .find(|(connu, _)| connu == slug)
+                    .and_then(|(_, valeur)| *valeur)
+            });
+            // Sans marqueur, le gabarit est une image fixe : il suit son rythme.
+            let prochain = if valeurs.is_empty() {
+                repli
+            } else {
+                CADENCE_CADRAN
+            };
+            let repli_du_firmware = dernier_envoi
+                .is_none_or(|envoi| maintenant.saturating_duration_since(envoi) >= repli);
+            let inchange = dernier_texte.as_deref() == Some(texte.as_str());
+            match (inchange, derniere.as_deref()) {
+                // Rien n'a bougé : ni rendu, ni envoi.
+                (true, Some(_)) if !repli_du_firmware => (None, prochain),
+                // Rien n'a bougé, mais le firmware va reprendre la main : on
+                // réémet l'image déjà rendue.
+                (true, Some(image)) => {
+                    let image = image.clone();
+                    *dernier_envoi = Some(maintenant);
+                    (Some(image), prochain)
+                }
+                _ => match gabarit.rendre_texte(&texte) {
+                    Ok(image) => {
+                        *dernier_texte = Some(texte);
+                        *derniere = Some(Box::new(image.clone()));
+                        *dernier_envoi = Some(maintenant);
+                        (Some(image), prochain)
+                    }
+                    // Un texte substitué qui ne se lit plus (une valeur ne peut
+                    // pas le casser, mais le cas reste possible) : on le dit, et
+                    // la dernière image reste à l'écran.
+                    Err(erreur) => {
+                        eprintln!("attention : écran : {erreur}");
+                        (derniere.as_deref().cloned(), prochain)
+                    }
+                },
             }
         }
         Diffusion::Anime {
@@ -1396,6 +1471,42 @@ fn champs_du_moment(etat: &mut Etat) -> Vec<(Ancre, ecran::ChampRendu)> {
 /// plutôt que de figer la dernière lecture. Un 34 °C affiché derrière une pompe
 /// arrêtée est le mode de défaillance le plus coûteux du cadran, parce qu'il
 /// est rassurant.
+/// Les valeurs des sondes que le gabarit affiché lit (#144).
+///
+/// Même chemin que les champs d'une composition : la **quarantaine** de #68,
+/// parce qu'une lecture sysfs sur un périphérique muet bloque cinq secondes dans
+/// le fil qui sert aussi le socket. Vide quand la dalle ne porte pas de gabarit.
+fn valeurs_du_gabarit(etat: &mut Etat) -> Vec<(String, Option<f32>)> {
+    let Diffusion::Gabarit { gabarit, .. } = &etat.diffusion else {
+        return Vec::new();
+    };
+    let maintenant = etat.naissance.elapsed();
+    gabarit
+        .sondes()
+        .into_iter()
+        .map(|slug| {
+            // Comme pour la composition : une sonde inconnue n'est pas relevée,
+            // et ne compte donc pas parmi les muettes de #98.
+            let releve = match etat.sondes.iter().find(|connue| connue.slug == slug) {
+                Some(connue) => Some(
+                    match etat
+                        .quarantaine
+                        .tour(&slug, maintenant, || connue.lire().ok())
+                    {
+                        Releve::Valeur(millidegres) => Some(millidegres as f32 / 1000.0),
+                        Releve::Muette { .. } => None,
+                    },
+                ),
+                None => None,
+            };
+            if let Some(valeur) = releve {
+                etat.noter(&slug, valeur.is_some());
+            }
+            (slug, releve.flatten())
+        })
+        .collect()
+}
+
 fn cadran_du_moment(slug: &str, sondes: &[reverb_hw::hwmon::Sonde]) -> ecran::Dalle {
     let sonde = sondes.iter().find(|sonde| sonde.slug == slug);
     let valeur = sonde
@@ -1886,6 +1997,7 @@ fn ecran_commande(
 
         ScreenAction::Image(chemin) => poser_affichage(etat, ecran::Affichage::Image(chemin)),
         ScreenAction::Gif(chemin) => poser_affichage(etat, ecran::Affichage::Gif(chemin)),
+        ScreenAction::Gabarit(chemin) => poser_affichage(etat, ecran::Affichage::Gabarit(chemin)),
 
         ScreenAction::LayoutState => {
             let mut lignes = etat.lignes_composition();
@@ -2280,6 +2392,9 @@ fn appliquer_profil(
             ecran::Affichage::Cadran(sonde) => actions.push(ScreenAction::Gauge(sonde.clone())),
             ecran::Affichage::Image(chemin) => actions.push(ScreenAction::Image(chemin.clone())),
             ecran::Affichage::Gif(chemin) => actions.push(ScreenAction::Gif(chemin.clone())),
+            ecran::Affichage::Gabarit(chemin) => {
+                actions.push(ScreenAction::Gabarit(chemin.clone()))
+            }
             // Une composition ne tient pas en une action : elle se rejoue en
             // plusieurs, et toutes passent par le même chemin d'écriture.
             //
