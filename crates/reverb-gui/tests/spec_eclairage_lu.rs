@@ -205,6 +205,8 @@ fn venu(
         direction: direction.map(rang),
         // Champ ajouté par #126, voir ci-dessus.
         palette: None,
+        // #150 : `None` hors de `course`, la seule famille qui porte une largeur.
+        largeur: None,
     }
 }
 

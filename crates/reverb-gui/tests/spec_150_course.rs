@@ -3,15 +3,32 @@
 //!
 //! Écrits **depuis l'issue #150 seule**, avant l'implémentation. Rien de `crates/reverb-gui/src/`
 //! ni de `crates/reverb-gui/ui/` n'a été lu pour les produire, hors les signatures publiques de
-//! `reglages.rs` (`Reglage`, `familles_offertes`, `requete_d_animation`) ; les idiomes viennent de
-//! `spec_fenetre.rs` et `spec_149_vitesse.rs`. Si l'un de ces tests échoue après implémentation,
+//! `reglages.rs` (`Reglage`, `Eclairage`, `eclairage_lu`, `familles_offertes`,
+//! `requete_d_animation`) ; les idiomes viennent de `spec_fenetre.rs`, `spec_eclairage_lu.rs` et
+//! `spec_149_vitesse.rs`. Si l'un de ces tests échoue après implémentation,
 //! c'est le code qu'on corrige.
 //!
 //! # Le contrat de signature supposé
 //!
 //! ```ignore
 //! pub struct Reglage { …, pub largeur: u8 } // de 1 à 10, comme `reverb_anim::Reglages::largeur`
+//! pub struct Eclairage { …, pub largeur: Option<u8> } // lue sur la ligne `anim` de `lighting`
 //! ```
+//!
+//! La lecture de `Eclairage::largeur` suit la règle de la vitesse (#43, #149) :
+//!
+//! - sous `course`, `largeur=n` avec `n` de 1 à 10 se lit `Some(n)` ;
+//! - sous `course`, **sans** `largeur=`, elle se lit `Some(4)` : le démon n'écrit pas le défaut,
+//!   et c'est donc 4 qui tourne ;
+//! - une valeur hors de 1 à 10 ou mal écrite est **ignorée** (`None`), sans emporter le reste ;
+//! - sous **toute autre famille**, `None`, avec ou sans clé : ces familles n'ont pas de largeur,
+//!   et le démon n'en écrit jamais. `Reglage::adopter` laisse alors la largeur de la fenêtre
+//!   intacte, comme pour tout réglage sur lequel le démon ne s'est pas prononcé — repasser sous
+//!   `course` retrouve la largeur qu'on avait choisie.
+//!
+//! `Reglage::adopter` reprend une largeur `Some(n)`. Sans cela, une largeur posée par le socket
+//! (`animate course largeur=7`) serait écrasée par celle de la fenêtre au premier geste sur un
+//! curseur.
 //!
 //! Même type que `reverb_anim::Reglages::largeur` (voir
 //! `crates/reverb-anim/tests/spec_150_course.rs`) : la fenêtre ne porte pas une seconde
@@ -24,6 +41,10 @@
 //! | « la fenêtre propose `course` parmi les familles », ajoutée en dernier | [`la_fenetre_offre_course_en_dernier`] |
 //! | la largeur affichée part au démon, sur les deux chemins d'émission | [`la_largeur_affichee_part_au_demon_sous_course`] |
 //! | une autre famille ne reçoit pas `largeur` | [`une_autre_famille_ne_recoit_pas_de_largeur`] |
+//! | une largeur posée par le socket est lue et adoptée | [`une_largeur_lue_sous_course_est_adoptee_et_repart_telle_quelle`] |
+//! | sans `largeur=`, `course` tourne à 4 | [`course_sans_largeur_ecrite_se_lit_a_quatre`] |
+//! | une largeur illisible est ignorée | [`une_largeur_que_le_demon_refuserait_n_est_pas_lue`] |
+//! | hors de `course`, aucune largeur n'est lue ni perdue | [`hors_de_course_la_largeur_n_est_pas_lue_et_la_fenetre_garde_la_sienne`] |
 //!
 //! # Ce que ce fichier ne vérifie pas, et pourquoi
 //!
@@ -33,14 +54,11 @@
 //! `.slint`, ce que les tests d'intention s'interdisent. Ce qui en est testable ici est le
 //! **modèle** derrière le curseur : sous `course`, la valeur part ; ailleurs, elle ne part pas et ne
 //! fait donc pas refuser la commande. Le reste se juge à l'œil, sur la fenêtre.
-//!
-//! La **lecture** de `largeur` dans une réponse `lighting` (`eclairage_lu`, `Reglage::adopter`)
-//! n'est pas non plus vérifiée : l'issue ne la demande pas à la fenêtre.
 
 use reverb_anim::{Animation, Direction, Reglages};
-use reverb_gui::reglages::{Reglage, familles_offertes, requete_d_animation};
+use reverb_gui::reglages::{Reglage, eclairage_lu, familles_offertes, requete_d_animation};
 use reverb_proto::Rgb;
-use reverb_proto::ipc::{Request, encode_request, parse_request};
+use reverb_proto::ipc::{Request, ResponseLine, encode_request, parse_request};
 
 // ---------------------------------------------------------------------------
 // Repères
@@ -210,6 +228,142 @@ fn une_autre_famille_ne_recoit_pas_de_largeur() {
                 "{contexte} : seule « {COURSE} » reçoit `largeur` — {paires:?}"
             );
             relu(nom, &paires);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 3 — la largeur lue dans `lighting`
+// ---------------------------------------------------------------------------
+
+/// Une ligne `anim` de réponse `lighting`, couleur, vitesse et direction comprises, plus les paires
+/// données — celle de `spec_149_vitesse.rs`.
+fn ligne_anim(nom: &str, en_plus: &[(&str, &str)]) -> ResponseLine {
+    let mut reglages = vec![
+        ("couleur".to_owned(), "129a40".to_owned()),
+        ("vitesse".to_owned(), "3".to_owned()),
+        ("direction".to_owned(), DIRECTION.slug().to_owned()),
+    ];
+    reglages.extend(
+        en_plus
+            .iter()
+            .map(|(cle, valeur)| ((*cle).to_owned(), (*valeur).to_owned())),
+    );
+    ResponseLine::Anim {
+        nom: nom.to_owned(),
+        reglages,
+    }
+}
+
+#[test]
+fn une_largeur_lue_sous_course_est_adoptee_et_repart_telle_quelle() {
+    // `animate course largeur=7` posé par le socket : la fenêtre doit le lire, l'adopter, et le
+    // renvoyer tel quel au premier geste sur un autre curseur — sans quoi elle écraserait 7 par sa
+    // propre valeur, sans un mot.
+    let lu = eclairage_lu(&[ligne_anim(COURSE, &[("largeur", "7")])]);
+    assert_eq!(lu.largeur, Some(7), "« largeur=7 » se lit 7 — {lu:?}");
+
+    let mut fenetre = reglage(COURSE, 4);
+    fenetre.animation = None;
+    assert!(
+        fenetre.adopter(&lu),
+        "une animation tourne alors que la fenêtre n'en pilotait aucune : c'est un changement"
+    );
+    assert_eq!(
+        fenetre.largeur, 7,
+        "l'adoption reprend la largeur du démon — {fenetre:?}"
+    );
+
+    // Toucher à la direction relance l'animation : la largeur qui repart est celle du démon.
+    fenetre.direction = rang(Direction::HautBas);
+    let (_, paires) = paires_animees(fenetre.commande(), "après adoption de largeur=7");
+    assert_eq!(
+        valeur(&paires, "largeur"),
+        Some("7"),
+        "toucher à la direction ne change pas la largeur 7 — {paires:?}"
+    );
+}
+
+#[test]
+fn course_sans_largeur_ecrite_se_lit_a_quatre() {
+    // Le démon n'écrit pas la largeur par défaut (critère n° 5) : une ligne `anim course` sans
+    // `largeur=` dit donc que 4 tourne. Une fenêtre réglée sur 9 qui ne le lirait pas renverrait 9
+    // au premier geste.
+    let lu = eclairage_lu(&[ligne_anim(COURSE, &[])]);
+    assert_eq!(
+        lu.largeur,
+        Some(4),
+        "« anim course » sans largeur tourne à 4 — {lu:?}"
+    );
+
+    let mut fenetre = reglage(COURSE, 9);
+    fenetre.animation = None;
+    fenetre.adopter(&lu);
+    assert_eq!(
+        fenetre.largeur, 4,
+        "l'adoption ramène la fenêtre à 4 — {fenetre:?}"
+    );
+}
+
+#[test]
+fn une_largeur_que_le_demon_refuserait_n_est_pas_lue() {
+    // La règle de la vitesse (#43, #149) : ce que `reverb-anim` refuse, la fenêtre ne le lit pas.
+    // Elle l'ignore, sans emporter le nom ni les autres réglages.
+    for refusee in ["0", "11", "2.5", "abc"] {
+        assert!(
+            animation(COURSE)
+                .reglages(&[("largeur".to_owned(), refusee.to_owned())])
+                .is_err(),
+            "appareil : le démon refuse « largeur={refusee} »"
+        );
+        let lu = eclairage_lu(&[ligne_anim(COURSE, &[("largeur", refusee)])]);
+        assert_eq!(
+            lu.largeur, None,
+            "« largeur={refusee} » n'est pas une largeur : elle est ignorée — {lu:?}"
+        );
+        assert_eq!(
+            (
+                lu.animation.as_deref(),
+                lu.couleur,
+                lu.vitesse,
+                lu.direction
+            ),
+            (
+                Some(COURSE),
+                Some(COULEUR),
+                Some(VITESSE),
+                Some(rang(DIRECTION))
+            ),
+            "une largeur illisible n'emporte ni le nom ni les autres réglages — {lu:?}"
+        );
+
+        let mut fenetre = reglage(COURSE, 6);
+        fenetre.adopter(&lu);
+        assert_eq!(
+            fenetre.largeur, 6,
+            "une largeur ignorée ne déplace pas celle de la fenêtre — {fenetre:?}"
+        );
+    }
+}
+
+#[test]
+fn hors_de_course_la_largeur_n_est_pas_lue_et_la_fenetre_garde_la_sienne() {
+    // Contrat de ce fichier (voir l'en-tête) : hors de `course`, `None`, et la fenêtre garde sa
+    // largeur. Repasser sous `course` retrouve la largeur qu'on avait choisie, et non un 4 que
+    // personne n'a demandé.
+    for nom in ["vague", "arc-en-ciel"] {
+        for en_plus in [&[][..], &[("largeur", "7")][..]] {
+            let lu = eclairage_lu(&[ligne_anim(nom, en_plus)]);
+            assert_eq!(
+                lu.largeur, None,
+                "« {nom} » n'a pas de largeur : rien n'est lu, avec {en_plus:?} — {lu:?}"
+            );
+            let mut fenetre = reglage(COURSE, 9);
+            fenetre.adopter(&lu);
+            assert_eq!(
+                fenetre.largeur, 9,
+                "sous « {nom} », la fenêtre garde sa largeur — {fenetre:?}"
+            );
         }
     }
 }
