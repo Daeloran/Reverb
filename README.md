@@ -271,31 +271,38 @@ quand sa diagonale vaut 1,73. Mesuré par le test d'intention avant qu'aucun œi
 de segments. La question de licence est traitée avec [les palettes](#les-palettes--treize-dégradés-repris-de-wled),
 qui, elles, reprennent des données.
 
-#### `course` — Running, sur une palette posée
+#### `course` — des bandes qui portent la palette
 
 ```bash
-echo 'animate course palette=couchant direction=bas-haut largeur=4'
+echo 'animate course palette=red-flash direction=bas-haut vitesse=2'
 ```
 
-Reprise de **Running** de WLED (#150), réécrite comme les trois autres. Elle diffère de `vague` par
-deux choses qu'on voit :
+Née de **Running** de WLED (#150), réécrite comme les trois autres, puis écartée de son modèle sur
+un point, après essai devant le boîtier.
 
 | | `vague` | `course` |
 |---|---|---|
 | bandes | une seule ondulation sur l'étendue | `10 / largeur` bandes |
-| teinte | voyage avec l'onde | **ne dépend que de la place** : la palette est posée sur le boîtier, les bandes la traversent |
+| sous `couleur` | onde d'intensité | onde d'intensité |
+| sous `palette` | teinte et intensité, l'index replié en aller-retour | **chaque bande porte la palette entière**, sans enveloppe : la palette porte ses propres noirs |
 
-C'est le second point qui fait l'effet du ruban WLED : sous une palette comme `red-flash`, l'éclat
-pâle reste au milieu du boîtier, et ce sont les bandes qui passent dessus.
+Sous `red-flash` en `bas-haut`, l'éclat pâle naît en bas et monte, et un nouveau repart d'en bas
+quand il atteint le haut.
 
-`largeur` va de 1 (dix bandes) à 10 (une seule, comme `vague`), **4 par défaut**, et le défaut ne
-s'écrit pas. Une LED voit passer une bande par cycle, quelle que soit la largeur. Elle lit la même
-place que `vague`, donc le schéma de la vue de face (#148) : les ventilateurs couchés sont
-traversés LED par LED.
+⚠️ **Running pose la palette sur le ruban, et c'est ce qui a été essayé d'abord.** Devant le
+boîtier, le 2026-10-31 : sous `red-flash`, noire à ses deux bouts, le bas et le haut restaient
+sombres et le pâle collé au milieu, pendant que les bandes passaient dessus. Nico : « j'aimerais que
+ce soit le pâle qui parte d'en bas et monte, pas le noir ». La palette portée l'a remplacée, sans
+option pour revenir à l'autre.
 
-⚠️ **La valeur par défaut n'a pas encore été vue sur le boîtier.** Douze bandes comme sur le
-ruban (100 LED en file) feraient ici des bandes de 4 cm, plus fines qu'un ventilateur. 4 est un
-point de départ, à recaler à l'œil.
+`largeur` va de 1 (dix bandes) à 10 (une seule), **10 par défaut**, la valeur retenue devant le
+boîtier, et le défaut ne s'écrit pas. Une LED voit passer une bande par cycle, quelle que soit la
+largeur. Elle lit la même place que `vague`, donc le schéma de la vue de face (#148).
+
+⚠️ **Fluidité : une bande large et une vitesse basse.** À vingt images par seconde (le plancher du
+matériel), la crête pâle de `red-flash` — moins d'un quart de la palette — ne couvre qu'environ
+5 cm sous `largeur=5`, l'écart de deux LED d'un anneau : elle saute de LED en LED. À
+`largeur=10 vitesse=2`, elle s'étale sur deux ou trois LED et glisse.
 
 #### Les palettes — treize dégradés, repris de WLED
 
