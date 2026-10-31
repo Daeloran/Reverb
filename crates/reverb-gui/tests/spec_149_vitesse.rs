@@ -85,6 +85,8 @@ fn reglage(nom: &str, vitesse: f32) -> Reglage {
         vitesse,
         direction: rang(DIRECTION),
         palette: None,
+        // #150 : la fenêtre porte la `largeur` de `course` ; 10 est son défaut (essai boîtier du 2026-10-31), sans effet ailleurs.
+        largeur: 10,
     }
 }
 

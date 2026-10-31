@@ -725,11 +725,15 @@ fn les_treize_familles_figurent_au_catalogue_et_se_resolvent_par_leur_nom() {
             "« {nom} » doit rejoindre le catalogue : {CATALOGUE:?}"
         );
     }
-    assert_eq!(
-        CATALOGUE.len(),
-        ANCIENNES.len() + NOUVELLES.len(),
-        "le catalogue compte treize familles : {CATALOGUE:?}"
-    );
+    // #150 ajoute `course` en quatorzième : le catalogue **commence** par les treize, et c'est
+    // parmi elles que les trois nouvelles de cette issue doivent se trouver.
+    let treize = &CATALOGUE[..ANCIENNES.len() + NOUVELLES.len()];
+    for nom in ANCIENNES.iter().chain(NOUVELLES.iter()) {
+        assert!(
+            treize.contains(nom),
+            "« {nom} » est parmi les treize premières familles : {CATALOGUE:?}"
+        );
+    }
 
     for nom in NOUVELLES {
         // Les noms traversent le protocole comme des jetons séparés par des espaces — `animate nuee

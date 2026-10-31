@@ -85,7 +85,7 @@ const TEMOIN_BIS: Rgb = Rgb::new(0x20, 0xff, 0x80);
 /// Le contrat fixe la liste par construction : `reglages` rend un `Reglages` à trois champs
 /// (`couleur`, `vitesse`, `direction`), donc une clé hors de cette liste n'aurait nulle part où
 /// atterrir. `sens` y figure parce que l'issue l'écrit dans son exemple de commande.
-const CLES_CONNUES: [&str; 6] = [
+const CLES_CONNUES: [&str; 7] = [
     "couleur",
     "vitesse",
     "direction",
@@ -93,6 +93,8 @@ const CLES_CONNUES: [&str; 6] = [
     "sonde",
     // Ajoutée par #126. Elle atterrit dans `Reglages::palette`.
     "palette",
+    // Ajoutée par #150, pour `course`. Elle atterrit dans `Reglages::largeur`.
+    "largeur",
 ];
 
 /// Le mot qui écrit une direction sur le socket.
@@ -626,6 +628,13 @@ fn un_parametre_inconnu_est_refuse_en_nommant_la_cle_fautive() {
                     reglages.palette.map(|p| p.nom()),
                     Some(valeur.as_str()),
                     "« {} » : `palette={valeur}` doit atterrir dans le champ `palette`",
+                    animation.nom()
+                ),
+                // Ajoutée par #150, vérifiée comme les autres.
+                "largeur" => assert_eq!(
+                    reglages.largeur,
+                    2,
+                    "« {} » : `largeur=2` doit atterrir dans le champ `largeur`",
                     animation.nom()
                 ),
                 autre => unreachable!("« {autre} » n'est pas une clé connue de ce test"),
@@ -1167,6 +1176,8 @@ fn valeur_valide(cle: &str) -> String {
         "sonde" => "kraken2023elite:coolant-temp".to_owned(),
         // Ajoutée par #126. Celle que Nico emploie sur ses bandes WLED.
         "palette" => "light-pink".to_owned(),
+        // Ajoutée par #150. 2 n'a rien de particulier : ni une borne, ni le défaut (10 depuis l'essai boîtier du 2026-10-31).
+        "largeur" => "2".to_owned(),
         autre => panic!("« {autre} » n'est pas une clé connue de ce test"),
     }
 }
@@ -1203,6 +1214,8 @@ fn valeurs_distinctes(cle: &str) -> Vec<(&'static str, &'static str)> {
         // passant par le bleu. Deux palettes qui peindraient la même image à
         // tous les pas rendraient l'une des deux inutile.
         "palette" => vec![("light-pink", "glace")],
+        // Ajoutée par #150 : les deux bornes, dix bandes contre une.
+        "largeur" => vec![("1", "10")],
         autre => panic!("« {autre} » n'est pas une clé connue de ce test"),
     }
 }
@@ -1227,6 +1240,8 @@ fn valeur_par_defaut(cle: &str, defaut: &Reglages) -> String {
         "couleur" => hexa(defaut.couleur),
         "vitesse" => defaut.vitesse.to_string(),
         "direction" | "sens" => slug_direction(defaut.direction).to_owned(),
+        // Ajoutée par #150.
+        "largeur" => defaut.largeur.to_string(),
         autre => panic!("« {autre} » n'est pas une clé connue de ce test"),
     }
 }
@@ -1278,6 +1293,8 @@ fn valeurs_invalides(cle: &str) -> &'static [&'static str] {
             "party",
             "0",
         ],
+        // Ajoutée par #150 : les refus de l'issue (`0`, `11`, `2.5`), puis les fautes de la vitesse.
+        "largeur" => &["0", "11", "2.5", "-1", "256", "", " 4", "quatre"],
         autre => panic!("« {autre} » n'est pas une clé connue de ce test"),
     }
 }

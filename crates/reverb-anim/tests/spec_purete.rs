@@ -53,6 +53,8 @@ fn rendre_toutes_les_images_du_catalogue_n_ouvre_aucun_descripteur() {
         // près — un test d'intention de #126 le fige —, donc ce témoin observe
         // exactement ce qu'il observait.
         palette: None,
+        // #150 : `largeur` rejoint `Reglages` ; 10 est son défaut (essai boîtier du 2026-10-31), sans effet hors `course`.
+        largeur: 10,
     };
 
     // Mesure à blanc d'abord : `read_dir` ouvre lui-même un descripteur, et c'est la **variation**

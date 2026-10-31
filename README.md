@@ -156,7 +156,7 @@ echo 'animate arc-en-ciel direction=avant-arriere'
 echo 'animate off'
 ```
 
-Treize familles, réglables par `couleur` (six chiffres hexadécimaux), `vitesse` (0.1 à 10, au dixième) et
+Quatorze familles, réglables par `couleur` (six chiffres hexadécimaux), `vitesse` (0.1 à 10, au dixième) et
 `direction`. Chacune n'accepte que ce qu'elle sait porter — une clé de trop fait refuser la
 commande **entière**, pas seulement la clé.
 
@@ -175,6 +175,7 @@ commande **entière**, pas seulement la clé.
 | `bougie` | **chaque LED vacille seule, par creux irréguliers** | couleur, vitesse |
 | `nuee` | **un champ de bruit dérive à travers le boîtier** | couleur, vitesse |
 | `artifice` | **des éclats naissent au hasard et se propagent en sphère** | couleur, vitesse |
+| `course` | **des bandes défilent sur une palette posée sur le boîtier** | couleur, vitesse, direction, **largeur** |
 
 Partout où `couleur` figure, **`palette` la remplace** (voir ci-dessous).
 
@@ -261,12 +262,47 @@ quand sa diagonale vaut 1,73. Mesuré par le test d'intention avant qu'aucun œi
 
 - **Plasma** — transposable, mais très proche de `vague` munie d'une palette. Une famille de plus
   pour une différence que l'œil ne ferait pas.
-- **Chase, Running, Scanner, Theater, Larson, Meteor** — 1D par construction.
+- **Chase, Scanner, Theater, Larson, Meteor** — 1D par construction.
+- **Running** était rangé ici à tort, et il est devenu [`course`](#course--running-sur-une-palette-posée) (#150) : il
+  ne dépend que d'une place le long d'un axe, comme `vague`.
 - **Glitter, Sparkle** — déjà couverts par `scintillement`.
 
 ⚠️ **Les trois sont réécrites, jamais recopiées** : le code de WLED est du C++ à état, lié à son API
 de segments. La question de licence est traitée avec [les palettes](#les-palettes--treize-dégradés-repris-de-wled),
 qui, elles, reprennent des données.
+
+#### `course` — des bandes qui portent la palette
+
+```bash
+echo 'animate course palette=red-flash direction=bas-haut vitesse=2'
+```
+
+Née de **Running** de WLED (#150), réécrite comme les trois autres, puis écartée de son modèle sur
+un point, après essai devant le boîtier.
+
+| | `vague` | `course` |
+|---|---|---|
+| bandes | une seule ondulation sur l'étendue | `10 / largeur` bandes |
+| sous `couleur` | onde d'intensité | onde d'intensité |
+| sous `palette` | teinte et intensité, l'index replié en aller-retour | **chaque bande porte la palette entière**, sans enveloppe : la palette porte ses propres noirs |
+
+Sous `red-flash` en `bas-haut`, l'éclat pâle naît en bas et monte, et un nouveau repart d'en bas
+quand il atteint le haut.
+
+⚠️ **Running pose la palette sur le ruban, et c'est ce qui a été essayé d'abord.** Devant le
+boîtier, le 2026-10-31 : sous `red-flash`, noire à ses deux bouts, le bas et le haut restaient
+sombres et le pâle collé au milieu, pendant que les bandes passaient dessus. Nico : « j'aimerais que
+ce soit le pâle qui parte d'en bas et monte, pas le noir ». La palette portée l'a remplacée, sans
+option pour revenir à l'autre.
+
+`largeur` va de 1 (dix bandes) à 10 (une seule), **10 par défaut**, la valeur retenue devant le
+boîtier, et le défaut ne s'écrit pas. Une LED voit passer une bande par cycle, quelle que soit la
+largeur. Elle lit la même place que `vague`, donc le schéma de la vue de face (#148).
+
+⚠️ **Fluidité : une bande large et une vitesse basse.** À vingt images par seconde (le plancher du
+matériel), la crête pâle de `red-flash` — moins d'un quart de la palette — ne couvre qu'environ
+5 cm sous `largeur=5`, l'écart de deux LED d'un anneau : elle saute de LED en LED. À
+`largeur=10 vitesse=2`, elle s'étale sur deux ou trois LED et glisse.
 
 #### Les palettes — treize dégradés, repris de WLED
 

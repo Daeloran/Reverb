@@ -225,6 +225,9 @@ pub struct Reglages {
     /// ensemble ne sont pas une clé de trop mais une **ambiguïté**, rien ne
     /// disant laquelle gagne.
     pub palette: Option<Palette>,
+    /// La période des bandes de `course`, en dixièmes de l'étendue : de 1 (dix
+    /// bandes) à 10 (une seule, comme `vague`). Seule `course` l'accepte (#150).
+    pub largeur: u8,
 }
 
 impl Default for Reglages {
@@ -232,6 +235,7 @@ impl Default for Reglages {
         Reglages {
             couleur: Rgb::new(0xff, 0x40, 0xff),
             vitesse: 3.0,
+            largeur: LARGEUR_DEFAUT,
             sonde: None,
             palette: None,
             // `horaire` : choisie quand c'était la seule direction où les dix
@@ -310,10 +314,12 @@ enum Famille {
     Nuee,
     /// Des éclats naissent au hasard et se propagent en sphère (#127).
     Artifice,
+    /// Des bandes qui défilent sur une palette **fixe** — Running de WLED (#150).
+    Course,
 }
 
 /// Nom et famille, dans l'ordre du [`CATALOGUE`].
-const FAMILLES: [(&str, Famille); 13] = [
+const FAMILLES: [(&str, Famille); 14] = [
     ("vague", Famille::Vague),
     ("comete", Famille::Comete),
     ("respiration", Famille::Respiration),
@@ -327,6 +333,7 @@ const FAMILLES: [(&str, Famille); 13] = [
     ("bougie", Famille::Bougie),
     ("nuee", Famille::Nuee),
     ("artifice", Famille::Artifice),
+    ("course", Famille::Course),
 ];
 
 /// Les animations que le démon sait jouer.
@@ -351,6 +358,8 @@ pub const CATALOGUE: &[&str] = &[
     "bougie",
     "nuee",
     "artifice",
+    // #150, **en dernier** : les boutons de la fenêtre suivent cet ordre.
+    "course",
 ];
 
 /// Les clés acceptées par une animation qui se colore.
@@ -371,6 +380,14 @@ const SANS_DIRECTION: &[&str] = &["couleur", "palette", "vitesse"];
 /// **exigée** — une animation qui ne pourrait jamais rien relever afficherait un
 /// blanc pulsant permanent que rien n'expliquerait.
 const SUIT_UNE_SONDE: &[&str] = &["vitesse", "sonde"];
+/// Les clés de `course` : celles d'une famille qui se colore, plus la largeur
+/// de ses bandes (#150).
+const AVEC_LARGEUR: &[&str] = &["couleur", "palette", "vitesse", "direction", "largeur"];
+
+/// Largeur des bandes de `course` quand rien n'est dit : une seule bande sur
+/// l'étendue, la valeur validée devant le boîtier le 2026-10-31. Elle ne
+/// s'écrit pas, pour que les fichiers restent courts.
+const LARGEUR_DEFAUT: u8 = 10;
 
 /// Une animation du catalogue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,6 +447,7 @@ impl Animation {
             | Famille::Bougie
             | Famille::Nuee
             | Famille::Artifice => SANS_DIRECTION,
+            Famille::Course => AVEC_LARGEUR,
             _ => AVEC_COULEUR,
         }
     }
@@ -469,6 +487,7 @@ impl Animation {
             direction,
             sonde,
             palette,
+            largeur,
         } = reglages;
         let tous = [
             ("couleur", couleur_hexa(*couleur)),
@@ -479,6 +498,7 @@ impl Animation {
             ("vitesse", ecrire_vitesse(*vitesse)),
             ("direction", direction.slug().to_owned()),
             ("sonde", sonde.clone().unwrap_or_default()),
+            ("largeur", largeur.to_string()),
         ];
         tous.into_iter()
             .filter(|(cle, _)| self.parametres_acceptes().contains(cle))
@@ -490,6 +510,8 @@ impl Animation {
             .filter(|(cle, _)| match *cle {
                 "couleur" => palette.is_none(),
                 "palette" => palette.is_some(),
+                // Le défaut ne s'écrit pas (#150).
+                "largeur" => *largeur != LARGEUR_DEFAUT,
                 _ => true,
             })
             .map(|(cle, valeur)| (cle.to_owned(), valeur))
@@ -525,6 +547,7 @@ impl Animation {
                         Some(Palette::par_nom(valeur).map_err(|e| refus(e.to_string()))?);
                 }
                 "vitesse" => reglages.vitesse = lire_vitesse(valeur).map_err(refus)?,
+                "largeur" => reglages.largeur = lire_largeur(valeur).map_err(refus)?,
                 "direction" => {
                     reglages.direction = Direction::depuis_slug(valeur).ok_or_else(|| {
                         refus(format!(
@@ -852,6 +875,25 @@ impl Animation {
                 teinte_cyclique_de(spatiale - temps),
                 (1.0 + cycle(spatiale - temps)) / 2.0,
             ),
+
+            // `10 / largeur` bandes le long de la direction, qui défilent
+            // d'une période par cycle (#150).
+            //
+            // ⚠️ **Sous palette, chaque bande porte la palette entière**, sans
+            // enveloppe d'intensité : c'est la palette qui porte ses noirs.
+            // Running de WLED la pose au contraire sur le ruban ; essayé devant
+            // le boîtier le 2026-10-31, le bas et le haut restaient noirs et
+            // l'éclat de `red-flash` collé au milieu. Nico : « que ce soit le
+            // pâle qui parte d'en bas et monte ». Sous `couleur`, la bande est
+            // une onde d'intensité.
+            Famille::Course => {
+                let bandes = 10.0 / f32::from(reglages.largeur.max(1));
+                let phase = fraction(bandes * spatiale - temps);
+                match reglages.palette {
+                    Some(palette) => palette.echantillon(phase * 255.0),
+                    None => teinter(reglages.couleur, (1.0 + cycle(phase)) / 2.0),
+                }
+            }
 
             // Une tête vive suivie d'une traînée qui s'éteint. Le reste est
             // noir, ce que le cache de cibles inchangées du démon apprécie.
@@ -1651,6 +1693,14 @@ pub fn lire_vitesse(brut: &str) -> Result<f32, String> {
         ));
     }
     Ok(total as f32 / 10.0)
+}
+
+/// Décode une largeur de bandes : un entier de 1 à 10 (#150).
+fn lire_largeur(brut: &str) -> Result<u8, String> {
+    brut.parse::<u8>()
+        .ok()
+        .filter(|largeur| (1..=10).contains(largeur))
+        .ok_or_else(|| format!("« {brut} » n'est pas une largeur : un entier de 1 à 10"))
 }
 
 /// L'écriture d'une vitesse : `3` et non `3.0`, `0.7` (#149). Une vitesse

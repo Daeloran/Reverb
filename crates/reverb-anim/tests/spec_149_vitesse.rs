@@ -255,6 +255,8 @@ fn empreinte(nom: &str) -> u64 {
                         direction: *direction,
                         sonde: sonde.clone(),
                         palette,
+                        // #150 : `largeur` rejoint `Reglages` ; 10 est son défaut (essai boîtier du 2026-10-31), sans effet hors `course`.
+                        largeur: 10,
                     };
                     for mesure in mesures {
                         for pas in PAS {
@@ -307,8 +309,10 @@ fn les_vitesses_entieres_rendent_les_images_d_avant_a_l_octet_pres() {
     // ou toutes à la fois dit déjà où chercher (une famille seule : son calcul ; toutes : `temps`).
     assert_eq!(
         EMPREINTES.iter().map(|(nom, _)| *nom).collect::<Vec<_>>(),
-        CATALOGUE.to_vec(),
-        "appareil : la table couvre tout le catalogue, dans son ordre"
+        // #150 : le catalogue commence par ces treize, dans l'ordre ; `course`, ajoutée après,
+        // n'a pas d'image d'avant à garder.
+        CATALOGUE[..EMPREINTES.len()].to_vec(),
+        "appareil : la table couvre les treize premières familles du catalogue, dans son ordre"
     );
 
     let mut fautes = Vec::new();

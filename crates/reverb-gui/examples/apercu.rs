@@ -230,6 +230,7 @@ fn garnir(interface: &Fenetre, socket: Option<String>) {
                     ),
                     accepte_couleur: acceptees.contains(&"couleur"),
                     suit_une_direction: acceptees.contains(&"direction"),
+                    accepte_une_largeur: acceptees.contains(&"largeur"),
                     exige_une_sonde: Animation::par_nom(nom).is_ok_and(|animation| {
                         animation.parametres_obligatoires().contains(&"sonde")
                     }),
