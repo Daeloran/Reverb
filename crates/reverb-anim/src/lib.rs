@@ -384,9 +384,10 @@ const SUIT_UNE_SONDE: &[&str] = &["vitesse", "sonde"];
 /// de ses bandes (#150).
 const AVEC_LARGEUR: &[&str] = &["couleur", "palette", "vitesse", "direction", "largeur"];
 
-/// Largeur des bandes de `course` quand rien n'est dit : deux bandes et demie
-/// sur l'étendue. Elle ne s'écrit pas, pour que les fichiers restent courts.
-const LARGEUR_DEFAUT: u8 = 4;
+/// Largeur des bandes de `course` quand rien n'est dit : une seule bande sur
+/// l'étendue, la valeur validée devant le boîtier le 2026-10-31. Elle ne
+/// s'écrit pas, pour que les fichiers restent courts.
+const LARGEUR_DEFAUT: u8 = 10;
 
 /// Une animation du catalogue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -875,19 +876,23 @@ impl Animation {
                 (1.0 + cycle(spatiale - temps)) / 2.0,
             ),
 
-            // Running de WLED (#150) : `10 / largeur` bandes le long de la
-            // direction, qui défilent d'une période par cycle.
+            // `10 / largeur` bandes le long de la direction, qui défilent
+            // d'une période par cycle (#150).
             //
-            // ⚠️ **La teinte ne dépend que de la place, jamais du temps.** C'est
-            // ce qui la sépare de `vague`, dont la teinte voyage avec l'onde :
-            // ici la palette est posée sur le boîtier, et les bandes la
-            // traversent — l'éclat de `red-flash` reste au milieu.
+            // ⚠️ **Sous palette, chaque bande porte la palette entière**, sans
+            // enveloppe d'intensité : c'est la palette qui porte ses noirs.
+            // Running de WLED la pose au contraire sur le ruban ; essayé devant
+            // le boîtier le 2026-10-31, le bas et le haut restaient noirs et
+            // l'éclat de `red-flash` collé au milieu. Nico : « que ce soit le
+            // pâle qui parte d'en bas et monte ». Sous `couleur`, la bande est
+            // une onde d'intensité.
             Famille::Course => {
                 let bandes = 10.0 / f32::from(reglages.largeur.max(1));
-                teinter(
-                    teinte_de(spatiale),
-                    (1.0 + cycle(bandes * spatiale - temps)) / 2.0,
-                )
+                let phase = fraction(bandes * spatiale - temps);
+                match reglages.palette {
+                    Some(palette) => palette.echantillon(phase * 255.0),
+                    None => teinter(reglages.couleur, (1.0 + cycle(phase)) / 2.0),
+                }
             }
 
             // Une tête vive suivie d'une traînée qui s'éteint. Le reste est
