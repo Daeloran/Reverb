@@ -72,6 +72,8 @@ fn reglages(vitesse: f32) -> Reglages {
         direction: Direction::HautBas,
         sonde: None,
         palette: None,
+        // #150 : `largeur` rejoint `Reglages` ; 4 est son défaut, sans effet hors `course`.
+        largeur: 4,
     }
 }
 
@@ -188,6 +190,7 @@ fn profil(globale: f32, de_zone: f32) -> Profil {
                 direction: Direction::ArriereAvant,
                 sonde: None,
                 palette: None,
+                largeur: 4,
             },
         )),
     );

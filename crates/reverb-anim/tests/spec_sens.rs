@@ -544,10 +544,17 @@ fn catalogue() -> Vec<(&'static str, Animation)> {
 /// Le filtre lit `parametres_acceptes`, seule source de vérité : une famille qui gagnerait un jour
 /// le réglage `direction` rejoindrait ces tests d'elle-même, et celle qui le perd en sort de même —
 /// ce que #119 vient de démontrer.
+///
+/// ⚠️ **#150 en écarte `course`, qui accepte pourtant `direction`.** Ses bandes se répètent toutes
+/// les `largeur / 10` de l'étendue (2,5 bandes au défaut) : deux sondes de ce banc séparées de plus
+/// d'une demi-période — les ventilateurs du radiateur le sont — y lisent un retard replié, de
+/// signe trompeur, alors que le motif défile dans le bon sens. Le sens de `course` est mesuré par
+/// `spec_150_course.rs` sur toutes les LED à la fois.
 fn dirigees() -> Vec<&'static str> {
     CATALOGUE
         .iter()
         .copied()
+        .filter(|nom| *nom != "course")
         .filter(|nom| {
             Animation::par_nom(nom)
                 .expect("le catalogue s'ouvre")

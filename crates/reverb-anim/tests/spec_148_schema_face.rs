@@ -640,9 +640,12 @@ fn les_cinq_familles_dirigees_distinguent_deux_led_de_chaque_ventilateur_couche(
     // L'existence d'un tel pas, sur un cycle entier à la vitesse 1 : c'est ce que le critère
     // écrit, et c'est le plus faible qui attrape le défaut — aujourd'hui, les huit LED d'un couché
     // sont identiques à **tous** les pas, quelle que soit la famille.
+    // #150 : `course` accepte aussi une direction ; ce recoupement porte sur les treize familles
+    // que #148 connaissait. Sa lecture du schéma de face est vérifiée par `spec_150_course.rs`.
     let dirigees: Vec<&str> = CATALOGUE
         .iter()
         .copied()
+        .filter(|nom| *nom != "course")
         .filter(|nom| animation(nom).parametres_acceptes().contains(&"direction"))
         .collect();
     assert_eq!(
@@ -852,6 +855,8 @@ fn empreinte(nom: &str, directions: &[Direction]) -> u64 {
                             direction: *direction,
                             sonde: sonde.clone(),
                             palette,
+                            // #150 : `largeur` rejoint `Reglages` ; 4 est son défaut, sans effet hors `course`.
+                            largeur: 4,
                         };
                         for mesure in mesures {
                             for pas in PAS {

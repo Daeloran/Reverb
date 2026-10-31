@@ -180,6 +180,8 @@ fn reglage(animation: Option<&str>, couleur: Rgb, vitesse: f32, direction: Direc
         // Champ ajouté par #126. `None` = « aucune palette », le comportement
         // d'avant : ces témoins observent exactement ce qu'ils observaient.
         palette: None,
+        // #150 : la fenêtre porte la `largeur` de `course` ; 4 est son défaut, sans effet ailleurs.
+        largeur: 4,
     }
 }
 
@@ -887,6 +889,7 @@ fn arc_en_ciel_ne_rapporte_aucune_couleur_et_l_animation_reste_bien_presente() {
             direction: DIRECTION_LUE,
             sonde: None,
             palette: None,
+            largeur: 4,
         },
     );
     let ResponseLine::Anim { reglages, .. } = &ligne else {
@@ -943,6 +946,7 @@ fn ce_que_le_demon_ecrit_se_relit_pour_chaque_animation_du_catalogue() {
                     direction,
                     sonde: None,
                     palette: None,
+                    largeur: 4,
                 };
                 let lu = eclairage_lu(&reponse(&[ligne_du_demon(nom, &ecrits)]));
                 assert_eq!(
@@ -1067,6 +1071,7 @@ fn adopter_au_demarrage_une_animation_deja_en_cours_prend_son_nom_et_ses_reglage
             direction: DIRECTION_LUE,
             sonde: None,
             palette: None,
+            largeur: 4,
         },
     )]));
     assert!(
@@ -1133,6 +1138,7 @@ fn adopter_une_autre_animation_ecrit_ce_qui_est_rapporte_et_garde_le_reste() {
             direction: DIRECTION_LUE,
             sonde: None,
             palette: None,
+            largeur: 4,
         },
     )]));
     assert!(
@@ -1231,6 +1237,7 @@ fn apres_adoption_bouger_la_vitesse_envoie_la_couleur_et_la_direction_du_demon()
             direction: DIRECTION_LUE,
             sonde: None,
             palette: None,
+            largeur: 4,
         },
     )]));
     assert!(fenetre.adopter(&lu), "une animation tournait déjà");
@@ -1277,6 +1284,7 @@ fn apres_adoption_bouger_la_vitesse_envoie_la_couleur_et_la_direction_du_demon()
             direction: DIRECTION_LUE,
             sonde: None,
             palette: None,
+            largeur: 4,
         },
     )]));
     assert!(

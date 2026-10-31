@@ -389,6 +389,10 @@ fn les_dix_familles_se_reencodent_et_se_redecodent_sans_perte() {
         if acceptes.contains(&"sonde") {
             temoin.sonde = Some(SONDE.to_owned());
         }
+        // #150 : `course` accepte `largeur`, dont le défaut (4) ne s'écrit pas.
+        if acceptes.contains(&"largeur") {
+            temoin.largeur = 7;
+        }
 
         // ⚠️ **L'aller-retour se vérifie sur les DEUX branches depuis #126**, et
         // c'est la seule chose que cette issue change ici. `couleur` et

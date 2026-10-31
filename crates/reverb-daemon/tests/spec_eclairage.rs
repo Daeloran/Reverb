@@ -100,6 +100,8 @@ fn reglages_temoins() -> Reglages {
         // près — un test d'intention de #126 le fige —, donc ce témoin observe
         // exactement ce qu'il observait.
         palette: None,
+        // #150 : `largeur` rejoint `Reglages` ; 4 est son défaut, sans effet hors `course`.
+        largeur: 4,
     }
 }
 
@@ -538,6 +540,8 @@ fn reglages_acceptables(animation: Animation) -> Reglages {
                 // aller-retour par « eclairage.conf » a son propre test, plus
                 // bas dans ce fichier.
                 "palette" => return None,
+                // Étendu pour #150 : `course` accepte `largeur`. 7, hors du défaut (4).
+                "largeur" => "7".to_owned(),
                 autre => panic!(
                     "« {autre} » est un paramètre d'animation que ce test ne sait pas fabriquer : \
                      l'étendre plutôt que le contourner."

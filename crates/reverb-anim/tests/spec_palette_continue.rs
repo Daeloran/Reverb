@@ -362,6 +362,8 @@ fn reglages_sans_palette(animation: &Animation, direction: Direction) -> Reglage
         },
         sonde: None,
         palette: None,
+        // #150 : `largeur` rejoint `Reglages` ; 4 est son défaut, sans effet hors `course`.
+        largeur: 4,
     }
 }
 
@@ -472,9 +474,13 @@ fn chaque_famille_qui_accepte_une_palette_est_dans_un_des_trois_camps() {
         "une famille est déclarée dans deux camps à la fois : {declarees:?}"
     );
 
+    // #150 : `course` accepte aussi `palette`, mais elle l'échantillonne à sa place et non au fil
+    // du temps — elle n'appartient à aucun des trois camps de cette issue. Sa palette fixe est
+    // vérifiée par `spec_150_course.rs`.
     let mut avec_palette: Vec<&str> = CATALOGUE
         .iter()
         .copied()
+        .filter(|nom| *nom != "course")
         .filter(|nom| animation(nom).parametres_acceptes().contains(&"palette"))
         .collect();
     avec_palette.sort_unstable();

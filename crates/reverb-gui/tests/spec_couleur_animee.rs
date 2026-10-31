@@ -195,6 +195,8 @@ fn reglage(animation: Option<&str>) -> Reglage {
         direction: rang(DIRECTION),
         // Champ ajouté par #126 : « aucune palette », le comportement d'avant.
         palette: None,
+        // #150 : la fenêtre porte la `largeur` de `course` ; 4 est son défaut, sans effet ailleurs.
+        largeur: 4,
     }
 }
 
@@ -1140,6 +1142,7 @@ fn une_zone_visee_recoit_la_couleur_sous_la_forme_que_l_animation_permet() {
                             direction: DIRECTION,
                             sonde: None,
                             palette: None,
+                            largeur: 4,
                         }),
                 },
                 // `arc-en-ciel` produit ses propres teintes : « dans la couleur choisie » n'y a
