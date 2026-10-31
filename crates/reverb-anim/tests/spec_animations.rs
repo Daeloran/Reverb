@@ -194,6 +194,21 @@ impl Led {
             .y
     }
 
+    /// Sa hauteur sur le schéma de la vue de face (issue #148).
+    ///
+    /// Pour un ventilateur : `centre.y + 55 · cos a`, avec `a` l'angle relevé de la LED — la
+    /// formule de l'issue, recalculée ici depuis l'API publique. Une barrette garde sa hauteur
+    /// réelle, qui est déjà sa place sur le schéma.
+    fn hauteur_de_face(self, geometrie: &Geometrie) -> f32 {
+        match self {
+            Led::Ventilateur(position, led) => {
+                let angle = f32::from(geometrie.orientation(position).angle_led(led)).to_radians();
+                geometrie.centre_ventilateur(position).y + 55.0 * angle.cos()
+            }
+            Led::Barrette(..) => self.hauteur(geometrie),
+        }
+    }
+
     /// Sa couleur dans une image.
     fn couleur(self, image: &Image) -> Rgb {
         match self {
@@ -963,12 +978,25 @@ fn une_onde_verticale_atteint_ensemble_les_led_declarees_a_la_meme_hauteur() {
     // ⚠️ Les groupes de même hauteur sont **demandés à la géométrie**, jamais écrits ici : la
     // table n'est pas encore mesurée, et un test qui nommerait deux LED précises spécifierait une
     // mesure que personne n'a faite.
+    //
+    // ⚠️ **Restreint par l'issue #148, qui change la spécification de « même hauteur ».** Sous une
+    // direction globale, une LED de ventilateur se lit désormais à sa hauteur sur le **schéma de la
+    // vue de face**, et non plus à sa hauteur 3D : les huit LED d'un ventilateur couché, toutes à la
+    // même hauteur dans le boîtier, n'y sont plus à la même hauteur, et ne reçoivent plus la même
+    // couleur — c'est l'objet même de #148. Les groupes sont donc formés des LED qui partagent
+    // **à la fois** leur hauteur 3D et leur hauteur de face : l'intention de ce test, « une onde qui
+    // monte atteint ensemble deux LED à la même hauteur, quels que soient leur ventilateur et leur
+    // numéro d'ordre », y reste entière, et vraie avant comme après #148. L'exigence complète sur la
+    // hauteur de face est portée par `spec_148_schema_face.rs`.
     let geometrie = geometrie_de_test();
 
-    let mut par_hauteur: BTreeMap<u32, Vec<Led>> = BTreeMap::new();
+    let mut par_hauteur: BTreeMap<(u32, u32), Vec<Led>> = BTreeMap::new();
     for led in toutes_les_led() {
         par_hauteur
-            .entry(cle_hauteur(led.hauteur(&geometrie)))
+            .entry((
+                cle_hauteur(led.hauteur(&geometrie)),
+                cle_hauteur(led.hauteur_de_face(&geometrie)),
+            ))
             .or_default()
             .push(led);
     }

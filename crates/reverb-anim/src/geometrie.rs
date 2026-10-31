@@ -387,6 +387,27 @@ impl Geometrie {
         })
     }
 
+    /// Position d'une LED de ventilateur **sur le schéma de la vue de face**
+    /// (#148) : centre réel, anneau posé à plat dans le plan de la vue, midi
+    /// vers le haut, l'angle relevé tournant vers l'avant.
+    ///
+    /// Seules `y` (hauteur) et `z` (profondeur) ont un sens ; `x` reste celle
+    /// du centre. C'est le dessin de la vue de face de la fenêtre, au rayon
+    /// près : c'est ainsi que Nico lit son boîtier, et une onde verticale ne
+    /// doit plus traverser d'un bloc les six ventilateurs couchés.
+    pub fn led_de_face(&self, position: Position, led: usize) -> Option<Point> {
+        if led >= LEDS_PER_FAN as usize {
+            return None;
+        }
+        let centre = CENTRES[position.index()].0;
+        let angle = f32::from(self.orientations[position.index()].angle_led(led)).to_radians();
+        Some(Point {
+            x: centre.x,
+            y: centre.y + RAYON * angle.cos(),
+            z: centre.z - RAYON * angle.sin(),
+        })
+    }
+
     /// Le centre d'un ventilateur, indépendant de son orientation.
     pub fn centre_ventilateur(&self, position: Position) -> Point {
         CENTRES[position.index()].0

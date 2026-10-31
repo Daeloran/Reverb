@@ -96,6 +96,11 @@
 //! régénèrent que si Nico décide, en connaissance de cause, que le rendu des six familles doit
 //! changer ; ce n'est pas ce que l'issue #75 demande.
 //!
+//! ⚠️ **C'est ce que l'issue #148 a décidé, et ces empreintes ont été retirées.** Elle place les LED
+//! de ventilateur sur le schéma de la vue de face sous toute direction globale : les trente images
+//! figées ici changent toutes, par décision. Le filet des directions locales, que #148 ne touche
+//! pas, est repris par `spec_148_schema_face.rs` — voir la section 5 plus bas.
+//!
 //! Aucun accès matériel : `reverb-anim` est pur, ses tests aussi.
 
 use reverb_anim::{Animation, CATALOGUE, Direction, Geometrie, Image, Reglages};
@@ -213,15 +218,6 @@ fn reglages(direction: Direction, vitesse: u8) -> Reglages {
 /// La géométrie du boîtier réel : c'est celle dont Nico juge le rendu à l'œil.
 fn geometrie() -> Geometrie {
     Geometrie::mesuree()
-}
-
-/// Une seconde géométrie, sans orientation particulière, construite par le décodeur.
-fn geometrie_plate() -> Geometrie {
-    let lignes: Vec<String> = Position::ALL
-        .iter()
-        .map(|position| format!("{} 0 horaire", position.slug()))
-        .collect();
-    Geometrie::decoder(&lignes.join("\n")).expect("la géométrie de test est valide")
 }
 
 /// Les huit couleurs d'un ventilateur dans une image, cherchées **par position**.
@@ -771,151 +767,26 @@ fn sous_une_direction_globale_deux_ventilateurs_de_meme_montage_different() {
 // 5 — non-régression : les six directions d'origine rendent les mêmes images
 // ---------------------------------------------------------------------------
 
-/// Les pas échantillonnés, mêlant petits nombres, bords de période et grands nombres.
-const PAS: [u32; 18] = [
-    0, 1, 2, 3, 5, 7, 11, 17, 29, 41, 59, 60, 61, 89, 119, 120, 240, 901,
-];
-
-/// Les vitesses échantillonnées : les deux bornes du domaine, et la valeur par défaut.
-const VITESSES: [u8; 3] = [1, 3, 10];
-
-/// L'empreinte d'une image : FNV-1a 64 bits sur les 372 octets, dans un ordre canonique.
-///
-/// Les ventilateurs sont parcourus dans l'ordre de `Position::ALL` et cherchés **par position**,
-/// jamais par indice de tableau : l'ordre du tableau n'est pas un contrat.
-fn empreinte_image(image: &Image) -> u64 {
-    let mut valeur: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut avale = |octet: u8| {
-        valeur ^= u64::from(octet);
-        valeur = valeur.wrapping_mul(0x0000_0100_0000_01b3);
-    };
-    for position in Position::ALL {
-        for couleur in ventilateur(image, position) {
-            avale(couleur.r);
-            avale(couleur.g);
-            avale(couleur.b);
-        }
-    }
-    for slot in 0..SLOT_COUNT {
-        for couleur in image.barrettes[slot] {
-            avale(couleur.r);
-            avale(couleur.g);
-            avale(couleur.b);
-        }
-    }
-    valeur
-}
-
-/// L'empreinte d'un couple (famille, direction) : deux géométries, deux couleurs, trois vitesses,
-/// dix-huit pas — 216 images repliées en un seul nombre.
-fn empreinte_couple(animation: &Animation, direction: Direction) -> u64 {
-    let geometries = [geometrie(), geometrie_plate()];
-    let couleurs = [TEMOIN, Rgb::new(0x20, 0xff, 0x80)];
-    let mut valeur: u64 = 0xcbf2_9ce4_8422_2325;
-    for geometrie in &geometries {
-        for couleur in couleurs {
-            for vitesse in VITESSES {
-                for pas in PAS {
-                    let reglages = Reglages {
-                        couleur,
-                        vitesse,
-                        direction,
-                        ..Reglages::default()
-                    };
-                    valeur ^= empreinte_image(&animation.image(geometrie, &reglages, pas));
-                    valeur = valeur.wrapping_mul(0x0000_0100_0000_01b3);
-                }
-            }
-        }
-    }
-    valeur
-}
-
-/// Ce que les familles dirigées rendaient sous les six directions **avant** l'issue #75.
-///
-/// Relevé le 2026-08-02 sur `feature/75-animations`, avant toute modification, en appelant
-/// `Animation::image` — l'API publique.
-///
-/// ⚠️ **Les six lignes de `braise` en ont été retirées par #119**, qui lui refait entièrement son
-/// rendu et lui retire la direction : ses empreintes d'alors décrivent le défaut que l'issue
-/// corrige, et les garder reviendrait à exiger qu'il persiste. Voir [`RETIREE_PAR_119`] — c'est le
-/// seul cas prévu par le paragraphe ci-dessus, « Nico décide, en connaissance de cause, que le
-/// rendu doit changer ». **Aucune des trente autres ne bouge d'un bit**, et c'est ce qui prouve que
-/// #119 n'a touché qu'elle.
-const EMPREINTES: [(&str, &str, u64); 30] = [
-    ("vague", "bas-haut", 0xc699_f733_4a54_c523),
-    ("vague", "haut-bas", 0xd85b_b0e4_ac0e_e055),
-    ("vague", "avant-arriere", 0xf5fa_c281_d1bf_d0c5),
-    ("vague", "arriere-avant", 0x7d94_87ca_2723_1267),
-    ("vague", "horaire", 0xcc1b_97a1_ea8c_54d7),
-    ("vague", "antihoraire", 0x68bb_e061_e4f7_f85d),
-    ("comete", "bas-haut", 0x812f_2e15_5a81_885f),
-    ("comete", "haut-bas", 0xb518_0324_c364_b207),
-    ("comete", "avant-arriere", 0x57a9_b809_8de5_9a75),
-    ("comete", "arriere-avant", 0xc80c_016f_8414_a8db),
-    ("comete", "horaire", 0x1d17_1420_af97_6675),
-    ("comete", "antihoraire", 0x4668_704f_60e7_cadf),
-    ("respiration", "bas-haut", 0x4d68_cf5c_a79a_a6c9),
-    ("respiration", "haut-bas", 0x1d9e_ee21_26e4_e591),
-    ("respiration", "avant-arriere", 0x5c1b_2313_6f81_e3bd),
-    ("respiration", "arriere-avant", 0xc7e3_acbd_f91a_9241),
-    ("respiration", "horaire", 0xa119_2eb6_f117_7cad),
-    ("respiration", "antihoraire", 0x515d_1f09_74d5_9d81),
-    ("arc-en-ciel", "bas-haut", 0x5f8e_42d2_e409_c731),
-    ("arc-en-ciel", "haut-bas", 0x5276_2eae_fec7_0069),
-    ("arc-en-ciel", "avant-arriere", 0x31fe_3671_544c_c365),
-    ("arc-en-ciel", "arriere-avant", 0x97f3_eba4_dd2e_0bed),
-    ("arc-en-ciel", "horaire", 0x7be9_c2c2_3604_ed15),
-    ("arc-en-ciel", "antihoraire", 0x696d_82a0_84e5_23fd),
-    ("balayage", "bas-haut", 0xa97b_8e05_bc0d_fc97),
-    ("balayage", "haut-bas", 0x6043_ab2d_13c1_1fcb),
-    ("balayage", "avant-arriere", 0x680a_7d96_a954_be97),
-    ("balayage", "arriere-avant", 0xdb16_45a1_580c_dfa1),
-    ("balayage", "horaire", 0xf6fd_4fda_69c6_9ec1),
-    ("balayage", "antihoraire", 0xb4e8_7b87_0c15_9f7d),
-];
-
-#[test]
-fn les_six_familles_sous_les_six_directions_rendent_exactement_les_memes_images() {
-    // Test d'intention n° 5 de l'issue, et critère d'acceptation : « les six directions existantes
-    // produisent **exactement** les mêmes images qu'avant ».
-    //
-    // C'est le filet du chantier. L'approche technique annonce que `projection()` change de
-    // signature — « une direction locale ne se projette pas sur les bornes du boîtier » — et une
-    // signature qui change est exactement le moment où une globale se décale d'un cheveu sans que
-    // personne ne le voie. Six familles × six directions × 216 images : 7 776 images comparées.
-    //
-    // ⚠️ Si une empreinte bouge, c'est le code qu'on corrige, jamais la table.
-    //
-    // ⚠️ **Cinq familles depuis #119**, qui a retiré `braise` du domaine — voir
-    // [`RETIREE_PAR_119`]. La règle ci-dessus tient pour les cinq qui restent : c'est une famille
-    // qui sort de la table, jamais une empreinte qu'on recalcule pour la faire passer.
-    assert_eq!(
-        EMPREINTES.len(),
-        anciennes_dirigees().len() * GLOBALES.len(),
-        "la table doit couvrir les cinq familles dirigées sous les six directions"
-    );
-    for (nom, slug, attendue) in EMPREINTES {
-        let animation = Animation::par_nom(nom)
-            .unwrap_or_else(|erreur| panic!("« {nom} » est au catalogue : {erreur}"));
-        let direction = GLOBALES
-            .into_iter()
-            .find(|d| d.slug() == slug)
-            .unwrap_or_else(|| panic!("« {slug} » est une des six directions d'origine"));
-        let obtenue = empreinte_couple(&animation, direction);
-        assert_eq!(
-            obtenue, attendue,
-            "« {nom} » sous « {slug} » ne rend plus les mêmes images : empreinte \
-             0x{obtenue:016x}, attendue 0x{attendue:016x}. L'issue #75 ajoute des directions, \
-             elle n'en modifie aucune."
-        );
-    }
-}
+// ⚠️ **Ce filet a été retiré par l'issue #148, et ce fichier le dit au lieu de le taire.** Il
+// figeait, par trente empreintes relevées le 2026-08-02, les images des cinq familles dirigées sous
+// les **six directions globales** — l'exigence de #75 : « les six directions existantes produisent
+// exactement les mêmes images qu'avant ». #148 change précisément ces images-là : sous une
+// direction globale, chaque LED de ventilateur se place désormais à sa position sur le schéma de la
+// vue de face, et non plus à sa position 3D (« changement de spécification assumé »). Les trente
+// valeurs décrivaient donc le rendu que l'issue remplace ; les garder reviendrait à exiger qu'il
+// persiste. Aucune ne pouvait être conservée : chacune mêle des ventilateurs dans son empreinte.
+//
+// Ce qui reste vrai de ce filet est repris par `spec_148_schema_face.rs`, qui fige à l'octet près,
+// sur `main` à la révision `19c5254`, les images des cinq familles sous les **deux directions
+// locales** — celles que #75 a ajoutées et que #148 ne touche pas.
 
 #[test]
 fn les_six_familles_d_origine_restent_au_catalogue() {
     // Corollaire du filet : une famille renommée ou retirée ferait échouer le test précédent avec
     // un `panic!` de recherche plutôt qu'un écart d'empreinte. Autant le dire directement.
+    //
+    // ⚠️ Le filet lui-même a été retiré par #148 (voir plus haut) ; ce corollaire reste vrai et
+    // reste exigé.
     for nom in ANCIENNES_FAMILLES {
         assert!(
             CATALOGUE.contains(&nom),

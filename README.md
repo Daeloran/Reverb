@@ -472,22 +472,33 @@ phase propres, tirées d'un hachage de son numéro. Aucun `rand`, aucune horloge
 rendu doit rester reproductible à l'identique dans la fenêtre et dans le démon, sans quoi
 « l'aperçu montre ce que le boîtier reçoit » deviendrait faux sans le dire.
 
-**Un motif traverse le boîtier comme un volume, pas comme une file d'attente.** Chaque LED est
-ramenée à sa position le long de la direction demandée, si bien qu'une onde qui monte atteint en
-même temps deux LED à la même hauteur — quels que soient leur ventilateur, leur barrette et leur
-numéro d'ordre. C'est ce que la [géométrie mesurée](docs/GEOMETRIE.md) rend possible.
+**Un motif traverse le boîtier tel qu'on le voit sur la vue de face** (#148), pas comme une file
+d'attente. Sous une direction globale, chaque LED est ramenée à sa place **sur le schéma de la vue
+de face** : le centre réel du ventilateur, son anneau posé à plat dans le plan de la vue, midi en
+haut et l'angle relevé tournant vers l'avant. Une onde qui monte atteint donc en même temps deux
+LED à la même hauteur sur ce schéma, quels que soient leur ventilateur, leur barrette et leur
+numéro d'ordre. Les barrettes y sont à leur place réelle.
 
-⚠️ **Une onde purement plane aplatit ce qui n'a pas d'épaisseur dans sa direction.** Six
-ventilateurs sur dix sont couchés : leurs vingt-quatre LED sont exactement à la même hauteur, et
-`bas-haut` les allumerait d'un seul bloc. Quatre familles suivent donc l'**écoulement** plutôt que
-la seule position : chaque ventilateur est traversé d'un bord à l'autre depuis un point d'entrée
-relevé à l'œil (`docs/GEOMETRIE.md`), de sorte que le motif le franchit LED par LED même quand la
-direction ne lui donne aucune épaisseur. Sur un ventilateur que la direction n'aplatit pas, cette
-traversée **coïncide** avec la position réelle : ce n'est pas un motif plaqué par-dessus la
-géométrie, c'est son prolongement là où elle se tait.
+⚠️ **C'est un schéma, pas le boîtier en 3D, et c'est voulu.** Six ventilateurs sur dix sont
+couchés : en 3D, leurs vingt-quatre LED sont à la même hauteur, et `bas-haut` les allumait d'un
+seul bloc. Constaté le 2026-07-31, puis de nouveau le 2026-10-31 sous `vague palette=red-flash`,
+où le plafond passait d'un coup du rouge au blanchâtre. La première parade faisait traverser
+chaque ventilateur depuis son entrée d'air. `vague` ne la suivait pas, et sur le plafond le motif
+descendait pendant qu'il montait partout ailleurs. Sur le schéma, aucun ventilateur n'est aplati
+et la parade disparaît.
 
-`vague` s'en tient à la position, seule du catalogue : elle *est* l'onde plane, et la
-démonstration que le boîtier et la RAM sont synchronisés dans l'espace.
+⚠️ **`horaire` tourne dans le plan de la vue de face**, dans le sens des aiguilles d'une montre
+tel qu'on le voit : en haut, de l'arrière vers l'avant. Il tournait auparavant dans le plan
+vitre/hauteur, ce qui ne ressemblait à aucune rotation sur la vue.
+
+⚠️ **Les grandeurs sans axe restent en 3D** : distance à la pompe (`pouls`, `braise`), cube unité
+(`nuee`, `artifice`), angle sur l'anneau (`rotation`). Les directions locales (`bords-centre`,
+`centre-bords`) suivent toujours la traversée de l'objet. Leurs images n'ont pas bougé d'un octet,
+et un test d'intention le vérifie.
+
+⚠️ **À vérifier devant le boîtier** : sur les trois ventilateurs du radiateur, la vue de face place
+l'angle 90° vers l'avant, alors que la table 3D le place vers l'arrière. Si une onde
+`avant-arriere` y paraît inversée, c'est la table 3D qui avait raison.
 
 ### La géométrie
 
