@@ -258,10 +258,10 @@ quand sa diagonale vaut 1,73. Mesuré par le test d'intention avant qu'aucun œi
 - **Glitter, Sparkle** — déjà couverts par `scintillement`.
 
 ⚠️ **Les trois sont réécrites, jamais recopiées** : le code de WLED est du C++ à état, lié à son API
-de segments. La question de licence est traitée avec [les palettes](#les-palettes--douze-dégradés-repris-de-wled),
+de segments. La question de licence est traitée avec [les palettes](#les-palettes--treize-dégradés-repris-de-wled),
 qui, elles, reprennent des données.
 
-#### Les palettes — douze dégradés, repris de WLED
+#### Les palettes — treize dégradés, repris de WLED
 
 ```bash
 echo 'animate vague palette=light-pink vitesse=4'
@@ -270,18 +270,23 @@ echo 'animate pouls palette=atlantica'
 ```
 
 Une palette est un **dégradé à arrêts** dont l'animation tire ses teintes, à la place de sa
-couleur unique. Douze sont livrées, reprises de WLED :
+couleur unique. Treize sont livrées, reprises de WLED :
 
 | | | | |
 |---|---|---|---|
 | `light-pink` | `lava` | `ocean` | `paysage` |
 | `couchant` | `aurore` | `atlantica` | `sakura` |
 | `nuit-avril` | `glace` | `orange-teal` | `sorbet` |
+| `red-flash` | | | |
+
+`red-flash` (#146) est arrivée après les douze de #126, **en dernier** : le menu de la fenêtre
+suit cet ordre, et une palette ajoutée ne déplace pas ce qu'on avait l'habitude de cliquer. C'est
+celle du ruban WLED du PC — noir, rouge, un éclat jaune pâle au milieu, rouge, noir.
 
 ⚠️ **Ça ne coûte aucune pastille de plus, et c'est la raison d'être du choix.** Chaque famille
 calcule déjà une **position scalaire** par LED — la projection sur l'axe demandé, la distance à la
 pompe, l'angle sur l'anneau, la traversée du ventilateur. C'est exactement l'entrée d'une palette.
-Les douze **multiplient** donc les huit familles qui se colorent, au lieu d'en ajouter.
+Les treize **multiplient** donc les huit familles qui se colorent, au lieu d'en ajouter.
 
 ⚠️ **L'index de palette est le scalaire qui place le motif ; la luminosité ne change pas.** C'est
 le modèle de WLED, et c'est ce qui garde à chaque famille son caractère : une vague ondule
@@ -362,10 +367,14 @@ d'avant — un test d'intention le fige octet pour octet —, donc les profils e
 
 ##### Provenance et licence
 
-Les douze dégradés viennent de **WLED** (`wled00/palettes.cpp`), qui les a lui-même importés de
+Les treize dégradés viennent de **WLED** (`wled00/palettes.cpp`), qui les a lui-même importés de
 **cpt-city** (`seaviewsensing.com`) en leur appliquant sa correction gamma. Les valeurs sont
 recopiées **telles que WLED les porte** : ce sont celles qui produisent, sur une bande, l'aspect
 qu'on connaît. Les recalculer donnerait un autre rendu sous le même nom.
+
+`red-flash` a été relevée sur le WLED du PC lui-même (`/json/palx`, WLED 16.0.1, palette n° 66).
+Le même relevé rend `atlantica` à l'identique des valeurs reprises de `palettes.cpp` : la source est
+la même.
 
 ⚠️ **WLED n'est plus sous MIT — il est passé en EUPL-1.2**, une licence copyleft. Reverb est sous
 **GPL-3.0-or-later**, et l'annexe de l'EUPL 1.2 liste GPL-3.0 parmi les licences compatibles : la
