@@ -408,9 +408,9 @@ fn passage(serie: &[f64]) -> f64 {
     (sinus.atan2(cosinus) / std::f64::consts::TAU).rem_euclid(1.0)
 }
 
-/// Le `k` signé qui aligne le mieux les instants de passage sur `k·s`, et cet alignement (de 0 à
-/// 1) : la régression circulaire de `|moyenne de e^{2πi(φ − k·s)}|`, balayée de `−K_MAXIMAL` à
-/// `K_MAXIMAL`.
+/// Le `k` signé qui aligne le mieux les instants de passage sur `k·s`, et cet alignement
+/// (de 0 à 1) : la régression circulaire de `|moyenne de e^{2πi(φ − k·s)}|`, balayée de
+/// `−K_MAXIMAL` à `K_MAXIMAL`.
 ///
 /// `k > 0` : la bande atteint les grands `s` **après** les petits — elle monte, en `bas-haut`.
 fn frequence(places: &[f64], passages: &[f64]) -> (f64, f64) {
