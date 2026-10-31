@@ -156,7 +156,7 @@ echo 'animate arc-en-ciel direction=avant-arriere'
 echo 'animate off'
 ```
 
-Treize familles, réglables par `couleur` (six chiffres hexadécimaux), `vitesse` (1 à 10) et
+Treize familles, réglables par `couleur` (six chiffres hexadécimaux), `vitesse` (0.1 à 10, au dixième) et
 `direction`. Chacune n'accepte que ce qu'elle sait porter — une clé de trop fait refuser la
 commande **entière**, pas seulement la clé.
 
@@ -177,6 +177,13 @@ commande **entière**, pas seulement la clé.
 | `artifice` | **des éclats naissent au hasard et se propagent en sphère** | couleur, vitesse |
 
 Partout où `couleur` figure, **`palette` la remplace** (voir ci-dessous).
+
+⚠️ **Une vitesse se lit au dixième, avec un point** (#149) : `vitesse=0.5` dure deux fois plus
+longtemps que `vitesse=1`. `0.75`, `0,7`, `0` et `10.5` sont refusés en donnant la plage. Une
+vitesse entière s'écrit et se rend **exactement** comme avant — même écriture (`3`, jamais
+`3.0`), mêmes images au bit près, parce que le calcul compte en dixièmes entiers —, si bien que
+les profils et `eclairage.conf` d'avant ne bougent pas. La fenêtre propose des demi-crans, de 0.5
+à 10 ; une vitesse au dixième posée par le socket y est affichée telle quelle.
 
 Huit directions : `bas-haut`, `haut-bas`, `avant-arriere`, `arriere-avant`, `horaire`,
 `antihoraire`, et les deux **locales** — `bords-centre`, `centre-bords`.

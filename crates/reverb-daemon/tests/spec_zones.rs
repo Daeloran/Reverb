@@ -151,7 +151,8 @@ fn animation(nom: &str) -> Animation {
 fn reglages_temoins() -> Reglages {
     Reglages {
         couleur: Rgb::new(0x00, 0xff, 0x00),
-        vitesse: 7,
+        // #149 : vitesse décimale
+        vitesse: 7.0,
         direction: Direction::HautBas,
         // Champ ajouté par #75. Aucune des animations employées ici ne suit de sonde ;
         // `vague` la refuserait même.
@@ -856,11 +857,11 @@ fn deux_zones_animees_differemment_avancent_chacune_a_sa_vitesse() {
     // exactement ce que l'issue refuse.
     let anim = animation("vague");
     let lente = Reglages {
-        vitesse: 1,
+        vitesse: 1.0,
         ..reglages_temoins()
     };
     let rapide = Reglages {
-        vitesse: 10,
+        vitesse: 10.0,
         ..reglages_temoins()
     };
     assert_ne!(

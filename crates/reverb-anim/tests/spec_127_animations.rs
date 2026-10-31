@@ -351,7 +351,8 @@ fn geometrie() -> Geometrie {
 fn reglages(couleur: Rgb, vitesse: u8, direction: Direction) -> Reglages {
     Reglages {
         couleur,
-        vitesse,
+        // #149 : vitesse décimale
+        vitesse: f32::from(vitesse),
         direction,
         ..Reglages::default()
     }
@@ -919,7 +920,7 @@ fn les_trois_familles_acceptent_couleur_vitesse_et_palette() {
             "« {nom} » : la couleur doit atterrir dans son champ"
         );
         assert_eq!(
-            lus.vitesse, 7,
+            lus.vitesse, 7.0,
             "« {nom} » : la vitesse doit atterrir dans son champ"
         );
         assert_eq!(
@@ -985,12 +986,12 @@ fn les_trois_familles_se_reencodent_et_se_redecodent_sans_perte() {
 
         let sans_palette = Reglages {
             couleur: TEMOIN,
-            vitesse: 7,
+            vitesse: 7.0,
             ..Reglages::default()
         };
         let avec_palette = Reglages {
             palette: Some(reverb_anim::Palette::par_nom(LIGHT_PINK).expect("palette du catalogue")),
-            vitesse: 7,
+            vitesse: 7.0,
             ..Reglages::default()
         };
 
@@ -1732,7 +1733,7 @@ fn les_dix_familles_d_avant_rendent_les_images_figees() {
 
         let reglages = Reglages {
             couleur,
-            vitesse,
+            vitesse: f32::from(vitesse),
             direction,
             ..Reglages::default()
         };

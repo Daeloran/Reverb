@@ -269,7 +269,8 @@ fn animation(nom: &str) -> Animation {
 /// **sans palette**, comme le critère n° 1 le demande.
 fn reglages(direction: Direction) -> Reglages {
     Reglages {
-        vitesse: 1,
+        // #149 : vitesse décimale
+        vitesse: 1.0,
         direction,
         ..Reglages::default()
     }
@@ -847,7 +848,7 @@ fn empreinte(nom: &str, directions: &[Direction]) -> u64 {
                     for palette in palettes {
                         let reglages = Reglages {
                             couleur,
-                            vitesse,
+                            vitesse: f32::from(vitesse),
                             direction: *direction,
                             sonde: sonde.clone(),
                             palette,

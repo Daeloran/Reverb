@@ -132,7 +132,8 @@ fn geometrie() -> Geometrie {
 fn reglages(vitesse: u8) -> Reglages {
     Reglages {
         couleur: TEMOIN,
-        vitesse,
+        // #149 : vitesse décimale
+        vitesse: f32::from(vitesse),
         ..Reglages::default()
     }
 }
@@ -298,7 +299,7 @@ fn les_dix_familles_figurent_au_catalogue_et_acceptent_la_vitesse() {
             .reglages(&paires)
             .unwrap_or_else(|erreur| panic!("« {nom} » doit accepter « vitesse=7 » : {erreur}"));
         assert_eq!(
-            lus.vitesse, 7,
+            lus.vitesse, 7.0,
             "« {nom} » : « vitesse=7 » doit atterrir dans le champ `vitesse`"
         );
     }
@@ -380,7 +381,7 @@ fn les_dix_familles_se_reencodent_et_se_redecodent_sans_perte() {
             temoin.couleur = TEMOIN;
         }
         if acceptes.contains(&"vitesse") {
-            temoin.vitesse = 7;
+            temoin.vitesse = 7.0;
         }
         if acceptes.contains(&"direction") {
             temoin.direction = Direction::BordsCentre;

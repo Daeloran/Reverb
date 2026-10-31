@@ -172,10 +172,10 @@ fn place_locale_discrete(direction: Direction, indice: usize, total: usize) -> f
         }
 }
 
-/// Vitesse la plus lente acceptée.
-const VITESSE_MIN: u8 = 1;
-/// Vitesse la plus rapide acceptée.
-const VITESSE_MAX: u8 = 10;
+/// Vitesse la plus lente acceptée, en **dixièmes** (#149) : 0.1.
+const VITESSE_MIN_DIXIEMES: u64 = 1;
+/// Vitesse la plus rapide acceptée, en dixièmes : 10.
+const VITESSE_MAX_DIXIEMES: u64 = 100;
 
 /// Durée d'un cycle complet, en pas, à la vitesse 1.
 ///
@@ -202,7 +202,9 @@ const PERIODE_DERIVE: u64 = 1021;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reglages {
     pub couleur: Rgb,
-    pub vitesse: u8,
+    /// De 0.1 à 10, au dixième (#149). Validée à la lecture par
+    /// [`lire_vitesse`] ; le calcul la reprend en dixièmes entiers.
+    pub vitesse: f32,
     pub direction: Direction,
     /// Le `slug` de la sonde à suivre. Seule `thermique` l'accepte, et elle
     /// l'exige.
@@ -229,7 +231,7 @@ impl Default for Reglages {
     fn default() -> Reglages {
         Reglages {
             couleur: Rgb::new(0xff, 0x40, 0xff),
-            vitesse: 3,
+            vitesse: 3.0,
             sonde: None,
             palette: None,
             // `horaire` : choisie quand c'était la seule direction où les dix
@@ -474,7 +476,7 @@ impl Animation {
                 "palette",
                 palette.map(|p| p.nom().to_owned()).unwrap_or_default(),
             ),
-            ("vitesse", vitesse.to_string()),
+            ("vitesse", ecrire_vitesse(*vitesse)),
             ("direction", direction.slug().to_owned()),
             ("sonde", sonde.clone().unwrap_or_default()),
         ];
@@ -522,7 +524,7 @@ impl Animation {
                     reglages.palette =
                         Some(Palette::par_nom(valeur).map_err(|e| refus(e.to_string()))?);
                 }
-                "vitesse" => reglages.vitesse = vitesse(valeur).map_err(refus)?,
+                "vitesse" => reglages.vitesse = lire_vitesse(valeur).map_err(refus)?,
                 "direction" => {
                     reglages.direction = Direction::depuis_slug(valeur).ok_or_else(|| {
                         refus(format!(
@@ -1420,9 +1422,16 @@ fn distance(un: Point, autre: Point) -> f32 {
 /// En `u64` : au pas `u32::MAX` et à la vitesse 10, le produit déborderait un
 /// `u32` — et paniquerait en debug, donc dans les tests, donc jamais chez
 /// l'utilisateur, ce qui est la pire façon de découvrir un défaut.
-fn temps(pas: u32, vitesse: u8) -> f32 {
-    let avance = (u64::from(pas) * u64::from(vitesse)) % PERIODE;
-    avance as f32 / PERIODE as f32
+///
+/// ⚠️ **En dixièmes entiers** (#149) : le cycle compte `10 × PERIODE`
+/// dixièmes de pas. Pour une vitesse entière `k`, `(pas × 10k mod 1200) / 1200`
+/// est le même rationnel que `(pas × k mod 120) / 120`, et une division IEEE
+/// d'entiers exacts est arrondie correctement : les images d'avant sont
+/// rendues au bit près.
+fn temps(pas: u32, vitesse: f32) -> f32 {
+    let cycle = PERIODE * 10;
+    let avance = (u64::from(pas) * dixiemes(vitesse)) % cycle;
+    avance as f32 / cycle as f32
 }
 
 /// L'horloge du scintillement, entre 0 et 1 — **sans repli sur le cycle**.
@@ -1434,9 +1443,22 @@ fn temps(pas: u32, vitesse: u8) -> f32 {
 /// Bornée plutôt que croissante indéfiniment : un `f32` n'a que vingt-quatre
 /// bits de mantisse, et une horloge qui grandit sans fin finirait par se figer
 /// faute de précision — au bout de quelques jours, sans que rien ne le dise.
-fn derive(pas: u32, vitesse: u8) -> f32 {
-    let avance = (u64::from(pas) * u64::from(vitesse)) % PERIODE_DERIVE;
-    avance as f32 / PERIODE_DERIVE as f32
+///
+/// En dixièmes, comme [`temps`] et pour la même raison.
+fn derive(pas: u32, vitesse: f32) -> f32 {
+    let cycle = PERIODE_DERIVE * 10;
+    let avance = (u64::from(pas) * dixiemes(vitesse)) % cycle;
+    avance as f32 / cycle as f32
+}
+
+/// Une vitesse en dixièmes entiers, bornée : une valeur posée à la main hors
+/// de [`lire_vitesse`] ne peut ni annuler l'animation ni l'emballer.
+fn dixiemes(vitesse: f32) -> u64 {
+    let brut = (vitesse * 10.0).round();
+    if brut.is_nan() {
+        return 30;
+    }
+    (brut.max(0.0) as u64).clamp(VITESSE_MIN_DIXIEMES, VITESSE_MAX_DIXIEMES)
 }
 
 /// La partie fractionnaire, toujours positive.
@@ -1594,18 +1616,51 @@ fn couleur(brut: &str) -> Result<Rgb, String> {
     }
 }
 
-/// Décode une vitesse, bornée.
+/// Décode une vitesse : de 0.1 à 10, **au dixième**, avec un point (#149).
 ///
-/// La borne haute n'est pas une politesse : `u8::from_str` accepte 255, et une
-/// animation qui avance de 255 pas par image ne se distingue plus du bruit.
-fn vitesse(brut: &str) -> Result<u8, String> {
-    let valeur: u8 = brut.parse().map_err(|_| {
-        format!("« {brut} » n'est pas une vitesse : un entier de {VITESSE_MIN} à {VITESSE_MAX}")
-    })?;
-    if !(VITESSE_MIN..=VITESSE_MAX).contains(&valeur) {
+/// ⚠️ **Lue comme du texte, jamais par `f32::from_str`** : celui-ci accepte
+/// `0.75`, `1e0` ou `inf`, et un dixième n'a pas de représentation exacte en
+/// binaire. On lit les chiffres, on compte en dixièmes entiers, et la valeur
+/// rendue est `dixièmes / 10` — la même pour la même écriture.
+///
+/// Publique pour que la fenêtre lise ce que le démon lit, sans recopier la
+/// règle.
+pub fn lire_vitesse(brut: &str) -> Result<f32, String> {
+    let refus = || {
+        format!(
+            "« {brut} » n'est pas une vitesse : de 0.1 à 10, avec au plus un chiffre après le point"
+        )
+    };
+    let (entiere, decimale) = match brut.split_once('.') {
+        Some((entiere, decimale)) => (entiere, Some(decimale)),
+        None => (brut, None),
+    };
+    let chiffres = |texte: &str| !texte.is_empty() && texte.bytes().all(|o| o.is_ascii_digit());
+    if !chiffres(entiere) || entiere.len() > 3 {
+        return Err(refus());
+    }
+    let dixieme = match decimale {
+        None => 0,
+        Some(d) if d.len() == 1 && chiffres(d) => u64::from(d.as_bytes()[0] - b'0'),
+        Some(_) => return Err(refus()),
+    };
+    let total = entiere.parse::<u64>().map_err(|_| refus())? * 10 + dixieme;
+    if !(VITESSE_MIN_DIXIEMES..=VITESSE_MAX_DIXIEMES).contains(&total) {
         return Err(format!(
-            "« {brut} » est hors bornes : la vitesse va de {VITESSE_MIN} à {VITESSE_MAX}"
+            "« {brut} » est hors bornes : la vitesse va de 0.1 à 10"
         ));
     }
-    Ok(valeur)
+    Ok(total as f32 / 10.0)
+}
+
+/// L'écriture d'une vitesse : `3` et non `3.0`, `0.7` (#149). Une vitesse
+/// entière s'écrit comme avant, si bien que les fichiers d'avant ne changent
+/// pas d'un octet à la réécriture.
+pub fn ecrire_vitesse(vitesse: f32) -> String {
+    let d = dixiemes(vitesse);
+    if d.is_multiple_of(10) {
+        format!("{}", d / 10)
+    } else {
+        format!("{}.{}", d / 10, d % 10)
+    }
 }

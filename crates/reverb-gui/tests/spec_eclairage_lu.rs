@@ -77,10 +77,11 @@ const COULEUR_FIXE: Rgb = Rgb::new(0xde, 0xad, 0xbe);
 ///
 /// Quatre valeurs distinctes, toutes dans les bornes, **et aucune n'est le défaut du catalogue** —
 /// sans quoi un réglage perdu en route se confondrait avec un réglage bien lu.
-const VITESSE_LUE: u8 = 8;
-const VITESSE_FENETRE: u8 = 4;
-const VITESSE_AUTRE: u8 = 2;
-const VITESSE_TIREE: u8 = 10;
+// #149 : vitesse décimale
+const VITESSE_LUE: f32 = 8.0;
+const VITESSE_FENETRE: f32 = 4.0;
+const VITESSE_AUTRE: f32 = 2.0;
+const VITESSE_TIREE: f32 = 10.0;
 
 /// Les directions correspondantes.
 ///
@@ -170,7 +171,7 @@ fn reponse(lignes_anim: &[ResponseLine]) -> Vec<ResponseLine> {
 }
 
 /// Les réglages tels que la fenêtre les affiche.
-fn reglage(animation: Option<&str>, couleur: Rgb, vitesse: u8, direction: Direction) -> Reglage {
+fn reglage(animation: Option<&str>, couleur: Rgb, vitesse: f32, direction: Direction) -> Reglage {
     Reglage {
         animation: animation.map(str::to_owned),
         couleur,
@@ -192,7 +193,7 @@ fn fenetre_neuve() -> Reglage {
 fn venu(
     animation: Option<&str>,
     couleur: Option<Rgb>,
-    vitesse: Option<u8>,
+    vitesse: Option<f32>,
     direction: Option<Direction>,
 ) -> Eclairage {
     Eclairage {
@@ -268,7 +269,10 @@ fn les_reperes_de_ce_fichier_ne_sont_aucun_defaut() {
             "la vitesse {vitesse} doit différer du défaut du catalogue {}",
             defaut.vitesse
         );
-        assert_ne!(*vitesse, 0, "zéro est hors bornes, il ne peut être attendu");
+        assert_ne!(
+            *vitesse, 0.0,
+            "zéro est hors bornes, il ne peut être attendu"
+        );
         assert!(
             !vitesses[i + 1..].contains(vitesse),
             "les quatre vitesses de ce fichier doivent être distinctes : {vitesse} revient"
@@ -570,13 +574,15 @@ fn la_vitesse_se_lit_de_un_a_dix_et_toute_autre_valeur_est_ignoree() {
         let lu = eclairage_lu(&[ligne_anim(ANIM_LUE, &[("vitesse", &vitesse.to_string())])]);
         assert_eq!(
             lu.vitesse,
-            Some(vitesse),
+            Some(f32::from(vitesse)),
             "« {vitesse} » se relit en {vitesse}, bornes comprises — {lu:?}"
         );
     }
 
+    // #149 : `3.5` devient une vitesse valide ; `3.55`, deux chiffres après le point, garde le cas
+    // « un décimal ignoré ».
     for refuse in [
-        "0", "11", "12", "300", "255", "256", "-1", "3.5", "trois", "",
+        "0", "11", "12", "300", "255", "256", "-1", "3.55", "trois", "",
     ] {
         let lu = eclairage_lu(&[ligne_anim(
             ANIM_LUE,
@@ -702,7 +708,7 @@ fn un_reglage_illisible_n_est_jamais_remplace_par_une_valeur_de_repli() {
         Some(Rgb::BLACK),
         "le noir n'est pas une lecture"
     );
-    assert_ne!(illisible.vitesse, Some(0), "zéro n'est pas une lecture");
+    assert_ne!(illisible.vitesse, Some(0.0), "zéro n'est pas une lecture");
     assert_ne!(
         illisible.direction,
         Some(0),
@@ -933,7 +939,7 @@ fn ce_que_le_demon_ecrit_se_relit_pour_chaque_animation_du_catalogue() {
             for vitesse in 1..=10u8 {
                 let ecrits = Reglages {
                     couleur: COULEUR_LUE,
-                    vitesse,
+                    vitesse: f32::from(vitesse),
                     direction,
                     sonde: None,
                     palette: None,
@@ -946,7 +952,7 @@ fn ce_que_le_demon_ecrit_se_relit_pour_chaque_animation_du_catalogue() {
                 );
                 assert_eq!(
                     lu.vitesse,
-                    Some(vitesse),
+                    Some(f32::from(vitesse)),
                     "la vitesse écrite par le démon pour « {nom} » se relit — {lu:?}"
                 );
                 assert_eq!(

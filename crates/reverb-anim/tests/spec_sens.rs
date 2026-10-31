@@ -438,7 +438,8 @@ fn serie(
     sonde: Sonde,
 ) -> Vec<[f64; 3]> {
     let reglages = Reglages {
-        vitesse: 1,
+        // #149 : vitesse décimale
+        vitesse: 1.0,
         direction,
         ..Reglages::default()
     };
@@ -677,7 +678,7 @@ fn a_la_vitesse_un_le_motif_boucle_en_cent_vingt_pas_et_bouge_entre_temps() {
         for axe in [Axe::Hauteur, Axe::Profondeur] {
             for direction in [axe.vers_les_petites(), axe.vers_les_grandes()] {
                 let reglages = Reglages {
-                    vitesse: 1,
+                    vitesse: 1.0,
                     direction,
                     ..Reglages::default()
                 };

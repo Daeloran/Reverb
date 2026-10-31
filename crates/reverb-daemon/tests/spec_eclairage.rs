@@ -90,7 +90,8 @@ fn couleur_barrette(slot: usize) -> Rgb {
 fn reglages_temoins() -> Reglages {
     Reglages {
         couleur: Rgb::new(0x00, 0xff, 0x00),
-        vitesse: 7,
+        // #149 : vitesse décimale
+        vitesse: 7.0,
         direction: Direction::HautBas,
         // Champ ajouté par #75. Aucune des animations employées ici ne suit de sonde ;
         // `vague` la refuserait même.

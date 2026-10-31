@@ -462,7 +462,7 @@ impl Pupitre {
             reglage: RefCell::new(Reglage {
                 animation: None,
                 couleur: Rgb::new(0xff, 0x40, 0xff),
-                vitesse: 3,
+                vitesse: 3.0,
                 direction: 0,
                 // Aucune palette au départ : la couleur décide, comme avant #126.
                 palette: None,
@@ -2046,7 +2046,14 @@ fn poser_la_courbe(fenetre: &Fenetre, pupitre: &Pupitre) {
 /// vitesse et de la direction.
 fn relever(fenetre: &Fenetre, pupitre: &Pupitre, reglage: &mut Reglage) {
     reglage.couleur = pupitre.rgb();
-    reglage.vitesse = u8::try_from(fenetre.get_vitesse().clamp(0, 255)).unwrap_or(3);
+    // Le curseur rend des demi-crans (#149), la valeur reste bornée par la
+    // même règle que le démon : une valeur hors plage retombe sur 3.
+    reglage.vitesse =
+        reverb_anim::lire_vitesse(&reverb_anim::ecrire_vitesse(fenetre.get_vitesse()))
+            .unwrap_or(3.0);
+    fenetre.set_vitesse_ecrite(SharedString::from(reverb_anim::ecrire_vitesse(
+        reglage.vitesse,
+    )));
     reglage.direction = usize::try_from(fenetre.get_direction()).unwrap_or(0);
     // ⚠️ **Le rang 0 du menu vaut « aucune palette »**, et non la première :
     // c'est ce qui laisse la couleur reprendre la main sans une case à cocher de
@@ -2191,7 +2198,10 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
             // Les curseurs, ensuite : `relever` les relit à chaque geste, et
             // les laisser en arrière renverrait au démon les réglages du
             // sélecteur — régler la vitesse repeindrait le boîtier.
-            fenetre.set_vitesse(i32::from(reglage.vitesse));
+            fenetre.set_vitesse(reglage.vitesse);
+            fenetre.set_vitesse_ecrite(SharedString::from(reverb_anim::ecrire_vitesse(
+                reglage.vitesse,
+            )));
             fenetre.set_direction(i32::try_from(reglage.direction).unwrap_or(0));
             // ⚠️ Rang 0 = « Aucune » : une animation que le démon rapporte sans
             // palette remet donc le menu à zéro, jamais sur celle d'avant. Un

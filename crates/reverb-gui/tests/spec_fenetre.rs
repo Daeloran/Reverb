@@ -143,7 +143,8 @@ use reverb_proto::{NomProfil, Rgb};
 const COULEUR: Rgb = Rgb::new(0x12, 0x9a, 0x40);
 
 /// La vitesse affichée. Même précaution.
-const VITESSE: u8 = 7;
+// #149 : vitesse décimale
+const VITESSE: f32 = 7.0;
 
 /// La direction affichée, et elle est **locale** : c'est l'une des deux que #75 a ajoutées, donc
 /// celle qu'une liste restée à six rendrait inatteignable.
