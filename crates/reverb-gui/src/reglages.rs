@@ -64,6 +64,9 @@ pub struct Reglage {
     /// manipule — `current-index` d'un `ComboBox` —, et convertir au bord évite
     /// de porter deux représentations du même choix.
     pub palette: Option<usize>,
+    /// La largeur des bandes de `course`, de 1 à 10 (#150). Gardée quand on
+    /// passe à une autre famille : y revenir retrouve la largeur choisie.
+    pub largeur: u8,
 }
 
 impl Reglage {
@@ -110,6 +113,9 @@ impl Reglage {
             let direction = Direction::ALL.get(self.direction)?;
             reglages.push(("direction".to_owned(), direction.slug().to_owned()));
         }
+        if acceptees.contains(&"largeur") {
+            reglages.push(("largeur".to_owned(), self.largeur.to_string()));
+        }
         Some(Request::Animate {
             name: Some(nom.clone()),
             reglages,
@@ -149,6 +155,11 @@ impl Reglage {
         if let Some(direction) = venu.direction {
             self.direction = direction;
         }
+        // Rapportée sous `course` seulement (#150) : ailleurs, la fenêtre garde
+        // la sienne pour le prochain passage par `course`.
+        if let Some(largeur) = venu.largeur {
+            self.largeur = largeur;
+        }
         // ⚠️ **Affecté même absent**, contrairement aux trois autres. Une
         // animation rapportée sans `palette` en est une qui n'en a pas : garder
         // celle d'avant afficherait un menu qui ment sur ce que le boîtier
@@ -179,6 +190,10 @@ pub struct Eclairage {
     pub direction: Option<usize>,
     /// Rang dans [`reverb_anim::PALETTES`] (#126).
     pub palette: Option<usize>,
+    /// La largeur de `course` (#150). `Some(4)` quand la ligne n'en porte pas :
+    /// le démon n'écrit pas le défaut, c'est donc ce qui tourne. `None` pour
+    /// toute autre famille.
+    pub largeur: Option<u8>,
 }
 
 /// Lit une réponse à `lighting`.
@@ -201,6 +216,7 @@ pub fn eclairage_lu(lignes: &[ResponseLine]) -> Eclairage {
         // éclairage qui n'a jamais existé, et il serait adopté comme tel.
         lu = Eclairage {
             animation: Some(nom.clone()),
+            largeur: (nom == "course").then_some(4),
             ..Eclairage::default()
         };
         for (cle, valeur) in reglages {
@@ -213,6 +229,9 @@ pub fn eclairage_lu(lignes: &[ResponseLine]) -> Eclairage {
                 "vitesse" => lu.vitesse = vitesse_lue(valeur),
                 "direction" => lu.direction = direction_lue(valeur),
                 "palette" => lu.palette = palette_lue(valeur),
+                "largeur" if nom == "course" => {
+                    lu.largeur = valeur.parse::<u8>().ok().filter(|l| (1..=10).contains(l));
+                }
                 // Une clé inconnue est ignorée, et elle seule : c'est ce qui
                 // permet à cette fenêtre de rester lisible devant un démon plus
                 // récent qu'elle. Refuser la ligne entière n'appartient qu'au
@@ -727,6 +746,7 @@ pub fn requete_d_animation(
         vitesse: reglage.vitesse,
         direction,
         sonde: sonde.map(str::to_owned),
+        largeur: reglage.largeur,
         // ⚠️ `reglages_ecrits` écrit `couleur` **ou** `palette`, jamais les deux
         // (#126) : c'est lui qui tranche, pas cet appelant.
         palette: reglage

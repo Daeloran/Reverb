@@ -117,6 +117,11 @@ const EFFETS: &[(&str, &str)] = &[
          famille sans période — et sans horloge : le rendu est tiré d'un hachage du numéro de \
          LED, donc identique ici et dans le démon.",
     ),
+    (
+        "course",
+        "Des bandes lumineuses défilent le long de la direction, sur une palette posée sur le \
+         boîtier : la couleur d'une LED ne dépend que de sa place. La largeur règle leur nombre.",
+    ),
 ];
 
 /// Le niveau de détail de la maquette.
@@ -463,6 +468,7 @@ impl Pupitre {
                 animation: None,
                 couleur: Rgb::new(0xff, 0x40, 0xff),
                 vitesse: 3.0,
+                largeur: 4,
                 direction: 0,
                 // Aucune palette au départ : la couleur décide, comme avant #126.
                 palette: None,
@@ -2054,6 +2060,7 @@ fn relever(fenetre: &Fenetre, pupitre: &Pupitre, reglage: &mut Reglage) {
     fenetre.set_vitesse_ecrite(SharedString::from(reverb_anim::ecrire_vitesse(
         reglage.vitesse,
     )));
+    reglage.largeur = u8::try_from(fenetre.get_largeur().clamp(1, 10)).unwrap_or(4);
     reglage.direction = usize::try_from(fenetre.get_direction()).unwrap_or(0);
     // ⚠️ **Le rang 0 du menu vaut « aucune palette »**, et non la première :
     // c'est ce qui laisse la couleur reprendre la main sans une case à cocher de
@@ -2203,6 +2210,7 @@ fn ranger(fenetre: &Fenetre, pupitre: &Pupitre, retour: Retour) -> bool {
                 reglage.vitesse,
             )));
             fenetre.set_direction(i32::try_from(reglage.direction).unwrap_or(0));
+            fenetre.set_largeur(i32::from(reglage.largeur));
             // ⚠️ Rang 0 = « Aucune » : une animation que le démon rapporte sans
             // palette remet donc le menu à zéro, jamais sur celle d'avant. Un
             // menu qui garderait « light-pink » devant un boîtier qui affiche
@@ -2547,6 +2555,9 @@ fn familles() -> ModelRc<FamilleAnimation> {
                 // donner ferait rejeter l'`animate` **entier** — pas seulement
                 // la clé. Le catalogue est le seul juge.
                 suit_une_direction: acceptees.contains(&"direction"),
+                // Même règle : c'est l'acceptation de la clé qui montre le
+                // curseur, jamais le nom « course » écrit ici (#150).
+                accepte_une_largeur: acceptees.contains(&"largeur"),
                 exige_une_sonde: Animation::par_nom(nom)
                     .is_ok_and(|animation| animation.parametres_obligatoires().contains(&"sonde")),
             }
