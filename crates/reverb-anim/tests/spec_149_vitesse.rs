@@ -163,7 +163,7 @@ fn au_dixieme(dixiemes: u8) -> f32 {
 /// Ce que le catalogue doit écrire pour cette vitesse : sans décimale si elle est entière, avec
 /// **un seul** chiffre après le point sinon — `3`, `10`, `0.7`, `9.9`.
 fn ecrite(dixiemes: u8) -> String {
-    if dixiemes % 10 == 0 {
+    if dixiemes.is_multiple_of(10) {
         format!("{}", dixiemes / 10)
     } else {
         format!("{}.{}", dixiemes / 10, dixiemes % 10)
