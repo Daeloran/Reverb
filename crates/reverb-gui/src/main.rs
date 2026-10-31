@@ -2065,7 +2065,7 @@ fn relever(fenetre: &Fenetre, pupitre: &Pupitre, reglage: &mut Reglage) {
     };
 }
 
-/// Les douze palettes du catalogue, précédées de « Aucune » (#126).
+/// Les treize palettes du catalogue, précédées de « Aucune » (#126).
 ///
 /// ⚠️ **Les noms partent tels quels**, sans être rendus « lisibles » comme les
 /// directions : ce sont des noms propres — « light-pink », « atlantica » —, et
