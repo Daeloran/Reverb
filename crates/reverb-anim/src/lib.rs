@@ -18,12 +18,12 @@
 //! fonction de ce nombre et du temps. C'est ce qui remplace la file d'attente
 //! numérotée de la première `vague`.
 //!
-//! Ce nombre se calcule de deux façons, et le catalogue se partage entre elles.
-//! `vague` prend la **position réelle** le long de la direction : deux LED à la
-//! même hauteur reçoivent donc la même couleur d'une onde qui monte, quels que
-//! soient leur ventilateur et leur numéro d'ordre. Les quatre autres familles
-//! dirigées suivent l'**écoulement**, qui traverse chaque ventilateur d'un bord
-//! à l'autre même quand la direction l'aplatit — voir [`Geometrie::traversee`].
+//! Sous une direction globale, ce nombre est la place de la LED **sur le schéma
+//! de la vue de face** (#148) — voir [`Geometrie::led_de_face`] : deux LED à la
+//! même hauteur sur ce schéma reçoivent la même couleur d'une onde qui monte,
+//! et les six ventilateurs couchés, dessinés debout, sont traversés LED par
+//! LED. Sous une direction locale, c'est la traversée de l'objet — voir
+//! [`Geometrie::traversee`].
 //!
 //! Les cinq dernières ne suivent aucune direction, et n'en acceptent aucune :
 //! `rotation` suit l'angle relevé de chaque anneau, `pouls` la distance à la
@@ -177,14 +177,6 @@ const VITESSE_MIN: u8 = 1;
 /// Vitesse la plus rapide acceptée.
 const VITESSE_MAX: u8 = 10;
 
-/// Part d'un cycle qu'un ventilateur occupe dans le motif.
-///
-/// Deux fois le rayon de l'anneau rapporté à l'étendue du boîtier : c'est la
-/// place qu'un ventilateur occupe **réellement** le long d'une direction qui ne
-/// l'aplatit pas. La reprendre pour ceux que la direction aplatit fait traverser
-/// tous les ventilateurs à la même allure, quel que soit leur plan.
-const EMPRISE: f32 = 0.26;
-
 /// Durée d'un cycle complet, en pas, à la vitesse 1.
 ///
 /// Quatre secondes à trente images par seconde. Rien de physique : c'est la
@@ -240,12 +232,10 @@ impl Default for Reglages {
             vitesse: 3,
             sonde: None,
             palette: None,
-            // `horaire` et non `bas-haut` : c'est la seule direction où les dix
-            // ventilateurs ont tous de l'épaisseur. Six d'entre eux sont
-            // couchés — une onde verticale les traverse d'un bloc, et trois
-            // autres sont plaqués dans le plan du radiateur, qu'une onde
-            // avant-arrière aplatit de même. Le tour du boîtier n'aplatit
-            // personne.
+            // `horaire` : choisie quand c'était la seule direction où les dix
+            // ventilateurs avaient de l'épaisseur en 3D. Depuis #148 toutes en
+            // ont, sur le schéma ; le défaut reste, pour ne pas changer ce
+            // qu'affiche une animation lancée sans direction.
             direction: Direction::Horaire,
         }
     }
@@ -628,6 +618,11 @@ impl Animation {
         let locale = reglages.direction.est_locale();
         let pompe = geometrie.pompe();
         let etendue = distance(bornes.0, bornes.1).max(1.0);
+        // Les directions globales se lisent sur le **schéma de la vue de face**
+        // (#148), avec ses propres bornes. Les bornes 3D restent celles des
+        // grandeurs sans axe — distance à la pompe, cube unité —, dont les
+        // images ne changent pas.
+        let bornes_de_face = bornes_de_face(geometrie);
         // Ramène un point du boîtier au cube unité (#127). Une borne dégénérée —
         // un boîtier plat dans une dimension — rend le milieu plutôt qu'un
         // infini : la géométrie de test en a une, et un NaN s'y propagerait
@@ -657,18 +652,12 @@ impl Animation {
             // ventilateur dans le boîtier n'a pas de sens pour un motif qui se
             // répète à l'identique sur chaque objet, et `projection` refuse à
             // juste titre de lui en donner une.
-            let du_ventilateur = if locale {
-                0.0
-            } else {
-                projection(
-                    reglages.direction,
-                    geometrie.centre_ventilateur(position),
-                    bornes,
-                )
-            };
             let mut couleurs = [Rgb::BLACK; LEDS_PER_FAN as usize];
             for (led, couleur) in couleurs.iter_mut().enumerate() {
-                if let Some(point) = geometrie.led_ventilateur(position, led) {
+                if let (Some(point), Some(de_face)) = (
+                    geometrie.led_ventilateur(position, led),
+                    geometrie.led_de_face(position, led),
+                ) {
                     let traversee = geometrie.traversee(position, led);
                     // ⚠️ Sous une direction locale, la place du ventilateur dans
                     // le boîtier **ne compte plus** : c'est ce qui fait que deux
@@ -679,10 +668,14 @@ impl Animation {
                         let dans_l_objet = place_locale(reglages.direction, traversee);
                         (dans_l_objet, dans_l_objet)
                     } else {
-                        (
-                            projection(reglages.direction, point, bornes),
-                            du_ventilateur + EMPRISE * (traversee - 0.5),
-                        )
+                        // ⚠️ **Plus de traversée par l'écoulement sous une
+                        // direction globale** (#148). Elle donnait de
+                        // l'épaisseur aux ventilateurs que la 3D aplatit ; sur
+                        // le schéma, aucun n'est aplati, et elle faisait
+                        // descendre le motif sur le plafond pendant qu'il
+                        // montait partout ailleurs.
+                        let sur_le_schema = projection(reglages.direction, de_face, bornes_de_face);
+                        (sur_le_schema, sur_le_schema)
                     };
                     *couleur = self.peindre(
                         reglages,
@@ -717,7 +710,7 @@ impl Animation {
                     let spatiale = if locale {
                         place_locale_discrete(reglages.direction, led, LEDS_PER_STICK)
                     } else {
-                        projection(reglages.direction, point, bornes)
+                        projection(reglages.direction, point, bornes_de_face)
                     };
                     *couleur = self.peindre(
                         reglages,
@@ -756,28 +749,23 @@ impl Animation {
     ///
     /// Deux places, et le catalogue se partage entre elles :
     ///
-    /// - `spatiale` — la position réelle le long de la direction demandée ;
-    /// - `flux` — la place du ventilateur, plus la traversée de la LED depuis
-    ///   le point d'entrée de l'écoulement.
+    /// - `spatiale` — la place le long de la direction demandée ;
+    /// - `flux` — la même sous une direction globale, la traversée de l'objet
+    ///   sous une direction locale.
     ///
-    /// ## Pourquoi les deux, et pourquoi `vague` s'en tient à la première
+    /// ## Le schéma de la vue de face (#148)
     ///
-    /// Une onde purement plane éclaire d'un seul bloc tout ce qui se trouve
-    /// dans un même plan d'égale phase. Or **six ventilateurs sur dix sont
-    /// couchés** : les vingt-quatre LED du plancher sont exactement à la même
-    /// hauteur, et une onde `bas-haut` les allume ensemble, d'une seule
-    /// couleur. Constaté à l'œil le 2026-07-31.
+    /// **Six ventilateurs sur dix sont couchés** : en 3D, les vingt-quatre LED
+    /// du plancher sont à la même hauteur, et une onde `bas-haut` les allumait
+    /// d'un bloc, d'une seule couleur. Constaté à l'œil le 2026-07-31, puis
+    /// encore le 2026-10-31 sous `vague palette=red-flash`.
     ///
-    /// Ce n'est pas un défaut de calcul, c'est la géométrie du boîtier : une
-    /// onde plane ne peut pas dégrader ce qui n'a aucune épaisseur dans sa
-    /// direction. Le `flux` prolonge la géométrie là où elle ne dit plus
-    /// rien — voir [`Geometrie::traversee`], et noter qu'il **coïncide** avec
-    /// la position réelle sur un ventilateur que la direction n'aplatit pas.
-    ///
-    /// **`vague` s'en tient au `spatiale`**, seule du catalogue : elle est
-    /// l'onde plane, et la démonstration que le boîtier et la RAM sont
-    /// synchronisés dans l'espace. Les quatre autres familles dirigées suivent
-    /// l'écoulement.
+    /// La première parade était un `flux` qui traversait chaque ventilateur
+    /// depuis son entrée d'air ; `vague` ne le lisait pas, et le plafond
+    /// descendait pendant que le reste montait. Nico lit son boîtier sur la vue
+    /// de face, où ces ventilateurs sont **dessinés debout** : depuis #148,
+    /// toute direction globale se lit sur ce schéma, et aucun ventilateur n'y
+    /// est aplati.
     ///
     /// ⚠️ **Les cinq familles restantes ne lisent ni l'une ni l'autre**, et
     /// c'est ce qui les rend indifférentes à la direction. `braise` les a
@@ -1144,10 +1132,11 @@ impl Animation {
 /// d'arguments positionnels de cette longueur s'échange sans qu'aucun
 /// compilateur ne s'en aperçoive.
 struct Place {
-    /// La position réelle le long de la direction demandée, entre 0 et 1.
+    /// La place le long de la direction demandée, entre 0 et 1 — sur le schéma
+    /// de la vue de face sous une direction globale (#148).
     spatiale: f32,
-    /// La place du ventilateur, plus la traversée de la LED depuis le point
-    /// d'entrée de l'écoulement.
+    /// Sous une direction locale, la traversée de l'objet ; sous une direction
+    /// globale, la même chose que `spatiale` depuis #148.
     flux: f32,
     /// L'instant du cycle, entre 0 et 1.
     temps: f32,
@@ -1501,15 +1490,52 @@ fn projection(direction: Direction, point: Point, bornes: (Point, Point)) -> f32
 
 /// L'angle d'un point sur le tour du boîtier, entre 0 et 1.
 ///
-/// La rotation se fait dans le plan **vitre / hauteur**, donc autour de l'axe
-/// avant-arrière : c'est le seul cercle que ce boîtier contienne réellement,
-/// puisque ses parois occupées sont le plancher, le flanc de la carte mère et
-/// le plafond.
+/// La rotation se fait dans le plan **de la vue de face** (#148) — profondeur et
+/// hauteur —, autour du centre des bornes du schéma. Elle tournait jusque-là
+/// dans le plan vitre / hauteur, ce qui ne ressemblait à aucune rotation sur la
+/// vue où Nico lit son boîtier.
 fn angle_du_tour(point: Point, (bas, haut): (Point, Point)) -> f32 {
-    let centre_x = (bas.x + haut.x) / 2.0;
+    let centre_z = (bas.z + haut.z) / 2.0;
     let centre_y = (bas.y + haut.y) / 2.0;
-    let angle = (point.x - centre_x).atan2(point.y - centre_y);
+    // `centre_z - z` : l'avant (petit `z`) est à droite de l'écran. En haut du
+    // schéma, le motif avance donc de l'arrière vers l'avant, dans le sens des
+    // aiguilles d'une montre tel qu'on le voit.
+    let angle = (centre_z - point.z).atan2(point.y - centre_y);
     fraction(angle / std::f32::consts::TAU + 0.5)
+}
+
+/// Les bornes du **schéma de la vue de face** (#148) : les anneaux posés à plat
+/// dans le plan de la vue, et les barrettes à leur place réelle.
+///
+/// ⚠️ Distinctes de [`Geometrie::bornes`], qui reste en 3D : la fenêtre s'en
+/// sert pour son habillage, et les familles sans axe pour la distance à la
+/// pompe et le cube unité, dont les images ne doivent pas bouger.
+fn bornes_de_face(geometrie: &Geometrie) -> (Point, Point) {
+    let mut bas = Point {
+        x: f32::INFINITY,
+        y: f32::INFINITY,
+        z: f32::INFINITY,
+    };
+    let mut haut = Point {
+        x: f32::NEG_INFINITY,
+        y: f32::NEG_INFINITY,
+        z: f32::NEG_INFINITY,
+    };
+    let ventilateurs = Position::ALL.into_iter().flat_map(|position| {
+        (0..LEDS_PER_FAN as usize).filter_map(move |led| geometrie.led_de_face(position, led))
+    });
+    let barrettes = (0..SLOT_COUNT).flat_map(|slot| {
+        (0..LEDS_PER_STICK).filter_map(move |led| geometrie.led_barrette(slot, led))
+    });
+    for point in ventilateurs.chain(barrettes) {
+        bas.x = bas.x.min(point.x);
+        bas.y = bas.y.min(point.y);
+        bas.z = bas.z.min(point.z);
+        haut.x = haut.x.max(point.x);
+        haut.y = haut.y.max(point.y);
+        haut.z = haut.z.max(point.z);
+    }
+    (bas, haut)
 }
 
 /// Une couleur assombrie proportionnellement.
