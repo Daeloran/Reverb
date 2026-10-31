@@ -54,7 +54,8 @@ pub struct Reglage {
     /// L'animation en cours, `None` si aucune ne tourne.
     pub animation: Option<String>,
     pub couleur: Rgb,
-    pub vitesse: u8,
+    /// De 0.1 à 10, au dixième (#149).
+    pub vitesse: f32,
     /// Rang dans `reverb_anim::Direction::ALL`.
     pub direction: usize,
     /// Rang dans [`reverb_anim::PALETTES`], ou `None` pour « aucune » (#126).
@@ -97,7 +98,10 @@ impl Reglage {
             }
         }
         if acceptees.contains(&"vitesse") {
-            reglages.push(("vitesse".to_owned(), self.vitesse.to_string()));
+            reglages.push((
+                "vitesse".to_owned(),
+                reverb_anim::ecrire_vitesse(self.vitesse),
+            ));
         }
         if acceptees.contains(&"direction") {
             // Un rang hors des six n'envoie **rien**. Le repli sur une
@@ -170,7 +174,7 @@ pub struct Eclairage {
     /// côté d'en tirer une commande.
     pub animation: Option<String>,
     pub couleur: Option<Rgb>,
-    pub vitesse: Option<u8>,
+    pub vitesse: Option<f32>,
     /// Rang dans [`Direction::ALL`].
     pub direction: Option<usize>,
     /// Rang dans [`reverb_anim::PALETTES`] (#126).
@@ -241,14 +245,13 @@ fn palette_lue(brut: &str) -> Option<usize> {
     PALETTES.iter().position(|nom| *nom == brut)
 }
 
-/// Une vitesse du catalogue, de 1 à 10.
+/// Une vitesse du catalogue, de 0.1 à 10 au dixième (#149).
 ///
-/// Les bornes sont recopiées ici parce que `reverb-anim` les garde pour lui.
-/// Ce n'est pas une reprise qui dérive en silence : `spec_eclairage_lu.rs` les
-/// fait confirmer par `Animation::reglages`, qui est le juge de l'autre côté du
-/// socket, et tombe le jour où l'un des deux bouge sans l'autre.
-fn vitesse_lue(brut: &str) -> Option<u8> {
-    brut.parse::<u8>().ok().filter(|v| (1..=10).contains(v))
+/// Lue par la règle même du démon, [`reverb_anim::lire_vitesse`] : la recopier
+/// ici la ferait dériver au premier changement de plage, ce que #149 vient
+/// justement de faire.
+fn vitesse_lue(brut: &str) -> Option<f32> {
+    reverb_anim::lire_vitesse(brut).ok()
 }
 
 /// Le rang d'une direction dans [`Direction::ALL`], depuis son slug.
