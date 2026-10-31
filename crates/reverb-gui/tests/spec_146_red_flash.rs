@@ -125,7 +125,7 @@ fn choisir_red_flash_dans_le_menu_envoie_palette_red_flash_que_le_demon_accepte(
         animation: Some(FAMILLE.to_owned()),
         couleur: Reglages::default().couleur,
         vitesse: 5.0, // #149 : vitesse décimale
-        largeur: 10, // #150 : largeur des bandes, au défaut
+        largeur: 10,  // #150 : largeur des bandes, au défaut
         direction: Direction::ALL
             .into_iter()
             .position(|d| d == Direction::BasHaut)
