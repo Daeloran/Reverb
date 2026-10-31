@@ -13,3 +13,6 @@ config.toml
 # Captures de rétro-ingénierie — 178 Mo, hors git.
 # Les specs qui en sont tirées vivent dans docs/.
 captures/
+
+# Worktrees de branche (workflow : une branche = un worktree)
+.worktrees/
