@@ -182,7 +182,8 @@ fn couleur_barrette(slot: usize) -> Rgb {
 fn reglages_globaux() -> Reglages {
     Reglages {
         couleur: Rgb::new(0x00, 0xff, 0x00),
-        vitesse: 7,
+        // #149 : vitesse décimale
+        vitesse: 7.0,
         direction: Direction::HautBas,
         // Champ ajouté par #75 ; le témoin global emploie `vague`, qui ne suit aucune sonde.
         sonde: None,
@@ -199,7 +200,7 @@ fn reglages_globaux() -> Reglages {
 fn reglages_de_zone() -> Reglages {
     Reglages {
         couleur: Rgb::new(0x12, 0x34, 0x56),
-        vitesse: 9,
+        vitesse: 9.0,
         direction: Direction::ArriereAvant,
         sonde: None,
         // Champ ajouté par #126. `None` est le comportement d'avant à l'octet
@@ -566,7 +567,7 @@ fn reglages_acceptables(anim: Animation) -> Reglages {
     for cle in acceptees {
         match *cle {
             "couleur" => reglages.couleur = reglages_globaux().couleur,
-            "vitesse" => reglages.vitesse = 8,
+            "vitesse" => reglages.vitesse = 8.0,
             "direction" => reglages.direction = Direction::AvantArriere,
             // Ajouté par #75 : `thermique` exige le slug d'une sonde. Ce crate ne vérifie pas
             // qu'elle existe — c'est le démon qui les découvre —, un slug plausible suffit.

@@ -72,8 +72,9 @@ use reverb_proto::ipc::Request;
 const COULEUR: Rgb = Rgb::new(0x12, 0x9a, 0x40);
 
 /// La vitesse avant le geste, et celle après. Deux valeurs dans les bornes acceptées (1 à 10).
-const VITESSE_AVANT: u8 = 7;
-const VITESSE_APRES: u8 = 9;
+// #149 : vitesse décimale
+const VITESSE_AVANT: f32 = 7.0;
+const VITESSE_APRES: f32 = 9.0;
 
 /// La direction avant le geste, et celle après.
 ///
@@ -125,7 +126,7 @@ fn rang(direction: Direction) -> usize {
 }
 
 /// Les réglages tels que la fenêtre les affiche.
-fn reglage(animation: Option<&str>, vitesse: u8, direction: Direction) -> Reglage {
+fn reglage(animation: Option<&str>, vitesse: f32, direction: Direction) -> Reglage {
     Reglage {
         animation: animation.map(str::to_owned),
         couleur: COULEUR,

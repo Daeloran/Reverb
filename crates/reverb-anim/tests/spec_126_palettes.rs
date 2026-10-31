@@ -749,7 +749,8 @@ fn l_appareil_ne_voit_qu_une_teinte_quand_une_couleur_unique_est_donnee() {
         for direction in directions {
             let reglages = Reglages {
                 couleur: TEMOIN,
-                vitesse: 3,
+                // #149 : vitesse décimale
+                vitesse: 3.0,
                 direction,
                 ..Reglages::default()
             };
@@ -918,7 +919,7 @@ fn une_animation_sans_palette_rend_l_image_figee_sur_main() {
 
         let reglages = Reglages {
             couleur,
-            vitesse,
+            vitesse: f32::from(vitesse),
             direction,
             ..Reglages::default()
         };
@@ -983,7 +984,7 @@ fn la_palette_se_reecrit_et_se_relit_sans_perte() {
                 ..Reglages::default()
             };
             if acceptes.contains(&"vitesse") {
-                temoin.vitesse = 7;
+                temoin.vitesse = 7.0;
             }
             if acceptes.contains(&"direction") {
                 temoin.direction = Direction::BordsCentre;

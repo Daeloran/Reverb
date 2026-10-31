@@ -143,7 +143,8 @@ const ANCIENNE: Rgb = Rgb::new(0xff, 0x00, 0x04);
 /// Toutes deux **différentes du défaut** de [`Reglages`] (vitesse 3, direction `horaire`), pour
 /// qu'une zone qui repartirait aux valeurs d'usine se distingue d'une zone qui reprend les
 /// réglages du boîtier. Sans cet écart, les deux rendraient le même `Reglages` relu.
-const VITESSE: u8 = 7;
+// #149 : vitesse décimale
+const VITESSE: f32 = 7.0;
 const DIRECTION: Direction = Direction::ArriereAvant;
 
 /// L'animation d'exemple : elle accepte `couleur`.

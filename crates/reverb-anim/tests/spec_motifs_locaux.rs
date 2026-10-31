@@ -209,7 +209,8 @@ fn paire(cle: &str, valeur: &str) -> (String, String) {
 fn reglages(direction: Direction, vitesse: u8) -> Reglages {
     Reglages {
         couleur: TEMOIN,
-        vitesse,
+        // #149 : vitesse décimale
+        vitesse: f32::from(vitesse),
         direction,
         ..Reglages::default()
     }

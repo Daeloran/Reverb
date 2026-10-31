@@ -353,7 +353,8 @@ fn digest(morceaux: impl IntoIterator<Item = String>) -> String {
 fn reglages_sans_palette(animation: &Animation, direction: Direction) -> Reglages {
     Reglages {
         couleur: Rgb::new(0xff, 0x20, 0x80),
-        vitesse: 3,
+        // #149 : vitesse décimale
+        vitesse: 3.0,
         direction: if animation.parametres_acceptes().contains(&"direction") {
             direction
         } else {
@@ -368,7 +369,7 @@ fn reglages_sans_palette(animation: &Animation, direction: Direction) -> Reglage
 /// [`PERIODE`] pas balaient exactement un cycle.
 fn reglages_sous_palette(nom_de_palette: &str) -> Reglages {
     Reglages {
-        vitesse: 1,
+        vitesse: 1.0,
         palette: Some(palette(nom_de_palette)),
         ..Reglages::default()
     }
@@ -882,7 +883,7 @@ fn a_plein_niveau_les_trois_familles_de_127_rendent_la_fin_du_degrade() {
             &animation,
             &Reglages {
                 couleur: Rgb::new(0xff, 0xff, 0xff),
-                vitesse: 1,
+                vitesse: 1.0,
                 palette: None,
                 ..Reglages::default()
             },
@@ -977,7 +978,7 @@ fn sur_vague_et_respiration_aucune_led_ne_saute_de_plus_de_150() {
 
         for direction in HUIT_DIRECTIONS {
             let sans_palette = Reglages {
-                vitesse: 1,
+                vitesse: 1.0,
                 direction,
                 ..Reglages::default()
             };
@@ -991,7 +992,7 @@ fn sur_vague_et_respiration_aucune_led_ne_saute_de_plus_de_150() {
 
             for nom_de_palette in DOUZE {
                 let reglages = Reglages {
-                    vitesse: 1,
+                    vitesse: 1.0,
                     direction,
                     ..reglages_sous_palette(nom_de_palette)
                 };

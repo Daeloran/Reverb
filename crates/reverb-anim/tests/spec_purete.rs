@@ -41,7 +41,8 @@ fn rendre_toutes_les_images_du_catalogue_n_ouvre_aucun_descripteur() {
     let geometrie = Geometrie::mesuree();
     let reglages = Reglages {
         couleur: Rgb::new(0x20, 0xc0, 0xff),
-        vitesse: 3,
+        // #149 : vitesse décimale
+        vitesse: 3.0,
         direction: Direction::BasHaut,
         // Champ ajouté par #75, sans effet sur ce que ce test observe : cette
         // suite parcourt tout le catalogue, donc `thermique`, qui rendra son

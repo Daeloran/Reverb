@@ -219,7 +219,8 @@ fn geometrie() -> Geometrie {
 fn reglages(couleur: Rgb, vitesse: u8, direction: Direction) -> Reglages {
     Reglages {
         couleur,
-        vitesse,
+        // #149 : vitesse décimale
+        vitesse: f32::from(vitesse),
         direction,
         ..Reglages::default()
     }
@@ -579,7 +580,7 @@ fn braise_n_accepte_plus_direction_et_le_refus_nomme_la_cle() {
         .reglages(&[paire("couleur", "3939ff"), paire("vitesse", "2")])
         .unwrap_or_else(|erreur| panic!("« braise » accepte couleur et vitesse : {erreur}"));
     assert_eq!(lus.couleur, Rgb::new(0x39, 0x39, 0xff));
-    assert_eq!(lus.vitesse, 2);
+    assert_eq!(lus.vitesse, 2.0);
 }
 
 // ---------------------------------------------------------------------------

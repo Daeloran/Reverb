@@ -582,7 +582,8 @@ fn un_parametre_inconnu_est_refuse_en_nommant_la_cle_fautive() {
                 ),
                 "vitesse" => assert_eq!(
                     reglages.vitesse,
-                    3,
+                    // #149 : vitesse décimale
+                    3.0,
                     "« {} » : `vitesse=3` doit atterrir dans le champ `vitesse`",
                     animation.nom()
                 ),
@@ -1241,8 +1242,10 @@ fn valeurs_invalides(cle: &str) -> &'static [&'static str] {
             "zzzzzz", "ff00", "ff00ff00", "#ff00ff", "-1", "", "ff 00 ff", "0xff00ff", "rouge",
             "ffffffff",
         ],
+        // #149 : `2.5` devient une vitesse valide ; `2.55`, deux chiffres après le point, garde le
+        // cas « un décimal refusé ».
         "vitesse" => &[
-            "256", "1000", "65536", "-1", "2.5", "beaucoup", "", " 3", "0x10", "3 ",
+            "256", "1000", "65536", "-1", "2.55", "beaucoup", "", " 3", "0x10", "3 ",
         ],
         "direction" | "sens" => &[
             "diagonal",
