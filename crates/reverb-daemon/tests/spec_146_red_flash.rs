@@ -47,7 +47,7 @@ fn nom(saisi: &str) -> NomProfil {
 /// Des réglages sous `red-flash`, la couleur au défaut — voir l'en-tête.
 fn sous_red_flash(vitesse: u8, direction: Direction) -> Reglages {
     Reglages {
-        vitesse,
+        vitesse: f32::from(vitesse), // #149 : vitesse décimale
         direction,
         palette: Some(red_flash()),
         ..Reglages::default()

@@ -124,7 +124,7 @@ fn choisir_red_flash_dans_le_menu_envoie_palette_red_flash_que_le_demon_accepte(
     let reglage = Reglage {
         animation: Some(FAMILLE.to_owned()),
         couleur: Reglages::default().couleur,
-        vitesse: 5,
+        vitesse: 5.0, // #149 : vitesse décimale
         direction: Direction::ALL
             .into_iter()
             .position(|d| d == Direction::BasHaut)
