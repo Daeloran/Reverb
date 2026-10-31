@@ -422,7 +422,7 @@ mod tests {
         let animation = Animation::par_nom("vague").expect("« vague » est au catalogue");
         let reglages = Reglages {
             palette: Some(Palette::par_nom(nom_palette).expect("palette du catalogue")),
-            vitesse: 7,
+            vitesse: 7.0,
             ..Reglages::default()
         };
         eclairage.animation = Some((animation, reglages));
