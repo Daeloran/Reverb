@@ -294,10 +294,16 @@ fn les_douze_palettes_sont_celles_de_l_issue_et_portent_des_slugs() {
         Position::ALL.len() * LEDS_PER_FAN as usize + SLOT_COUNT * LEDS_PER_STICK,
         "appareil : 10 × 8 + 4 × 11"
     );
-    assert_eq!(
-        reverb_anim::PALETTES,
-        DOUZE.as_slice(),
-        "les douze palettes de l'issue, dans l'ordre de son tableau"
+    // ⚠️ **Changement de spécification assumé par #146.** Ce test figeait `PALETTES == DOUZE`,
+    // exactement douze. #146 ajoute `red-flash` en treizième, et relâche ce figeage en « la liste
+    // commence par les douze, dans cet ordre » : ce que #126 protégeait — l'ordre du menu de la
+    // fenêtre, qui manipule un **rang** —, reste figé ici ; la longueur exacte, treize, est arrêtée
+    // par `spec_146_red_flash.rs`. La modification vient des tests d'intention de #146, pas de son
+    // implémentation.
+    assert!(
+        reverb_anim::PALETTES.starts_with(DOUZE.as_slice()),
+        "les douze palettes de l'issue, dans l'ordre de son tableau, ouvrent la liste : {:?}",
+        reverb_anim::PALETTES
     );
 
     let mut vus: Vec<&str> = reverb_anim::PALETTES.to_vec();
