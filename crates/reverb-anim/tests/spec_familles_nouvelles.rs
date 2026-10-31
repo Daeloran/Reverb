@@ -389,7 +389,7 @@ fn les_dix_familles_se_reencodent_et_se_redecodent_sans_perte() {
         if acceptes.contains(&"sonde") {
             temoin.sonde = Some(SONDE.to_owned());
         }
-        // #150 : `course` accepte `largeur`, dont le défaut (4) ne s'écrit pas.
+        // #150 : `course` accepte `largeur`, dont le défaut (10 depuis l'essai boîtier du 2026-10-31) ne s'écrit pas.
         if acceptes.contains(&"largeur") {
             temoin.largeur = 7;
         }

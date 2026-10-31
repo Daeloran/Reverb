@@ -1176,7 +1176,7 @@ fn valeur_valide(cle: &str) -> String {
         "sonde" => "kraken2023elite:coolant-temp".to_owned(),
         // Ajoutée par #126. Celle que Nico emploie sur ses bandes WLED.
         "palette" => "light-pink".to_owned(),
-        // Ajoutée par #150. 2 n'a rien de particulier : ni une borne, ni le défaut (4).
+        // Ajoutée par #150. 2 n'a rien de particulier : ni une borne, ni le défaut (10 depuis l'essai boîtier du 2026-10-31).
         "largeur" => "2".to_owned(),
         autre => panic!("« {autre} » n'est pas une clé connue de ce test"),
     }

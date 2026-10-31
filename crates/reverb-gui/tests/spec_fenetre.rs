@@ -218,8 +218,8 @@ fn reglage(animation: Option<&str>) -> Reglage {
         direction: rang(DIRECTION),
         // Champ ajouté par #126 : « aucune palette », le comportement d'avant.
         palette: None,
-        // #150 : la fenêtre porte la `largeur` de `course` ; 4 est son défaut, sans effet ailleurs.
-        largeur: 4,
+        // #150 : la fenêtre porte la `largeur` de `course` ; 10 est son défaut (essai boîtier du 2026-10-31), sans effet ailleurs.
+        largeur: 10,
     }
 }
 

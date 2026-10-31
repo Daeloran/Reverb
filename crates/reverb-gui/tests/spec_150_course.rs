@@ -18,8 +18,8 @@
 //! La lecture de `Eclairage::largeur` suit la règle de la vitesse (#43, #149) :
 //!
 //! - sous `course`, `largeur=n` avec `n` de 1 à 10 se lit `Some(n)` ;
-//! - sous `course`, **sans** `largeur=`, elle se lit `Some(4)` : le démon n'écrit pas le défaut,
-//!   et c'est donc 4 qui tourne ;
+//! - sous `course`, **sans** `largeur=`, elle se lit `Some(10)` : le démon n'écrit pas le défaut,
+//!   et c'est donc 10 qui tourne (défaut 10 depuis l'essai boîtier du 2026-10-31, 4 avant) ;
 //! - une valeur hors de 1 à 10 ou mal écrite est **ignorée** (`None`), sans emporter le reste ;
 //! - sous **toute autre famille**, `None`, avec ou sans clé : ces familles n'ont pas de largeur,
 //!   et le démon n'en écrit jamais. `Reglage::adopter` laisse alors la largeur de la fenêtre
@@ -42,7 +42,7 @@
 //! | la largeur affichée part au démon, sur les deux chemins d'émission | [`la_largeur_affichee_part_au_demon_sous_course`] |
 //! | une autre famille ne reçoit pas `largeur` | [`une_autre_famille_ne_recoit_pas_de_largeur`] |
 //! | une largeur posée par le socket est lue et adoptée | [`une_largeur_lue_sous_course_est_adoptee_et_repart_telle_quelle`] |
-//! | sans `largeur=`, `course` tourne à 4 | [`course_sans_largeur_ecrite_se_lit_a_quatre`] |
+//! | sans `largeur=`, `course` tourne à 10 | [`course_sans_largeur_ecrite_se_lit_a_dix`] |
 //! | une largeur illisible est ignorée | [`une_largeur_que_le_demon_refuserait_n_est_pas_lue`] |
 //! | hors de `course`, aucune largeur n'est lue ni perdue | [`hors_de_course_la_largeur_n_est_pas_lue_et_la_fenetre_garde_la_sienne`] |
 //!
@@ -171,11 +171,12 @@ fn la_fenetre_offre_course_en_dernier() {
 #[test]
 fn la_largeur_affichee_part_au_demon_sous_course() {
     // Comportement attendu : « la fenêtre ajoute un bouton et un curseur ». Ce qui est affiché est
-    // ce qui part : une largeur laissée de côté ferait retomber le démon sur 4, sans un mot — le
+    // ce qui part : une largeur laissée de côté ferait retomber le démon sur 10, sans un mot — le
     // défaut de #32 par une autre porte.
     //
-    // Les dix largeurs ; à 4, la clé peut être portée ou non (le démon lit 4 dans les deux cas),
-    // mais ailleurs elle doit l'être, écrite comme un entier.
+    // Les dix largeurs ; à 10, la clé peut être portée ou non (le démon lit 10 dans les deux cas),
+    // mais ailleurs elle doit l'être, écrite comme un entier. #150, essai boîtier du 2026-10-31 :
+    // le défaut passe de 4 à 10.
     for largeur in 1..=10u8 {
         let affiche = reglage(COURSE, largeur);
         for (chemin, requete) in emissions(&affiche) {
@@ -186,7 +187,7 @@ fn la_largeur_affichee_part_au_demon_sous_course() {
                 envoye, COURSE,
                 "{contexte} : la famille affichée part au démon"
             );
-            if largeur != 4 {
+            if largeur != 10 {
                 assert_eq!(
                     valeur(&paires, "largeur"),
                     Some(largeur.to_string().as_str()),
@@ -285,23 +286,24 @@ fn une_largeur_lue_sous_course_est_adoptee_et_repart_telle_quelle() {
 }
 
 #[test]
-fn course_sans_largeur_ecrite_se_lit_a_quatre() {
+fn course_sans_largeur_ecrite_se_lit_a_dix() {
+    // #150, essai boîtier du 2026-10-31 : le défaut passe de 4 à 10.
     // Le démon n'écrit pas la largeur par défaut (critère n° 5) : une ligne `anim course` sans
-    // `largeur=` dit donc que 4 tourne. Une fenêtre réglée sur 9 qui ne le lirait pas renverrait 9
+    // `largeur=` dit donc que 10 tourne. Une fenêtre réglée sur 9 qui ne le lirait pas renverrait 9
     // au premier geste.
     let lu = eclairage_lu(&[ligne_anim(COURSE, &[])]);
     assert_eq!(
         lu.largeur,
-        Some(4),
-        "« anim course » sans largeur tourne à 4 — {lu:?}"
+        Some(10),
+        "« anim course » sans largeur tourne à 10 — {lu:?}"
     );
 
     let mut fenetre = reglage(COURSE, 9);
     fenetre.animation = None;
     fenetre.adopter(&lu);
     assert_eq!(
-        fenetre.largeur, 4,
-        "l'adoption ramène la fenêtre à 4 — {fenetre:?}"
+        fenetre.largeur, 10,
+        "l'adoption ramène la fenêtre à 10 — {fenetre:?}"
     );
 }
 
@@ -349,7 +351,7 @@ fn une_largeur_que_le_demon_refuserait_n_est_pas_lue() {
 #[test]
 fn hors_de_course_la_largeur_n_est_pas_lue_et_la_fenetre_garde_la_sienne() {
     // Contrat de ce fichier (voir l'en-tête) : hors de `course`, `None`, et la fenêtre garde sa
-    // largeur. Repasser sous `course` retrouve la largeur qu'on avait choisie, et non un 4 que
+    // largeur. Repasser sous `course` retrouve la largeur qu'on avait choisie, et non un 10 que
     // personne n'a demandé.
     for nom in ["vague", "arc-en-ciel"] {
         for en_plus in [&[][..], &[("largeur", "7")][..]] {

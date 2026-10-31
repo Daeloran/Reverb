@@ -255,8 +255,8 @@ fn empreinte(nom: &str) -> u64 {
                         direction: *direction,
                         sonde: sonde.clone(),
                         palette,
-                        // #150 : `largeur` rejoint `Reglages` ; 4 est son défaut, sans effet hors `course`.
-                        largeur: 4,
+                        // #150 : `largeur` rejoint `Reglages` ; 10 est son défaut (essai boîtier du 2026-10-31), sans effet hors `course`.
+                        largeur: 10,
                     };
                     for mesure in mesures {
                         for pas in PAS {

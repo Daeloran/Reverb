@@ -191,8 +191,8 @@ fn reglages_globaux() -> Reglages {
         // près — un test d'intention de #126 le fige —, donc ce témoin observe
         // exactement ce qu'il observait.
         palette: None,
-        // #150 : `largeur` rejoint `Reglages` ; 4 est son défaut, sans effet hors `course`.
-        largeur: 4,
+        // #150 : `largeur` rejoint `Reglages` ; 10 est son défaut (essai boîtier du 2026-10-31), sans effet hors `course`.
+        largeur: 10,
     }
 }
 
@@ -209,7 +209,7 @@ fn reglages_de_zone() -> Reglages {
         // près — un test d'intention de #126 le fige —, donc ce témoin observe
         // exactement ce qu'il observait.
         palette: None,
-        largeur: 4,
+        largeur: 10,
     }
 }
 
@@ -578,7 +578,7 @@ fn reglages_acceptables(anim: Animation) -> Reglages {
             // ⚠️ Écartée pour #126 : `couleur` et `palette` s'excluent, et ce
             // témoin porte la couleur depuis toujours. Voir `spec_eclairage.rs`.
             "palette" => {}
-            // Ajouté par #150 : `course` accepte `largeur`. 7, hors du défaut (4) qui ne s'écrit pas.
+            // Ajouté par #150 : `course` accepte `largeur`. 7, hors du défaut (10 depuis l'essai boîtier du 2026-10-31) qui ne s'écrit pas.
             "largeur" => reglages.largeur = 7,
             autre => panic!(
                 "« {autre} » est un paramètre d'animation que ce test ne sait pas fabriquer : le \

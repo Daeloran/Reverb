@@ -1,5 +1,6 @@
-//! Tests d'intention de l'issue #150 : la famille **`course`**, des bandes qui défilent sur une
-//! palette fixe (le *Running* de WLED).
+//! Tests d'intention de l'issue #150 : la famille **`course`**, des bandes qui défilent (le
+//! *Running* de WLED), et qui **portent** la palette depuis le changement de spécification du
+//! 2026-10-31 (essai boîtier).
 //!
 //! Écrits **depuis l'issue #150 seule**, avant l'implémentation. Aucun corps de fonction de
 //! `crates/reverb-anim/src/` n'a été relu pour les écrire. N'ont servi que les **signatures
@@ -21,7 +22,7 @@
 //!     pub direction: Direction,
 //!     pub sonde: Option<String>,
 //!     pub palette: Option<Palette>,
-//!     /// De 1 à 10, entier. 4 par défaut. Lu et écrit sous la clé `largeur`, par `course` seule.
+//!     /// De 1 à 10, entier. 10 par défaut (#150, essai boîtier du 2026-10-31). Lu et écrit sous la clé `largeur`, par `course` seule.
 //!     pub largeur: u8,
 //! }
 //! ```
@@ -49,9 +50,9 @@
 //!
 //! | critère de l'issue | test |
 //! |---|---|
-//! | n° 1 : réglages acceptés | [`course_est_la_derniere_du_catalogue_et_garde_les_treize_devant_elle`], [`course_accepte_couleur_palette_vitesse_direction_et_largeur`], [`largeur_vaut_quatre_par_defaut`] |
+//! | n° 1 : réglages acceptés | [`course_est_la_derniere_du_catalogue_et_garde_les_treize_devant_elle`], [`course_accepte_couleur_palette_vitesse_direction_et_largeur`], [`largeur_vaut_dix_par_defaut`] |
 //! | n° 1 : réglages refusés | [`course_refuse_une_largeur_hors_de_un_a_dix_et_couleur_avec_palette`], [`aucune_autre_famille_n_accepte_largeur`] |
-//! | n° 2 : palette fixe | [`sous_course_palette_la_teinte_d_une_led_ne_bouge_pas_sur_un_cycle`], témoin [`sous_vague_palette_la_teinte_d_une_led_change_au_fil_du_cycle`] |
+//! | n° 2 : palette portée (2026-10-31) | [`sous_palette_chaque_led_prend_la_couleur_de_la_palette_a_sa_phase`], [`sous_red_flash_en_bas_haut_l_eclat_pale_part_d_en_bas_et_monte`], appareil [`l_appareil_voit_monter_l_eclat_pale_de_red_flash_sur_l_onde_simulee`] |
 //! | n° 3 : nombre de bandes | [`en_bas_haut_le_nombre_de_maxima_suit_la_largeur`], [`en_bas_haut_la_frequence_des_bandes_vaut_dix_sur_largeur`] |
 //! | n° 4 : défilement | [`l_intensite_d_une_led_revient_au_bout_d_un_cycle_et_une_bande_y_passe_une_fois`], [`les_bandes_defilent_dans_le_sens_de_la_direction`] |
 //! | n° 5 : écriture et relecture (côté catalogue, donc `lighting`) | [`largeur_s_ecrit_hors_defaut_et_se_relit_a_l_identique`] |
@@ -77,10 +78,10 @@
 //!
 //! # Ce que ce fichier ne vérifie pas
 //!
-//! - La teinte **exacte** sous palette (« `palette` échantillonnée à la place `s` ») : la
-//!   correspondance entre `s` et la position d'échantillonnage dans la palette n'est pas écrite par
-//!   l'issue au-delà de « indépendante du temps ». Ce fichier exige que la teinte soit fixe dans le
-//!   temps **et** qu'elle varie dans l'espace, pas laquelle elle est.
+//! - La couleur sous palette dans les directions autres que `bas-haut` : `s` n'est recalculée ici
+//!   qu'en `bas-haut`. Les bandes, le défilement et leur sens se jugent sous `couleur=`, dont
+//!   l'intensité est inchangée par le changement de spécification du 2026-10-31 ; sous palette, il
+//!   n'y a plus d'intensité à lire (« c'est la palette qui porte ses propres noirs »).
 //! - Le rendu « comme `vague` » à `largeur=10` : l'issue le dit en commentaire, pas en critère, et
 //!   l'enveloppe d'intensité de `vague` n'est pas figée par la formule de `course`.
 //!
@@ -118,8 +119,12 @@ const TREIZE: [&str; 13] = [
 /// Les cinq réglages que l'issue donne à `course`.
 const REGLAGES_DE_COURSE: [&str; 5] = ["couleur", "palette", "vitesse", "direction", "largeur"];
 
-/// La largeur par défaut, selon l'issue.
-const LARGEUR_PAR_DEFAUT: u8 = 4;
+/// La largeur par défaut : 10, recalée sur le boîtier (#150, essai boîtier du 2026-10-31 ; 4 avant).
+const LARGEUR_PAR_DEFAUT: u8 = 10;
+
+/// Une largeur à 2,5 bandes, non entière, que les mesures de bandes et de défilement gardent depuis
+/// que le défaut est passé de 4 à 10 (#150, essai boîtier du 2026-10-31).
+const LARGEUR_DEMI_BANDE: u8 = 4;
 
 /// Les largeurs que le critère n° 3 nomme.
 const LARGEURS_DE_L_ISSUE: [u8; 4] = [1, 2, 5, 10];
@@ -137,36 +142,13 @@ const TEMOIN: Rgb = Rgb::new(0xff, 0x20, 0x80);
 /// Le nom de sonde que `thermique` exige. Sa valeur n'entre pas dans l'image.
 const SONDE: &str = "pompe";
 
-/// La palette des deux tests de teinte : celle que Nico emploie sur ses bandes WLED.
-///
-/// Choisie parce que le témoin y est le plus net : sous `vague palette=light-pink` en `bas-haut`,
-/// à `297bde3`, **chacune** des 80 LED de ventilateur voit sa teinte changer d'au moins
-/// [`SEPARATION_TEINTE`] sur un cycle, jusqu'à **0,69** pour la pire.
+/// Une palette des tests de réglages et de la palette portée : celle que Nico employait sur ses
+/// bandes WLED avant `red-flash`.
 const PALETTE: &str = "light-pink";
 
 // ---------------------------------------------------------------------------
 // Les seuils, et d'où ils viennent
 // ---------------------------------------------------------------------------
-
-/// En deçà de cette composante maximale, une LED n'a pas de teinte lisible — le plancher de
-/// `spec_126_palettes.rs`, pour la même raison : à `max ≥ 96`, une composante normalisée est
-/// connue à `0,5 / 96 ≈ 0,005` près.
-const SEUIL_ALLUMEE: u8 = 96;
-
-/// Écart de teinte au-delà duquel une LED n'a plus **la même** teinte d'un pas à l'autre.
-///
-/// La teinte est `c / max`, deux octets arrondis chacun d'au plus 0,5 : l'erreur sur une
-/// composante est d'au plus `0,5/max + (c/max)·0,5/max ≤ 1/96 ≈ 0,0104` au plancher. Entre deux
-/// pas, deux erreurs de signe contraire font au plus **0,021**. Le seuil est posé à 0,03 : au-dessus
-/// de l'arrondi, cinq fois sous [`SEPARATION_TEINTE`].
-///
-/// ⚠️ Plus large que le `0,02` de `spec_126_palettes.rs` : là-bas, l'arrondi était mesuré sur des
-/// couleurs uniques ; ici la teinte vient d'une palette, dont les deux petites composantes ne sont
-/// pas des multiples commodes de la grande.
-const TOLERANCE_TEINTE: f32 = 0.03;
-
-/// Deux teintes sont **distinctes** au-delà de cet écart — la valeur de `spec_126_palettes.rs`.
-const SEPARATION_TEINTE: f32 = 0.15;
 
 /// Une bande est **allumée** sur une LED au-dessus de cette intensité, **éteinte** en dessous de
 /// [`BAS`].
@@ -291,39 +273,6 @@ fn places(geometrie: &Geometrie) -> Vec<f64> {
 /// L'intensité d'une LED peinte de [`TEMOIN`] : sa composante maximale rapportée à 255.
 fn intensite(couleur: Rgb) -> f64 {
     f64::from(couleur.r.max(couleur.g).max(couleur.b)) / 255.0
-}
-
-/// La teinte d'une LED : ses composantes ramenées à la plus grande, ou `None` sous
-/// [`SEUIL_ALLUMEE`] — celle de `spec_126_palettes.rs`.
-fn teinte(couleur: Rgb) -> Option<[f32; 3]> {
-    let plus_grande = couleur.r.max(couleur.g).max(couleur.b);
-    if plus_grande < SEUIL_ALLUMEE {
-        return None;
-    }
-    let plus_grande = f32::from(plus_grande);
-    Some([
-        f32::from(couleur.r) / plus_grande,
-        f32::from(couleur.g) / plus_grande,
-        f32::from(couleur.b) / plus_grande,
-    ])
-}
-
-/// L'écart entre deux teintes : la plus grande différence, composante par composante.
-fn ecart_de_teinte(une: [f32; 3], autre: [f32; 3]) -> f32 {
-    (0..3)
-        .map(|composante| (une[composante] - autre[composante]).abs())
-        .fold(0.0f32, f32::max)
-}
-
-/// Le plus grand écart entre deux teintes d'une liste.
-fn etalement(teintes: &[[f32; 3]]) -> f32 {
-    let mut pire = 0.0f32;
-    for (rang, une) in teintes.iter().enumerate() {
-        for autre in &teintes[rang + 1..] {
-            pire = pire.max(ecart_de_teinte(*une, *autre));
-        }
-    }
-    pire
 }
 
 // ---------------------------------------------------------------------------
@@ -645,9 +594,9 @@ fn course_accepte_couleur_palette_vitesse_direction_et_largeur() {
 }
 
 #[test]
-fn largeur_vaut_quatre_par_defaut() {
-    // Comportement attendu : « entier de 1 à 10, **4 par défaut** ». Critère n° 5 : « absent, il
-    // vaut 4 ».
+fn largeur_vaut_dix_par_defaut() {
+    // #150, essai boîtier du 2026-10-31 : « `largeur` par défaut : 10 (au lieu de 4), la valeur
+    // validée sur le boîtier ». Critère n° 5 : « absent, il vaut 10 ».
     assert_eq!(
         Reglages::default().largeur,
         LARGEUR_PAR_DEFAUT,
@@ -658,7 +607,7 @@ fn largeur_vaut_quatre_par_defaut() {
         .expect("« animate course » seul est accepté");
     assert_eq!(
         lus.largeur, LARGEUR_PAR_DEFAUT,
-        "« animate course » sans `largeur` tourne à la largeur 4"
+        "« animate course » sans `largeur` tourne à la largeur 10"
     );
 }
 
@@ -730,7 +679,8 @@ fn aucune_autre_famille_n_accepte_largeur() {
 #[test]
 fn largeur_s_ecrit_hors_defaut_et_se_relit_a_l_identique() {
     // Critère n° 5 : « `largeur` est écrit par `lighting` et dans les profils, et relu à
-    // l'identique. Absent, il vaut 4 et ne s'écrit pas ». `reglages_ecrits` est l'émetteur de
+    // l'identique. Absent, il vaut 10 et ne s'écrit pas » (#150, essai boîtier du 2026-10-31 :
+    // défaut 10 au lieu de 4). `reglages_ecrits` est l'émetteur de
     // `lighting`, des profils et d'`eclairage.conf` (`spec_149_vitesse.rs`) : l'écriture se juge
     // ici une fois pour les trois.
     let course = animation(COURSE);
@@ -790,123 +740,295 @@ fn largeur_s_ecrit_hors_defaut_et_se_relit_a_l_identique() {
 }
 
 // ---------------------------------------------------------------------------
-// Critère n° 2 — la palette est fixe dans l'espace
+// Critère n° 2 — la palette est portée par les bandes (#150, essai boîtier du 2026-10-31)
 // ---------------------------------------------------------------------------
 
+/// La palette du critère de montée : celle du ruban WLED, dont l'arrêt 130 est l'éclat pâle.
+const RED_FLASH: &str = "red-flash";
+
+/// La demi-largeur de la fenêtre de phase dans laquelle la couleur attendue est cherchée, en
+/// fraction de cycle.
+///
+/// `s` est recalculée ici et `t` déduit de `pas` et de `vitesse` : sous `couleur=`, l'intensité
+/// rendue par la branche colle à l'onde de l'issue calculée sur ces `s` et ces `t` à **1/255**
+/// près, à toutes les largeurs et aux vitesses 1 et 2 (mesuré le 2026-10-31). Le désaccord de
+/// phase est donc de l'ordre de l'arrondi flottant ; il ne compte qu'aux frontières de la palette
+/// (`φ` voisin de 0 ou de 1, où `palette(0)` et `palette(255)` diffèrent) et sur ses pentes. Un
+/// deux-millième de cycle, c'est un quart de pas à la vitesse 1 (`1/480`) : bien au-dessus du
+/// flottant, bien en dessous d'un décalage d'un pas, qui serait vu.
+const FENETRE_DE_PHASE: f64 = 0.002;
+
+/// Le nombre d'échantillons de la palette pris dans la fenêtre de phase. 65 : un écart de
+/// `255 · 2 · 0,002 / 64 ≈ 0,016` position entre deux, sans effet visible sur un octet.
+const ECHANTILLONS_DE_FENETRE: u32 = 65;
+
+/// L'écart toléré par composante entre la couleur rendue et l'échantillon attendu : un octet,
+/// l'arrondi (au plus proche ou par troncature) de la conversion en `Rgb`.
+const ARRONDI: u8 = 1;
+
+/// La part minimale de montées parmi les pas où la LED la plus pâle change de place.
+///
+/// Les 124 LED n'occupent que 51 hauteurs, avec des trous jusqu'à 0,064 de l'étendue, alors que
+/// l'éclat avance de 1/120 par pas : la plus pâle reste souvent sur place, et l'arrondi à l'octet
+/// peut la faire hésiter entre deux voisines. Trois sur quatre laissent cette marge, et une
+/// palette posée (aucun mouvement) ou une palette qui descend (presque que des descentes) n'y
+/// arrive pas. Mesuré sur l'onde exacte simulée par l'appareil ci-dessous.
+const PART_DE_MONTEES: f64 = 0.75;
+
+/// La progression minimale de la plus pâle sur un cycle, en étendues, comptée en différences
+/// repliées (le passage du haut au bas, au repli du cycle, compte pour son petit écart réel).
+///
+/// À `largeur=10` (`k = 1`), l'éclat traverse le boîtier une fois par cycle : la progression
+/// attendue est d'une étendue. La moitié laisse la marge des trous entre hauteurs, et exclut une
+/// plus pâle immobile (0) ou qui descend (négative).
+const PROGRESSION_MINIMALE: f64 = 0.5;
+
+/// `x` ramené dans `[0, 1[`.
+fn fraction(x: f64) -> f64 {
+    x.rem_euclid(1.0)
+}
+
+/// Le temps du cycle d'un pas : `fraction(pas · vitesse / 120)` (#49, #149).
+fn temps(pas: u32, vitesse: f32) -> f64 {
+    fraction(f64::from(pas) * f64::from(vitesse) / f64::from(PERIODE))
+}
+
+/// La phase de l'issue, `φ = fraction(k·s − t)`.
+fn phase(largeur: u8, place: f64, temps: f64) -> f64 {
+    fraction(k_attendu(largeur) * place - temps)
+}
+
+/// L'écart, composante par composante, entre deux couleurs : le plus grand des trois.
+fn ecart(une: Rgb, autre: Rgb) -> u8 {
+    une.r
+        .abs_diff(autre.r)
+        .max(une.g.abs_diff(autre.g))
+        .max(une.b.abs_diff(autre.b))
+}
+
+/// Le plus petit écart entre une couleur et `palette(255 · φ')`, pour `φ'` dans la fenêtre de
+/// phase autour de `φ`, repliée sur le cycle.
+fn ecart_a_la_palette(palette: &Palette, phi: f64, couleur: Rgb) -> u8 {
+    (0..ECHANTILLONS_DE_FENETRE)
+        .map(|rang| {
+            let decalage = FENETRE_DE_PHASE
+                * (2.0 * f64::from(rang) / f64::from(ECHANTILLONS_DE_FENETRE - 1) - 1.0);
+            let position = 255.0 * fraction(phi + decalage);
+            ecart(couleur, palette.echantillon(position as f32))
+        })
+        .min()
+        .expect("la fenêtre a des échantillons")
+}
+
+/// La pâleur d'une couleur : sa plus petite composante, la part de blanc qu'elle contient.
+///
+/// Sous `red-flash`, l'arrêt 130 est le seul à porter du vert et du bleu ; les rouges et les noirs
+/// ont une plus petite composante proche de zéro.
+fn paleur(couleur: Rgb) -> u8 {
+    couleur.r.min(couleur.g).min(couleur.b)
+}
+
+/// La place de la LED la plus pâle d'une liste de couleurs (dans l'ordre de [`toutes_les_led`]).
+///
+/// En cas d'égalité, la moyenne **circulaire** des places ex aequo : à `k = 1`, le bas (`s = 0`) et
+/// le haut (`s = 1`) ont la même phase, et une moyenne ordinaire les mettrait au milieu.
+fn place_la_plus_pale(places: &[f64], couleurs: &[Rgb]) -> f64 {
+    let plus_pale = couleurs
+        .iter()
+        .copied()
+        .map(paleur)
+        .max()
+        .expect("le boîtier a des LED");
+    let (mut cosinus, mut sinus) = (0.0f64, 0.0f64);
+    for (place, couleur) in places.iter().zip(couleurs) {
+        if paleur(*couleur) == plus_pale {
+            let angle = std::f64::consts::TAU * place;
+            cosinus += angle.cos();
+            sinus += angle.sin();
+        }
+    }
+    fraction(sinus.atan2(cosinus) / std::f64::consts::TAU)
+}
+
+/// Le déplacement replié d'une place à la suivante, dans `]−0,5, 0,5]` : le repli du cycle (du
+/// haut au bas) compte pour son petit écart réel, et non pour une descente d'une étendue.
+fn deplacement(avant: f64, apres: f64) -> f64 {
+    let brut = fraction(apres - avant);
+    if brut > 0.5 { brut - 1.0 } else { brut }
+}
+
+/// Ce que fait la plus pâle sur une suite de places : (montées, descentes, progression totale).
+fn marche(places_successives: &[f64]) -> (usize, usize, f64) {
+    let mut montees = 0;
+    let mut descentes = 0;
+    let mut progression = 0.0;
+    for deux in places_successives.windows(2) {
+        let pas = deplacement(deux[0], deux[1]);
+        if pas > 1e-9 {
+            montees += 1;
+        } else if pas < -1e-9 {
+            descentes += 1;
+        }
+        progression += pas;
+    }
+    (montees, descentes, progression)
+}
+
+/// Le jugement de la montée, commun à l'appareil et au test : un message si la plus pâle ne monte
+/// pas assez nettement.
+fn juger_la_montee(places_successives: &[f64]) -> Result<(), String> {
+    let (montees, descentes, progression) = marche(places_successives);
+    let bouge = montees + descentes;
+    if bouge == 0 || (montees as f64) < PART_DE_MONTEES * bouge as f64 {
+        return Err(format!(
+            "{montees} montées pour {descentes} descentes (au moins {PART_DE_MONTEES} des \
+             déplacements doivent monter)"
+        ));
+    }
+    if progression < PROGRESSION_MINIMALE {
+        return Err(format!(
+            "progression de {progression:.3} étendue sur le cycle (au moins \
+             {PROGRESSION_MINIMALE})"
+        ));
+    }
+    Ok(())
+}
+
 #[test]
-fn sous_course_palette_la_teinte_d_une_led_ne_bouge_pas_sur_un_cycle() {
-    // Critère n° 2 : « sous `course palette=<p>`, pour chaque LED allumée, la teinte (couleur
-    // rapportée à sa composante maximale) est la même à tous les pas d'un cycle ».
-    //
-    // Les huit directions, et trois largeurs : la palette ne dépend que de la place, quelle que
-    // soit la façon dont les bandes la traversent.
-    //
-    // Et la seconde moitié, sans laquelle la première serait triviale : la palette **est**
-    // appliquée. Une famille qui ignorerait la palette et peindrait une couleur unique aurait une
-    // teinte fixe à chaque LED — mais la même partout.
-    let leds = toutes_les_led();
-    for direction in Direction::ALL {
-        for largeur in [1u8, LARGEUR_PAR_DEFAUT, 10] {
-            let images = cycle(
-                COURSE,
-                &reglages(largeur, direction, Some(palette(PALETTE))),
-            );
-            let mut fautes = Vec::new();
-            let mut allumees = 0;
-            for led in &leds {
-                let teintes: Vec<[f32; 3]> = images
+fn l_appareil_voit_monter_l_eclat_pale_de_red_flash_sur_l_onde_simulee() {
+    // #150, essai boîtier du 2026-10-31. Avant de juger `course`, on juge la règle : sur les 124
+    // places réelles, la couleur **exacte** de l'issue, `red-flash(255 · fraction(s − t))` en
+    // `bas-haut` à `largeur=10`, doit être reconnue comme une montée ; la même palette posée
+    // (`φ = s`, indépendante du temps) et la même qui descend (`φ = fraction(s + t)`) ne le
+    // doivent pas. Sinon un échec plus bas dirait quelque chose de l'appareil.
+    let places = places(&Geometrie::mesuree());
+    let palette = palette(RED_FLASH);
+    let suite = |phase_de: &dyn Fn(f64, f64) -> f64| -> Vec<f64> {
+        (0..PERIODE)
+            .map(|pas| {
+                let t = temps(pas, 1.0);
+                let couleurs: Vec<Rgb> = places
                     .iter()
-                    .filter_map(|image| teinte(led.couleur(image)))
+                    .map(|place| palette.echantillon((255.0 * phase_de(*place, t)) as f32))
                     .collect();
-                if teintes.is_empty() {
-                    continue;
-                }
-                allumees += 1;
-                let ecart = etalement(&teintes);
-                if ecart > TOLERANCE_TEINTE {
-                    fautes.push(format!("{} ({ecart:.3})", led.nom()));
+                place_la_plus_pale(&places, &couleurs)
+            })
+            .collect()
+    };
+
+    let portee = suite(&|place, t| phase(10, place, t));
+    if let Err(pourquoi) = juger_la_montee(&portee) {
+        panic!("appareil : l'onde exacte de l'issue n'est pas vue monter — {pourquoi}");
+    }
+    let posee = suite(&|place, _| place);
+    assert!(
+        juger_la_montee(&posee).is_err(),
+        "appareil : une palette posée est vue monter — {:?}",
+        marche(&posee)
+    );
+    let descendante = suite(&|place, t| fraction(place + t));
+    assert!(
+        juger_la_montee(&descendante).is_err(),
+        "appareil : une palette qui descend est vue monter — {:?}",
+        marche(&descendante)
+    );
+}
+
+#[test]
+fn sous_palette_chaque_led_prend_la_couleur_de_la_palette_a_sa_phase() {
+    // #150, essai boîtier du 2026-10-31 : la palette n'est plus posée, chaque bande la **porte**.
+    // Critère : « sous palette, la couleur de chaque LED à chaque pas est
+    // `palette.echantillon(255 · fraction(k·s − t))` », avec `k = 10 / largeur` et sans enveloppe
+    // d'intensité en plus.
+    //
+    // En `bas-haut`, la seule direction dont `s` est recalculée ici. Deux palettes (celle des tests
+    // de réglages et celle du ruban), trois largeurs dont les deux bornes et le défaut, et la
+    // vitesse 2 à la largeur 10, le réglage validé sur le boîtier : `t` y avance de deux pas de la
+    // vitesse 1 par image.
+    //
+    // Tolérance : un octet par composante ([`ARRONDI`]), dans une fenêtre de phase de
+    // ±[`FENETRE_DE_PHASE`] cycle (voir sa justification).
+    let geometrie = Geometrie::mesuree();
+    let places = places(&geometrie);
+    let course = animation(COURSE);
+    let leds = toutes_les_led();
+    for nom in [PALETTE, RED_FLASH] {
+        let palette = palette(nom);
+        for (largeur, vitesse) in [(1u8, 1.0f32), (4, 1.0), (10, 1.0), (10, 2.0)] {
+            let regles = Reglages {
+                vitesse,
+                ..reglages(largeur, Direction::BasHaut, Some(palette))
+            };
+            let mut fautes = Vec::new();
+            for pas in 0..PERIODE {
+                let image = course.image(&geometrie, &regles, pas);
+                let t = temps(pas, vitesse);
+                for (led, place) in leds.iter().zip(&places) {
+                    let phi = phase(largeur, *place, t);
+                    let rendue = led.couleur(&image);
+                    let ecart = ecart_a_la_palette(&palette, phi, rendue);
+                    if ecart > ARRONDI {
+                        fautes.push(format!(
+                            "pas {pas} {} : {rendue:?} au lieu de {:?} (φ = {phi:.3}, écart {ecart})",
+                            led.nom(),
+                            palette.echantillon((255.0 * phi) as f32)
+                        ));
+                    }
                 }
             }
             assert!(
-                allumees > 0,
-                "appareil : sous « {COURSE} palette={PALETTE} » en {} à largeur={largeur}, aucune \
-                 LED ne passe le plancher de luminosité sur tout un cycle",
-                direction.slug()
-            );
-            assert!(
                 fautes.is_empty(),
-                "« {COURSE} palette={PALETTE} » en {}, largeur={largeur} : {} LED sur {allumees} \
-                 changent de teinte au fil du cycle, au-delà de {TOLERANCE_TEINTE} — la palette \
-                 doit rester fixe dans l'espace. Les dix premières : {}",
-                direction.slug(),
+                "« {COURSE} palette={nom} largeur={largeur} vitesse={vitesse} » en bas-haut : {} \
+                 couleurs sur {} ne sont pas `palette(255 · fraction(k·s − t))` à un octet près. \
+                 Les dix premières : {}",
                 fautes.len(),
+                leds.len() * PERIODE as usize,
                 fautes
                     .iter()
                     .take(10)
                     .cloned()
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(" ; ")
             );
         }
     }
-
-    // La palette se voit dans l'espace : sur un cycle, les LED allumées ne portent pas toutes la
-    // même teinte.
-    let images = cycle(
-        COURSE,
-        &reglages(
-            LARGEUR_PAR_DEFAUT,
-            Direction::BasHaut,
-            Some(palette(PALETTE)),
-        ),
-    );
-    let toutes: Vec<[f32; 3]> = images
-        .iter()
-        .flat_map(|image| leds.iter().filter_map(|led| teinte(led.couleur(image))))
-        .collect();
-    let ecart = etalement(&toutes);
-    assert!(
-        ecart >= SEPARATION_TEINTE,
-        "« {COURSE} palette={PALETTE} » en bas-haut : les LED allumées ne s'écartent que de \
-         {ecart:.3} en teinte — la palette n'est pas échantillonnée le long de `s`"
-    );
 }
 
 #[test]
-fn sous_vague_palette_la_teinte_d_une_led_change_au_fil_du_cycle() {
-    // Le témoin du critère n° 2 : « sous `vague palette=<p>`, elle varie ». Sans lui, la mesure du
-    // test précédent pourrait être aveugle — un plancher trop haut, une tolérance trop large — et
-    // passer sur n'importe quoi.
+fn sous_red_flash_en_bas_haut_l_eclat_pale_part_d_en_bas_et_monte() {
+    // #150, essai boîtier du 2026-10-31. Nico : « j'aimerais que l'animation, ce soit le pâle qui
+    // parte d'en bas et monte. Pas le noir. » Critère : « sous `red-flash` en `bas-haut`, à
+    // `largeur=10`, la place `s` de la LED la plus pâle croît d'un pas à l'autre, en dehors du
+    // repli d'un cycle ».
     //
-    // Vert avant l'implémentation : `vague` existe déjà, et c'est ce qui la distingue de `course`.
-    // Exigé sur au moins la moitié des LED : à `297bde3`, toutes celles des ventilateurs y sont.
-    let leds = toutes_les_led();
-    let images = cycle(
-        "vague",
-        &Reglages {
-            vitesse: 1.0,
-            direction: Direction::BasHaut,
-            palette: Some(palette(PALETTE)),
-            ..Reglages::default()
-        },
-    );
-    let changeantes = leds
-        .iter()
-        .filter(|led| {
-            let teintes: Vec<[f32; 3]> = images
-                .iter()
-                .filter_map(|image| teinte(led.couleur(image)))
+    // Mesuré sur le cycle entier (120 pas, vitesse 1), en déplacements repliés : au moins
+    // [`PART_DE_MONTEES`] des déplacements montent, et la plus pâle progresse d'au moins
+    // [`PROGRESSION_MINIMALE`] étendue. Seuils justifiés à leur définition, et éprouvés par
+    // l'appareil ci-dessus sur l'onde exacte, une palette posée et une palette qui descend.
+    let geometrie = Geometrie::mesuree();
+    let places = places(&geometrie);
+    let course = animation(COURSE);
+    let regles = reglages(10, Direction::BasHaut, Some(palette(RED_FLASH)));
+    let suite: Vec<f64> = (0..PERIODE)
+        .map(|pas| {
+            let image = course.image(&geometrie, &regles, pas);
+            let couleurs: Vec<Rgb> = toutes_les_led()
+                .into_iter()
+                .map(|led| led.couleur(&image))
                 .collect();
-            etalement(&teintes) >= SEPARATION_TEINTE
+            place_la_plus_pale(&places, &couleurs)
         })
-        .count();
-    assert!(
-        changeantes * 2 >= leds.len(),
-        "témoin : sous « vague palette={PALETTE} » en bas-haut, seules {changeantes} LED sur {} \
-         changent de teinte d'au moins {SEPARATION_TEINTE} sur un cycle — la mesure ne distingue \
-         plus une palette qui voyage d'une palette fixe",
-        leds.len()
-    );
+        .collect();
+    if let Err(pourquoi) = juger_la_montee(&suite) {
+        panic!(
+            "« {COURSE} palette={RED_FLASH} largeur=10 » en bas-haut : l'éclat pâle ne monte pas — \
+             {pourquoi}. Places successives : {:?}",
+            suite
+                .iter()
+                .map(|place| format!("{place:.2}"))
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -957,13 +1079,14 @@ fn en_bas_haut_le_nombre_de_maxima_suit_la_largeur() {
 #[test]
 fn en_bas_haut_la_frequence_des_bandes_vaut_dix_sur_largeur() {
     // Critère n° 3, par la mesure robuste : « `k = 10 / largeur` » — la période spatiale vaut
-    // `largeur / 10` de l'étendue. Les quatre largeurs de l'issue, et le défaut (2,5 bandes).
+    // `largeur / 10` de l'étendue. Les quatre largeurs de l'issue, et 4 (2,5 bandes), le défaut
+    // d'avant l'essai boîtier du 2026-10-31.
     //
     // Chaque LED dit **quand** la bande passe sur elle ; si l'intensité est bien
     // `(1 + cos 2π(k·s − t)) / 2`, cet instant vaut `k·s` modulo 1, et le `k` qui aligne les 124
     // instants est le nombre de bandes sur l'étendue.
     let places = places(&Geometrie::mesuree());
-    for largeur in [1u8, 2, LARGEUR_PAR_DEFAUT, 5, 10] {
+    for largeur in [1u8, 2, LARGEUR_DEMI_BANDE, 5, 10] {
         let attendu = k_attendu(largeur);
         let passages: Vec<f64> =
             series(&cycle(COURSE, &reglages(largeur, Direction::BasHaut, None)))
@@ -1004,7 +1127,7 @@ fn l_intensite_d_une_led_revient_au_bout_d_un_cycle_et_une_bande_y_passe_une_foi
         Direction::HautBas,
         Direction::BordsCentre,
     ] {
-        for largeur in [1u8, 2, LARGEUR_PAR_DEFAUT, 5, 10] {
+        for largeur in [1u8, 2, LARGEUR_DEMI_BANDE, 5, 10] {
             let regles = reglages(largeur, direction, None);
             for pas in [0u32, 1, 37, 59, 119, 1_000] {
                 assert_eq!(
@@ -1050,7 +1173,7 @@ fn les_bandes_defilent_dans_le_sens_de_la_direction() {
     // ne passerait pas.
     let places = places(&Geometrie::mesuree());
     for (direction, monte) in [(Direction::BasHaut, true), (Direction::HautBas, false)] {
-        for largeur in [1u8, 2, LARGEUR_PAR_DEFAUT, 5, 10] {
+        for largeur in [1u8, 2, LARGEUR_DEMI_BANDE, 5, 10] {
             let passages: Vec<f64> = series(&cycle(COURSE, &reglages(largeur, direction, None)))
                 .iter()
                 .map(|serie| passage(serie))
