@@ -578,12 +578,13 @@ fn les_douze_palettes_portent_les_arrets_figes() {
 /// directions, ce qu'aucune empreinte tenant dans un fichier ne couvrirait. Le défaut que
 /// l'ensemble guette — une couleur décalée d'une unité sur une seule image — se cache exactement
 /// entre les deux.
-const SANS_PALETTE_DIGESTS: [(&str, &str); 13] = [
-    ("vague", "71bd13c938475bfb"),
-    ("comete", "d53a368c74840595"),
-    ("respiration", "9dc6f5ee30c9d76c"),
-    ("arc-en-ciel", "df19e701ba96949a"),
-    ("balayage", "abd235e486545995"),
+///
+/// ⚠️ **Les cinq familles qui acceptent une direction en ont été retirées par l'issue #148** —
+/// `vague`, `comete`, `respiration`, `arc-en-ciel`, `balayage`. Leur digest repliait les huit
+/// directions, dont les six globales, et #148 change le rendu de celles-ci par décision : chaque LED
+/// de ventilateur y est placée sur le schéma de la vue de face, et non plus à sa position 3D. Leurs
+/// images sous les deux directions locales restent figées, par `spec_148_schema_face.rs`.
+const SANS_PALETTE_DIGESTS: [(&str, &str); 8] = [
     ("braise", "073e869bf4adf3f8"),
     ("rotation", "f24b9b3d1a64b91d"),
     ("thermique", "64be32e23870502d"),
@@ -600,32 +601,14 @@ const SANS_PALETTE_DIGESTS: [(&str, &str); 13] = [
 /// Les trois familles ne sont pas prises au hasard, et c'est le choix de `spec_126_palettes.rs` :
 /// `vague` est l'onde plane, qui ne suit que la position ; `comete` a une traînée, donc un gradient
 /// d'intensité et beaucoup de LED éteintes ; `braise` croise deux ondes et un frémissement par LED.
-const SANS_PALETTE_EMPREINTES: [(&str, &str); 3] = [
-    (
-        "vague",
-        "0d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d0106\
-         0d01060d01060d01060d01060d01060d01060d01060d01065b0b2e25041201000003000101000008010439071c660c33\
-         fb1f7efa1f7dd01a68a51453af1658e21c71fe1f7ff81f7c2704135e0b2fac1556d51a6bcd196793124a4608231f0410\
-         01000003000101000008010439071c660c335b0b2e2504120d01060d01060d01060d01060d01060d01060d01060d0106\
-         0d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d01060d0106\
-         cc1966c61863c01860b9175db21659ab1556a414529c134e95124a8d1147861043cc1966c61863c01860b9175db21659\
-         ab1556a414529c134e95124a8d1147861043cc1966c61863c01860b9175db21659ab1556a414529c134e95124a8d1147\
-         861043cc1966c61863c01860b9175db21659ab1556a414529c134e95124a8d1147861043",
-    ),
-    (
-        "comete",
-        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
-         000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
-         000000d41a6a700e383206193f071f901248f41e7a000000000000000000000000000000000000000000000000000000\
-         000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
-         000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
-         690d355f0c30560a2b4c092642082139071c2f05172504121b030e120209080104690d355f0c30560a2b4c0926420821\
-         39071c2f05172504121b030e120209080104690d355f0c30560a2b4c092642082139071c2f05172504121b030e120209\
-         080104690d355f0c30560a2b4c092642082139071c2f05172504121b030e120209080104",
-    ),
-    (
-        "braise",
-        "630c3138071c1f030f0b01050200011b030d4d0927680d34580b2c3d071e4e0927420821450822440822640c32630c32\
+///
+/// ⚠️ **`vague` et `comete` en ont été retirées par l'issue #148** : leurs images étaient prises en
+/// `bas-haut`, une direction globale dont #148 change le rendu par décision — chaque LED de
+/// ventilateur y est placée sur le schéma de la vue de face, et non plus à sa position 3D.
+/// `braise` n'accepte aucune direction et reste exigée.
+const SANS_PALETTE_EMPREINTES: [(&str, &str); 1] = [(
+    "braise",
+    "630c3138071c1f030f0b01050200011b030d4d0927680d34580b2c3d071e4e0927420821450822440822640c32630c32\
          1b030d4508223c071e510a2825041214020a0b01050901044f0a28a014509e134f6b0d35520a290801040a0105020001\
          710e38ac1556680d34550a2b2304122104100901041c030ef61e7bfe1f7fd51a6b6d0d37620c3137061b7e0f3fd81b6c\
          911248911249c81964f41e7ab11659ad1557b5165aa81554d71a6bfe1f7ff91f7ce91d75c51862b3165ad51a6bdd1b6f\
@@ -633,8 +616,7 @@ const SANS_PALETTE_EMPREINTES: [(&str, &str); 3] = [
          4108204e092733061a0f01070300012004100600030f010733061a520a293c071e2f05174b092543082115020a000000\
          1b030d01000016020b3b071d4b09253206192204114809244b09252a0515070104050002040002230411490925470823\
          2104111b030e440822570b2c3b071d2004100500021a030d4e09275b0b2d4408221c030e",
-    ),
-];
+)];
 
 #[test]
 fn sans_palette_le_catalogue_rend_les_images_figees() {
@@ -708,11 +690,17 @@ fn sans_palette_le_catalogue_rend_les_images_figees() {
     }
 
     // Appareil : les treize familles du catalogue sont couvertes, et non douze.
+    //
+    // ⚠️ Moins celles qui acceptent une direction, depuis #148 — voir [`SANS_PALETTE_DIGESTS`].
     let figees: Vec<&str> = SANS_PALETTE_DIGESTS.iter().map(|(nom, _)| *nom).collect();
+    let sans_direction: Vec<&str> = CATALOGUE
+        .iter()
+        .copied()
+        .filter(|nom| !animation(nom).parametres_acceptes().contains(&"direction"))
+        .collect();
     assert_eq!(
-        figees,
-        CATALOGUE.to_vec(),
-        "le figeage doit couvrir le catalogue entier, dans son ordre"
+        figees, sans_direction,
+        "le figeage doit couvrir le catalogue entier hors familles dirigées, dans son ordre"
     );
 }
 
@@ -731,9 +719,12 @@ fn sans_palette_le_catalogue_rend_les_images_figees() {
 /// l'éclair noir qu'elles portent aujourd'hui, et
 /// [`a_plein_niveau_les_trois_familles_de_127_rendent_la_fin_du_degrade`] demande exactement
 /// l'inverse.
-const BORNEES_DIGESTS: [(&str, &str); 5] = [
-    ("comete", "38ce82045570cc52"),
-    ("balayage", "4a914daa9597ec6c"),
+///
+/// ⚠️ **`comete` et `balayage` en ont été retirées par l'issue #148** : les réglages de
+/// [`reglages_sous_palette`] leur laissent la direction par défaut, `horaire`, une direction
+/// globale dont #148 change le rendu par décision — chaque LED de ventilateur y est placée sur le
+/// schéma de la vue de face, et non plus à sa position 3D.
+const BORNEES_DIGESTS: [(&str, &str); 3] = [
     ("braise", "738917df36e8da4a"),
     ("pouls", "41cf695395bc2152"),
     ("scintillement", "b500003f9cc4bc15"),
@@ -749,23 +740,13 @@ const BORNEES_DIGESTS: [(&str, &str); 5] = [
 /// au pas 54 —, et elles figeaient l'éclair noir : voir la note en tête de fichier. Elles portaient
 /// le seul endroit où l'approche technique de l'issue touchait une famille à index borné, et c'est
 /// ce constat qui a fait réécrire le critère n° 2 plutôt que l'approche.
-const BORNEES_EMPREINTES: [(&str, u32, &str); 2] = [
-    (
-        "comete",
-        17,
-        "000000080000000000000000000000000000000000000000000000080000000000000000000000000000000000000000\
-         000000000000000000080000000000000000000000000000000000000000000000000000000000000000000000000000\
-         000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
-         0000003229082421050000000000000000000000000000000000002722061a1904000000000000000000000000000000\
-         0000002722061a19040000000000000000000000000000000000002722061a1904000000000000000000000000000000\
-         000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
-         000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\
-         000000000000000000000000000000000000000000000000000000000000000000000000",
-    ),
-    (
-        "braise",
-        17,
-        "c89f209751156f2d0b3e00001d00000d0000210000864110ab651aa35e188844115815053a00002300004a0701672509\
+///
+/// ⚠️ **`comete` en a été retirée par l'issue #148**, pour la raison donnée à [`BORNEES_DIGESTS`] :
+/// sa direction par défaut, `horaire`, est globale.
+const BORNEES_EMPREINTES: [(&str, u32, &str); 1] = [(
+    "braise",
+    17,
+    "c89f209751156f2d0b3e00001d00000d0000210000864110ab651aa35e188844115815053a00002300004a0701672509\
          0a00001700000000000c00004d0a024b08022000000b00003300008c47129651150b0000170000360000170000080000\
          520f039c57163400000100005411044c0902190000150000a9631ac89d20d5ba220c00000f00002b00003300006d2b0a\
          c5961fb06c1cb5751debeb33bd851ea8621ab06d1ccaa220c3931fc89d20af6a1c7f3b0e995415e5de24fcfce4dac523\
@@ -773,8 +754,7 @@ const BORNEES_EMPREINTES: [(&str, u32, &str); 2] = [
          0c00002e00006221084905011700000800001900004906015e1d074e0b020700000100001100002b0000440100180000\
          090000170000400000500d030d00000300000000000a00001d00003300001c00000400001c00003a0000200000010000\
          0000000000000000000b00002b0000220000060000210000220000090000000000000000",
-    ),
-];
+)];
 
 #[test]
 fn sous_palette_une_famille_a_index_borne_rend_les_images_figees() {
@@ -841,11 +821,17 @@ fn sous_palette_une_famille_a_index_borne_rend_les_images_figees() {
     }
 
     // Appareil : les cinq familles invariantes sont couvertes, dans l'ordre où l'issue les nomme.
+    //
+    // ⚠️ Moins celles qui acceptent une direction, depuis #148 — voir [`BORNEES_DIGESTS`].
     let figees: Vec<&str> = BORNEES_DIGESTS.iter().map(|(nom, _)| *nom).collect();
+    let sans_direction: Vec<&str> = BORNEES_INVARIANTES
+        .iter()
+        .copied()
+        .filter(|nom| !animation(nom).parametres_acceptes().contains(&"direction"))
+        .collect();
     assert_eq!(
-        figees,
-        BORNEES_INVARIANTES.to_vec(),
-        "le figeage doit couvrir les cinq familles à index borné invariantes"
+        figees, sans_direction,
+        "le figeage doit couvrir les familles à index borné invariantes hors familles dirigées"
     );
 }
 

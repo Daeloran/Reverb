@@ -1665,22 +1665,13 @@ fn artifice_est_un_motif_correle_et_non_un_gresillement() {
 ///
 /// ⚠️ Elles complètent celles que #126 a figées — `vague`, `comete`, `braise` —, et ne les répètent
 /// pas : les deux constantes ensemble couvrent six des dix familles et cinq mécaniques de couleur.
-const FIGEES: [(&str, Rgb, u8, Direction, u32, &str); 3] = [
-    (
-        "respiration",
-        Rgb::new(0xff, 0x20, 0x80),
-        4,
-        Direction::AvantArriere,
-        23,
-        "8310427b0f3d7d0f3e87114495124a9d134f9b134e911248620c315b0b2d5c0b2e660c33720e397a0f3d780f3c6e0d37\
-         580b2c4f0a28450823400820410820480924530a295a0b2d3e071f38071c3106189a134d9b134e3306193a071d3f071f\
-         3e071f38071c3106189a134d9b134e3306193a071d3f071f3e071f38071c3106189a134d9b134e3306193a071d3f071f\
-         33061937061b36061b31061895124a8c11468e114799134c95124a9d134f9b134e9112488310427b0f3d7d0f3e871144\
-         720e397a0f3d780f3c6e0d37620c315b0b2d5c0b2e660c33530a295a0b2d580b2c4f0a28450823400820410820480924\
-         650c33650c33650c33650c33650c33650c33650c33650c33650c33650c33650c33630c31630c31630c31630c31630c31\
-         630c31630c31630c31630c31630c31630c31610c30610c30610c30610c30610c30610c30610c30610c30610c30610c30\
-         610c305e0b2f5e0b2f5e0b2f5e0b2f5e0b2f5e0b2f5e0b2f5e0b2f5e0b2f5e0b2f5e0b2f",
-    ),
+///
+/// ⚠️ **`respiration` (en `avant-arriere`) en a été retirée par l'issue #148.** Son image était
+/// prise sous une direction **globale**, dont #148 change le rendu par décision : chaque LED de
+/// ventilateur y est désormais placée sur le schéma de la vue de face, et non plus à sa position 3D.
+/// `pouls` et `scintillement` n'acceptent aucune direction, #148 ne les touche pas, et leurs
+/// empreintes restent exigées.
+const FIGEES: [(&str, Rgb, u8, Direction, u32, &str); 2] = [
     (
         "pouls",
         Rgb::new(0x20, 0xff, 0x80),
