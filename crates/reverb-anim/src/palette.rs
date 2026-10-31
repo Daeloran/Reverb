@@ -9,12 +9,12 @@
 //!
 //! Chaque famille calcule déjà une **position scalaire** par LED : la projection
 //! sur l'axe demandé, la distance à la pompe, l'angle sur l'anneau, la traversée
-//! du ventilateur. C'est exactement l'entrée d'une palette. Douze palettes
+//! du ventilateur. C'est exactement l'entrée d'une palette. Treize palettes
 //! multiplient donc les familles existantes au lieu d'en ajouter.
 //!
 //! # Provenance et licence
 //!
-//! Les douze dégradés sont repris de **WLED** (`wled00/palettes.cpp`), qui les
+//! Les treize dégradés sont repris de **WLED** (`wled00/palettes.cpp`), qui les
 //! a lui-même importés de **cpt-city** (`seaviewsensing.com`) en leur appliquant
 //! sa correction gamma. Les valeurs sont recopiées **telles que WLED les
 //! porte** : ce sont celles qui produisent, sur une bande, l'aspect que
@@ -33,7 +33,7 @@
 
 use reverb_proto::Rgb;
 
-/// Les noms des douze palettes, dans l'ordre du tableau.
+/// Les noms des treize palettes, dans l'ordre du tableau.
 ///
 /// Cet ordre est celui de l'issue, et il est **figé par un test d'intention** :
 /// c'est celui sous lequel le menu de la fenêtre les présentera, et le
@@ -51,6 +51,8 @@ pub const PALETTES: &[&str] = &[
     "glace",
     "orange-teal",
     "sorbet",
+    // Ajoutée par #146, **en dernier** : l'ordre du menu ne bouge pas.
+    "red-flash",
 ];
 
 /// Un dégradé à arrêts.
@@ -64,7 +66,7 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// La palette de ce nom, ou le refus qui liste les douze.
+    /// La palette de ce nom, ou le refus qui liste les treize.
     ///
     /// Calqué sur `Animation::par_nom` : un nom inconnu ne dit pas seulement
     /// qu'il est inconnu, il dit ce qui existe.
@@ -159,8 +161,9 @@ impl core::fmt::Display for PaletteInconnue {
 
 impl std::error::Error for PaletteInconnue {}
 
-/// Les douze palettes, dans l'ordre où l'issue #126 les énumère.
-const TABLEAU: [(&str, &[(u8, Rgb)]); 12] = [
+/// Les treize palettes : les douze dans l'ordre où l'issue #126 les énumère,
+/// puis `red-flash` (#146).
+const TABLEAU: [(&str, &[(u8, Rgb)]); 13] = [
     // « Light Pink » dans WLED (`Pink_Purple_gp`), 11 arrêts.
     (
         "light-pink",
@@ -838,6 +841,40 @@ const TABLEAU: [(&str, &[(u8, Rgb)]); 12] = [
                     b: 137,
                 },
             ),
+        ],
+    ),
+    // « Red Flash » dans WLED, palette n° 66, 5 arrêts (#146). Relevés sur
+    // le WLED du PC (`/json/palx`, WLED 16.0.1), qui rend `atlantica` à l'identique
+    // des valeurs ci-dessus : même source que les douze.
+    (
+        "red-flash",
+        &[
+            (0, Rgb { r: 0, g: 0, b: 0 }),
+            (
+                99,
+                Rgb {
+                    r: 242,
+                    g: 12,
+                    b: 8,
+                },
+            ),
+            (
+                130,
+                Rgb {
+                    r: 253,
+                    g: 228,
+                    b: 163,
+                },
+            ),
+            (
+                155,
+                Rgb {
+                    r: 242,
+                    g: 12,
+                    b: 8,
+                },
+            ),
+            (255, Rgb { r: 0, g: 0, b: 0 }),
         ],
     ),
 ];
