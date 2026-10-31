@@ -190,7 +190,7 @@ pub struct Eclairage {
     pub direction: Option<usize>,
     /// Rang dans [`reverb_anim::PALETTES`] (#126).
     pub palette: Option<usize>,
-    /// La largeur de `course` (#150). `Some(4)` quand la ligne n'en porte pas :
+    /// La largeur de `course` (#150). `Some(10)` quand la ligne n'en porte pas :
     /// le démon n'écrit pas le défaut, c'est donc ce qui tourne. `None` pour
     /// toute autre famille.
     pub largeur: Option<u8>,
@@ -216,7 +216,7 @@ pub fn eclairage_lu(lignes: &[ResponseLine]) -> Eclairage {
         // éclairage qui n'a jamais existé, et il serait adopté comme tel.
         lu = Eclairage {
             animation: Some(nom.clone()),
-            largeur: (nom == "course").then_some(4),
+            largeur: (nom == "course").then_some(10),
             ..Eclairage::default()
         };
         for (cle, valeur) in reglages {

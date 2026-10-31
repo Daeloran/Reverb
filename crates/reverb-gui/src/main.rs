@@ -468,7 +468,7 @@ impl Pupitre {
                 animation: None,
                 couleur: Rgb::new(0xff, 0x40, 0xff),
                 vitesse: 3.0,
-                largeur: 4,
+                largeur: 10,
                 direction: 0,
                 // Aucune palette au départ : la couleur décide, comme avant #126.
                 palette: None,
@@ -2060,7 +2060,7 @@ fn relever(fenetre: &Fenetre, pupitre: &Pupitre, reglage: &mut Reglage) {
     fenetre.set_vitesse_ecrite(SharedString::from(reverb_anim::ecrire_vitesse(
         reglage.vitesse,
     )));
-    reglage.largeur = u8::try_from(fenetre.get_largeur().clamp(1, 10)).unwrap_or(4);
+    reglage.largeur = u8::try_from(fenetre.get_largeur().clamp(1, 10)).unwrap_or(10);
     reglage.direction = usize::try_from(fenetre.get_direction()).unwrap_or(0);
     // ⚠️ **Le rang 0 du menu vaut « aucune palette »**, et non la première :
     // c'est ce qui laisse la couleur reprendre la main sans une case à cocher de
